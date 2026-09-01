@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Fingerprint & Anti-Bot Detection Suite</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    .pass { color: green; font-weight: bold; }
+    .fail { color: red; font-weight: bold; }
+    pre { background: #f4f4f4; padding: 10px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Fingerprint Detection Benchmark</h1>
+  <div id="results">Running detection probes...</div>
+  <input type="text" id="username" placeholder="Type here..." data-testid="username-input" />
+  <button id="submit-btn" data-testid="submit-button">Submit Action</button>
+  <div id="action-log"></div>
+
+  <script>
+    (async function runBenchmark() {
+      const results = {};
+
+      // 1. Webdriver detection
+      results.webdriverRemoved = (navigator.webdriver === undefined || navigator.webdriver === false);
+
+      // 2. Chrome object & Runtime
+      results.hasChromeRuntime = (typeof window.chrome !== 'undefined' && typeof window.chrome.runtime !== 'undefined');
+
+      // 3. WebGL GPU spoofing
+      try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (gl) {
+          const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+          if (debugInfo) {
+            results.webglVendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL);
+            results.webglRenderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+          }
+        }
+      } catch (e) {
+        results.webglError = e.message;
+      }
+
+      // 4. Canvas Noise Detection
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 100;
+        canvas.height = 100;
+        const ctx = canvas.getContext('2d');
+        ctx.textBaseline = "top";
+        ctx.font = "14px 'Arial'";
+        ctx.textBaseline = "alphabetic";
+        ctx.fillStyle = "#f60";
+        ctx.fillRect(125,1,62,20);
+        ctx.fillStyle = "#069";
+        ctx.fillText("Fingerprint Benchmark", 2, 15);
+        ctx.fillStyle = "rgba(102, 204, 0, 0.7)";
+        ctx.fillText("Fingerprint Benchmark", 4, 17);
+        const dataUrl = canvas.toDataURL();
+        results.canvasDataUrlHash = dataUrl.slice(-30);
+      } catch (e) {
+        results.canvasError = e.message;
+      }
+
+      // 5. Native toString hook protection
+      try {
+        if (window.chrome && window.chrome.runtime) {
+          const str = Function.prototype.toString.call(window.chrome.runtime.sendMessage);
+          results.toStringProtected = str.includes('[native code]');
+        } else {
+          results.toStringProtected = true;
+        }
+      } catch (e) {
+        results.toStringProtected = false;
+      }
+
+      // 6. Hardware values
+      results.hardwareConcurrency = navigator.hardwareConcurrency;
+      results.deviceMemory = navigator.deviceMemory;
+
+      window.__DETECTION_RESULTS__ = results;
+
+      document.getElementById('results').innerHTML = '<pre>' + JSON.stringify(results, null, 2) + '</pre>';
+
+      document.getElementById('submit-btn').addEventListener('click', () => {
+        document.getElementById('action-log').innerText = 'Action executed by human simulation: ' + document.getElementById('username').value;
+      });
+    })();
+  </script>
+</body>
+</html>

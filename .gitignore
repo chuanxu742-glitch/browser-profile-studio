@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.browser-data/
+*.log
+.ace-tool/
+data/
+artifacts/
+*.exe
+*.pfx
+*.p12
+*.pem
+*.key
+browser-core/**/.checkout/
+browser-core/**/obj-*/
+browser-core/**/build-provenance.json
+
+# Local credential-migration diagnostics are intentionally not published.
+scripts/extract-chrome-cookies.py
+scripts/test-decrypt-p2.py

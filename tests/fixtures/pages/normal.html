@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Automation fixture</title></head>
+  <body>
+    <main>
+      <h1>Local fixture</h1>
+      <form id="fixture-form">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" data-testid="email-input" />
+        <label for="choice">Choice</label>
+        <select id="choice" name="choice">
+          <option value="one">One</option>
+          <option value="two">Two</option>
+        </select>
+        <button type="button" id="save" data-testid="save-button">Save</button>
+        <output id="result" aria-live="polite"></output>
+      </form>
+    </main>
+    <script>
+      document.querySelector('#save').addEventListener('click', () => {
+        document.querySelector('#result').textContent = 'Saved';
+      });
+    </script>
+  </body>
+</html>
+

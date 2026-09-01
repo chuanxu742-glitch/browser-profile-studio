@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  # 分布式消息队列与集群状态中心
+  redis:
+    image: redis:7-alpine
+    container_name: antigravity-crawler-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Optional HTTP/WS control plane. Protect CONTROL_PLANE_TOKEN and keep the
+  # port private unless an authenticated reverse proxy is configured.
+  browser-control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: antigravity-browser-control-plane
+    environment:
+      - NODE_ENV=production
+      - CONTROL_PLANE_HOST=0.0.0.0
+      - CONTROL_PLANE_PORT=8081
+      - CONTROL_PLANE_TOKEN=${CONTROL_PLANE_TOKEN:?set CONTROL_PLANE_TOKEN}
+      - BROWSER_ALLOWED_HOSTS=${BROWSER_ALLOWED_HOSTS:?set BROWSER_ALLOWED_HOSTS to approved hosts}
+      - BROWSER_ALLOW_HTTP=${BROWSER_ALLOW_HTTP:-false}
+      - BROWSER_ALLOW_PRIVATE_NETWORK=${BROWSER_ALLOW_PRIVATE_NETWORK:-false}
+      - BROWSER_MAX_SESSIONS=${BROWSER_MAX_SESSIONS:-2}
+      - BROWSER_TIMEOUT_MS=${BROWSER_TIMEOUT_MS:-15000}
+      - BROWSER_DATA_DIR=/var/lib/compliant-firefox
+      - BROWSER_PERSIST_PROFILES=${BROWSER_PERSIST_PROFILES:-false}
+    command: ["node", "dist/control-plane-entrypoint.js"]
+    ports:
+      - "127.0.0.1:${CONTROL_PLANE_PORT:-8081}:8081"
+    volumes:
+      - control-plane-browser-data:/var/lib/compliant-firefox
+    restart: unless-stopped
+
+  # MCP master remains a local stdio process. Point it at this Redis instance
+  # with REDIS_URL when cluster_* tools are enabled.
+  # Worker 节点 1
+  crawler-worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: antigravity-crawler-worker-1
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - REDIS_MODE=${REDIS_MODE:-standalone}
+      - REDIS_SHARD_COUNT=${REDIS_SHARD_COUNT:-16}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
+      - WORKER_ID=worker-1
+      - WORKER_TENANTS=${WORKER_TENANTS:-default}
+      - NODE_ENV=production
+      - BROWSER_ALLOWED_HOSTS=${BROWSER_ALLOWED_HOSTS:?set BROWSER_ALLOWED_HOSTS to approved hosts}
+      - BROWSER_ALLOW_HTTP=${BROWSER_ALLOW_HTTP:-false}
+      - BROWSER_ALLOW_PRIVATE_NETWORK=${BROWSER_ALLOW_PRIVATE_NETWORK:-false}
+      - BROWSER_MAX_SESSIONS=${BROWSER_MAX_SESSIONS:-2}
+      - BROWSER_TIMEOUT_MS=${BROWSER_TIMEOUT_MS:-15000}
+      - BROWSER_DATA_DIR=/var/lib/compliant-firefox
+      - BROWSER_PERSIST_PROFILES=${BROWSER_PERSIST_PROFILES:-false}
+    command: ["node", "dist/distributed/worker-entrypoint.js"]
+    restart: unless-stopped
+    volumes:
+      - worker-1-browser-data:/var/lib/compliant-firefox
+
+  # Worker 节点 2
+  crawler-worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: antigravity-crawler-worker-2
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - REDIS_MODE=${REDIS_MODE:-standalone}
+      - REDIS_SHARD_COUNT=${REDIS_SHARD_COUNT:-16}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
+      - WORKER_ID=worker-2
+      - WORKER_TENANTS=${WORKER_TENANTS:-default}
+      - NODE_ENV=production
+      - BROWSER_ALLOWED_HOSTS=${BROWSER_ALLOWED_HOSTS:?set BROWSER_ALLOWED_HOSTS to approved hosts}
+      - BROWSER_ALLOW_HTTP=${BROWSER_ALLOW_HTTP:-false}
+      - BROWSER_ALLOW_PRIVATE_NETWORK=${BROWSER_ALLOW_PRIVATE_NETWORK:-false}
+      - BROWSER_MAX_SESSIONS=${BROWSER_MAX_SESSIONS:-2}
+      - BROWSER_TIMEOUT_MS=${BROWSER_TIMEOUT_MS:-15000}
+      - BROWSER_DATA_DIR=/var/lib/compliant-firefox
+      - BROWSER_PERSIST_PROFILES=${BROWSER_PERSIST_PROFILES:-false}
+    command: ["node", "dist/distributed/worker-entrypoint.js"]
+    restart: unless-stopped
+    volumes:
+      - worker-2-browser-data:/var/lib/compliant-firefox
+
+volumes:
+  redis-data:
+  worker-1-browser-data:
+  worker-2-browser-data:
+  control-plane-browser-data:

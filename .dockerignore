@@ -1,0 +1,9 @@
+node_modules
+dist
+.browser-data
+.git
+.env
+*.log
+coverage
+tests
+docs

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "engine": "firefox",
+  "browserVersion": "153.0",
+  "playwrightVersion": "1.62.1",
+  "playwrightBrowserRevision": "1538",
+  "playwrightGitRevision": "26a9e470a7b3c7822084b09fb7f13902c5f37b51",
+  "playwrightRepository": "https://github.com/microsoft/playwright.git",
+  "mozillaRepository": "https://github.com/mozilla-firefox/firefox.git",
+  "mozillaBranch": "release",
+  "mozillaRevision": "f1b6c0f86b96b7e0688c26f65803576f27cdaf88",
+  "patches": [
+    "patches/0001-service-worker-fingerprint-overrides.patch"
+  ]
+}

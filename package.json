@@ -1,0 +1,61 @@
+{
+  "name": "compliant-firefox-automation-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chuanxu742-glitch/antigravity-browser.git"
+  },
+  "homepage": "https://github.com/chuanxu742-glitch/antigravity-browser#readme",
+  "bugs": {
+    "url": "https://github.com/chuanxu742-glitch/antigravity-browser/issues"
+  },
+  "description": "Browser profile isolation and policy-gated Firefox automation MCP baseline",
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example",
+    "mcp-config.example.json"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "node -e \"const fs=require('node:fs'),p=require('node:path'),r=p.resolve(process.cwd()),t=p.resolve(r,'dist');if(p.dirname(t)!==r)throw new Error('unsafe dist path');fs.rmSync(t,{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run typecheck && npm run test:unit && npm run test:mcp && npm run test:integration",
+    "test:unit": "vitest run --dir tests/unit",
+    "test:mcp": "vitest run --dir tests/mcp",
+    "test:integration": "vitest run --dir tests/integration",
+    "test:firefox": "vitest run tests/integration/firefox-real.test.ts",
+    "test:fingerprint-runtime": "vitest run tests/integration/fingerprint-runtime-real.test.ts",
+    "test:extensions": "vitest run tests/integration/managed-extension-real.test.ts",
+    "test:benchmarks": "node --import tsx/esm scripts/run-online-benchmarks.ts",
+    "studio": "node --import tsx/esm scripts/start-studio.ts",
+    "demo": "node --import tsx/esm scripts/demo-headed-check.ts",
+    "start": "node dist/index.js",
+    "start:control-plane": "node dist/control-plane-entrypoint.js",
+    "start:worker": "node dist/distributed/worker-entrypoint.js",
+    "install:firefox": "playwright install firefox",
+    "install:chromium": "playwright install chromium",
+    "install:browsers": "playwright install firefox chromium"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "fflate": "^0.8.2",
+    "ioredis": "^6.0.0",
+    "playwright": "1.62.1",
+    "ws": "^8.21.3",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.21",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.13",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}

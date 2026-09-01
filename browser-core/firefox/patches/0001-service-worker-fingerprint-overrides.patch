@@ -1,0 +1,67 @@
+diff --git a/dom/workers/RuntimeService.cpp b/dom/workers/RuntimeService.cpp
+--- a/dom/workers/RuntimeService.cpp
++++ b/dom/workers/RuntimeService.cpp
+@@ -25,5 +25,6 @@
+ #include "mozilla/Preferences.h"
+ #include "mozilla/ScopeExit.h"
++#include "mozilla/StaticPrefs_dom.h"
+ #include "mozilla/StaticPrefs_javascript.h"
+ #include "mozilla/TimeStamp.h"
+ #include "mozilla/dom/AtomList.h"
+@@ -2012,5 +2013,11 @@ void RuntimeService::MemoryPressureAllWorkers() {
+ uint32_t RuntimeService::ClampedHardwareConcurrency(bool aRFPHardcoded,
+                                                     bool aRFPTiered) const {
++  const uint32_t fingerprintOverride =
++      StaticPrefs::dom_antigravityFingerprintHardwareConcurrency();
++  if (MOZ_UNLIKELY(fingerprintOverride > 0)) {
++    return fingerprintOverride;
++  }
++
+   // The Firefox Hardware Report says 34% of Firefox users have exactly 4 cores.
+   // When the resistFingerprinting pref is set, we want to blend into the crowd
+   // so spoof navigator.hardwareConcurrency = 4 to reduce user uniqueness. On
+diff --git a/dom/workers/WorkerPrivate.cpp b/dom/workers/WorkerPrivate.cpp
+--- a/dom/workers/WorkerPrivate.cpp
++++ b/dom/workers/WorkerPrivate.cpp
+@@ -33,5 +33,6 @@
+ #include "mozilla/ExtensionPolicyService.h"
+ #include "mozilla/Mutex.h"
++#include "mozilla/Preferences.h"
+ #include "mozilla/ProfilerLabels.h"
+ #include "mozilla/ProfilerMarkers.h"
+ #include "mozilla/Result.h"
+@@ -2918,6 +2919,17 @@ WorkerPrivate::WorkerPrivate(
+ 
+     RuntimeService::GetDefaultJSSettings(mJSSettings);
+ 
++    // Service workers have no browsing context, so Playwright's per-context
++    // timezone never reaches their WorkerLoadInfo. Apply the profile-wide
++    // override before the worker RealmOptions are initialized.
++    if (mWorkerKind == WorkerKindService) {
++      nsAutoString timezoneOverride;
++      if (NS_SUCCEEDED(Preferences::GetString(
++              "dom.antigravityFingerprintTimezone", timezoneOverride))) {
++        mLoadInfo.mTimezoneOverride = timezoneOverride;
++      }
++    }
++
+     {
+       JS::RealmOptions& chromeRealmOptions = mJSSettings.chromeRealmOptions;
+       JS::RealmOptions& contentRealmOptions = mJSSettings.contentRealmOptions;
+diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -5856,6 +5856,13 @@
+   value: 128
+   mirror: always
+ 
++# Exact profile value used by the version-locked automation core. A value of
++# zero keeps upstream Firefox behavior.
++- name: dom.antigravityFingerprintHardwareConcurrency
++  type: RelaxedAtomicUint32
++  value: 0
++  mirror: always
++
+ # W3C pointer events draft.
+ - name: dom.w3c_pointer_events.implicit_capture
+   type: bool

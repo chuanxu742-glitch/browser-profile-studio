@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity 指纹浏览器 - 独立隔离沙箱</title>
+  <style>
+    :root {
+      --bg-main: #0b0f19;
+      --bg-card: #151d30;
+      --border-color: #263554;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #6366f1;
+      --success: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+    body {
+      background: var(--bg-main);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      max-width: 860px;
+      width: 100%;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 20px;
+      margin-bottom: 24px;
+    }
+    .title-group { display: flex; align-items: center; gap: 12px; }
+    .logo-badge {
+      width: 44px;
+      height: 44px;
+      background: linear-gradient(135deg, #6366f1, #a855f7);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+    }
+    h1 { font-size: 20px; font-weight: 700; color: #fff; }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(34, 197, 94, 0.15);
+      border: 1px solid rgba(34, 197, 94, 0.4);
+      color: var(--success);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pulse-dot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; box-shadow: 0 0 8px var(--success); }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 24px; }
+    .card {
+      background: rgba(11, 15, 25, 0.6);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 14px 18px;
+    }
+    .card-label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+    .card-value { font-size: 14px; font-weight: 600; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .shortcuts-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #cbd5e1; }
+    .shortcuts-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .btn-quick {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: var(--border-color);
+      color: #fff;
+      text-decoration: none;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .btn-quick:hover {
+      background: var(--accent);
+      transform: translateY(-2px);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title-group">
+        <div class="logo-badge">🛡️</div>
+        <div>
+          <h1 id="env-title">Antigravity 指纹环境沙箱</h1>
+          <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">独立 Profile · 持久隔离存储 · 策略约束自动化</p>
+        </div>
+      </div>
+      <div class="status-badge">
+        <span class="pulse-dot"></span>
+        <span>隔离环境运行中 (READY)</span>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-label">环境标识 (Profile ID)</div>
+        <div class="card-value" id="val-pid">prf_custom_env</div>
+      </div>
+      <div class="card">
+        <div class="card-label">硬件环境配置</div>
+        <div class="card-value" id="val-gpu">NVIDIA GeForce RTX 4090 (Direct3D11)</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Canvas 配置</div>
+        <div class="card-value" id="val-canvas" style="color: #4ade80;">🟢 Profile 内确定性配置已加载</div>
+      </div>
+      <div class="card">
+        <div class="card-label">WebRTC 真实 IP 拦截</div>
+        <div class="card-value" style="color: #4ade80;">🟢 暴露面限制已启用，请以代理实测结果为准</div>
+      </div>
+      <div class="card">
+        <div class="card-label">操作系统与语言配置</div>
+        <div class="card-value" id="val-os">Windows NT 10.0 · zh-CN · Asia/Shanghai</div>
+      </div>
+      <div class="card">
+        <div class="card-label">自动化原型链状态</div>
+        <div class="card-value" style="color: #4ade80;">🟢 自动化策略已加载（无隐身或绕过承诺）</div>
+      </div>
+    </div>
+
+    <div class="shortcuts-title">🚀 常用直达快捷入口 (会话与 Cookie 自动持久化)：</div>
+    <div class="shortcuts-grid">
+      <a href="https://chat.deepseek.com/" class="btn-quick">🤖 DeepSeek</a>
+      <a href="https://www.doubao.com/chat/" class="btn-quick">🟣 字节豆包</a>
+      <a href="https://tongyi.aliyun.com/" class="btn-quick">🟠 通义千问</a>
+      <a href="https://kimi.moonshot.cn/" class="btn-quick">🔵 月之暗面 Kimi</a>
+      <a href="https://www.iwencai.com/" class="btn-quick">📊 同花顺问财</a>
+      <a href="http://www.cninfo.com.cn/" class="btn-quick">📑 巨潮资讯</a>
+      <a href="https://xueqiu.com/" class="btn-quick">❄️ 雪球网</a>
+      <a href="https://data.eastmoney.com/" class="btn-quick">📈 东方财富</a>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const pid = params.get('profileId') || 'prf_active_session';
+    const name = params.get('name') || 'Antigravity 指纹环境沙箱';
+    document.getElementById('env-title').textContent = name;
+    document.getElementById('val-pid').textContent = pid;
+  </script>
+</body>
+</html>

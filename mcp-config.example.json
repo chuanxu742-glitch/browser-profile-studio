@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "compliant-firefox": {
+      "command": "node",
+      "args": ["C:\\path\\to\\antigravity-browser\\dist\\index.js"],
+      "env": {
+        "BROWSER_ALLOWED_HOSTS": "test.example.com,*.staging.example.com",
+        "BROWSER_ALLOW_HTTP": "false",
+        "BROWSER_ALLOW_PRIVATE_NETWORK": "false",
+        "BROWSER_MAX_SESSIONS": "2",
+        "BROWSER_TIMEOUT_MS": "15000"
+      }
+    }
+  }
+}

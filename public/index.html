@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity Browser Studio - 本地隔离浏览器控制台</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="dark-theme">
+  <div class="app-layout">
+    <!-- 左侧导航栏 -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"></path>
+            <path d="M12 6v6l4 2"></path>
+            <path d="M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z"></path>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h2>BrowserStudio</h2>
+          <span class="badge-sub">v1.2.0 • UltraLite</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="profiles">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+          <span>环境管理</span>
+          <span class="counter" id="profiles-count">0</span>
+        </button>
+        <button class="nav-item" data-tab="proxies">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+          <span>代理管理</span>
+        </button>
+        <button class="nav-item" data-tab="tasks">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+          <span>投研与数据采集</span>
+          <span class="tag-hot">A股预设</span>
+        </button>
+        <button class="nav-item" data-tab="geo">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path><path d="M2 12h20"></path></svg>
+          <span>GEO (AI搜索优化)</span>
+          <span class="tag-hot" style="background: rgba(99, 102, 241, 0.2); color: #818cf8;">DeepSeek/豆包/千问</span>
+        </button>
+        <button class="nav-item" data-tab="migration">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          <span>数据与指纹迁移</span>
+        </button>
+        <button class="nav-item" data-tab="team">
+          <span style="width:18px;text-align:center">👥</span><span>团队与权限</span>
+        </button>
+        <button class="nav-item" data-tab="extensions">
+          <span style="width:18px;text-align:center">🧩</span><span>扩展中心</span>
+        </button>
+        <button class="nav-item" data-tab="settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          <span>内核与系统</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="engine-indicator">
+          <span class="status-dot online"></span>
+          <div class="engine-info">
+            <span class="engine-title">Local Engine Ready</span>
+            <span class="engine-sub" id="active-sessions-text">0 个活动会话</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 右侧主内容区 -->
+    <main class="main-content">
+      <!-- 顶部 Header -->
+      <header class="top-header">
+        <div class="header-left">
+          <h1 id="page-title">环境管理中心</h1>
+          <p id="page-subtitle">管理所有独立隔离指纹浏览器沙箱，支持多开、代理与指纹伪装</p>
+        </div>
+        <div class="header-actions" id="header-actions">
+          <div class="quick-launch-box" style="display: flex; gap: 8px; align-items: center; background: rgba(15, 23, 42, 0.6); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+            <input type="text" id="quick-url-input" placeholder="输入任意网址如: https://chat.deepseek.com" value="https://chat.deepseek.com/" style="background: transparent; border: none; color: #fff; font-size: 12px; width: 260px; outline: none;" />
+            <button class="btn btn-sm btn-primary" id="btn-quick-launch-url">🚀 立即弹出指纹窗口</button>
+          </div>
+          <button class="btn btn-secondary" id="btn-refresh">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            刷新
+          </button>
+          <button class="btn btn-primary" id="btn-create-profile">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            新建浏览器环境
+          </button>
+        </div>
+      </header>
+
+      <!-- 选项卡 1：环境管理 (Profiles) -->
+      <section class="tab-content active" id="tab-profiles">
+        <!-- 快速统计卡片 -->
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-icon purple">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value" id="stat-total-profiles">0</span>
+              <span class="stat-label">总环境数</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon green">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value" id="stat-running-sessions">0</span>
+              <span class="stat-label">运行中窗口</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon blue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value" id="stat-proxy-count">0</span>
+              <span class="stat-label">绑定代理</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon orange">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value">策略启用</span>
+              <span class="stat-label">安全门状态</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 环境列表卡片与工具栏 -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="search-box">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" id="filter-profiles-input" placeholder="搜索环境名称、ID、代理或标签..." />
+            </div>
+            <div class="panel-header-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button class="btn btn-sm btn-primary" id="btn-import-csv" title="从 CSV / Excel 批量导入环境">
+                📥 批量导入 CSV
+              </button>
+              <button class="btn btn-sm btn-outline" id="btn-export-csv" title="导出当前所有环境为 CSV">
+                📤 导出 CSV
+              </button>
+              <button class="btn btn-sm btn-success" id="btn-batch-start-all" title="批量多开所有浏览器窗口">
+                ▶ 批量多开
+              </button>
+              <button class="btn btn-sm btn-outline" id="btn-tile-windows" title="一键将运行中的窗口九宫格整齐平铺在桌面">
+                ⚡ 窗口九宫格平铺
+              </button>
+              <button class="btn btn-sm btn-outline" id="btn-open-synchronizer" title="打开主从键鼠群控同步器">
+                🔗 群控同步器
+              </button>
+              <button class="btn btn-sm btn-danger" id="btn-batch-stop-all" title="一键关闭所有已运行窗口">
+                ⏹ 全部关闭
+              </button>
+              <button class="btn btn-sm btn-secondary" id="btn-quick-sample">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                A股预设
+              </button>
+            </div>
+          </div>
+
+          <!-- 环境表格 -->
+          <div class="table-container">
+            <table class="data-table" id="profiles-table">
+              <thead>
+                <tr>
+                  <th style="width: 50px;">序号</th>
+                  <th>环境名称 / ID</th>
+                  <th>浏览器内核</th>
+                  <th>代理与地区</th>
+                  <th>指纹特征</th>
+                  <th>Cookie 状态</th>
+                  <th>创建时间</th>
+                  <th style="text-align: right;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="profiles-tbody">
+                <!-- 动态渲染 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 选项卡 2：代理管理 (Proxies) -->
+      <section class="tab-content" id="tab-proxies">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <h3>代理配置与批量测速</h3>
+              <p>支持 HTTP / HTTPS / SOCKS5 代理协议；明确区分端口可达与已验证的真实出口 IP</p>
+            </div>
+          </div>
+          <div class="proxy-test-box">
+            <div class="form-group">
+              <label>单条代理快速测试 (格式: <code>protocol://user:pass@host:port</code> 或 <code>host:port:user:pass</code>)</label>
+              <div class="input-with-btn">
+                <input type="text" id="quick-proxy-input" placeholder="例如: socks5://127.0.0.1:10808 或 http://user:pwd@114.114.114.114:8080" />
+                <button class="btn btn-primary" id="btn-test-single-proxy">🧪 立即测试连通性</button>
+              </div>
+            </div>
+            <div class="proxy-test-result" id="proxy-test-result" style="display: none;">
+              <!-- 测试结果输出 -->
+            </div>
+          </div>
+          <div class="panel" style="margin-top:16px;background:rgba(15,23,42,.55)">
+            <div class="panel-header"><div class="panel-title"><h3>持久代理池</h3><p>代理密码加密保存，支持健康检查、标签筛选和 Profile 轮换绑定</p></div></div>
+            <div class="form-row">
+              <div class="form-group flex-1"><label>名称</label><input id="pool-proxy-name" placeholder="美国住宅-01"></div>
+              <div class="form-group flex-2"><label>代理地址</label><input id="pool-proxy-server" placeholder="socks5://user:pass@host:port"></div>
+              <div class="form-group flex-1"><label>标签</label><input id="pool-proxy-tags" placeholder="US,住宅"></div>
+              <button class="btn btn-primary" id="btn-add-pool-proxy">加入代理池</button>
+            </div>
+            <div id="proxy-pool-list" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 选项卡 3：投研与数据采集自动化 (Tasks) -->
+      <section class="tab-content" id="tab-tasks">
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><h3>声明式 RPA 工作流</h3><p>支持变量插值、条件、循环、重试、错误策略、截图产物、定时/周期执行和持久日志</p></div></div>
+          <div class="form-row">
+            <div class="form-group flex-1"><label>工作流名称</label><input id="rpa-name" placeholder="后台数据检查"></div>
+            <div class="form-group flex-1"><label>运行环境</label><select id="rpa-profile-select"><option value="">请选择 Profile</option></select></div>
+            <div class="form-group flex-1"><label>计划时间（选填）</label><input id="rpa-scheduled-at" type="datetime-local"></div>
+            <div class="form-group flex-1"><label>周期分钟（选填，最少 1）</label><input id="rpa-interval-minutes" type="number" min="1" step="1" placeholder="不重复"></div>
+            <button class="btn btn-secondary" id="btn-save-rpa">保存工作流</button>
+          </div>
+          <div class="form-group"><label>步骤 JSON</label><textarea id="rpa-steps" rows="6">[
+  {"op":"open","url":"https://example.com"},
+  {"op":"snapshot"}
+]</textarea></div>
+          <div id="rpa-workflow-list"></div>
+          <div id="rpa-task-list" style="margin-top:12px"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <h3>10 大 A股财经投研自动化数据采集中心</h3>
+              <p>在已获授权的网站执行有界采集；遇到挑战自动暂停并转交人工处理</p>
+            </div>
+          </div>
+          <div class="crawler-grid">
+            <div class="crawler-preset-card" data-site="iwencai" data-url="https://www.iwencai.com/unifiedwap/home/index">
+              <div class="crawler-card-header">
+                <span class="crawler-badge">量化选股</span>
+                <h4>同花顺问财</h4>
+              </div>
+              <p>在已有访问权限和站点规则允许的范围内读取公开页面内容。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="cninfo" data-url="http://www.cninfo.com.cn/new/index">
+              <div class="crawler-card-header">
+                <span class="crawler-badge green">法定信披</span>
+                <h4>巨潮资讯</h4>
+              </div>
+              <p>官方披露一手公告、年报中报、监管函件、减持回购无噪音采集。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="jisilu" data-url="https://www.jisilu.cn/data/cbnew/#cb">
+              <div class="crawler-card-header">
+                <span class="crawler-badge orange">套利防守</span>
+                <h4>集思录</h4>
+              </div>
+              <p>ETF/LOF 折溢价、可转债强赎与转股溢价率数据实时监控抓取。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="eastmoney" data-url="https://guba.eastmoney.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge red">散户舆情</span>
+                <h4>东方财富股吧</h4>
+              </div>
+              <p>热门个股吧人气排行、短线题材启动信号与散户情绪追踪。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="stockstar" data-url="https://www.stockstar.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">财务同行对比</span>
+                <h4>证券之星</h4>
+              </div>
+              <p>个股估值指标、历年财务横向对比及公开资金数据。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="robo" data-url="https://robo.datayes.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge purple">AI投研</span>
+                <h4>萝卜投研</h4>
+              </div>
+              <p>机构盈利预测看板、可视化财报图表提取。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="xingqiao" data-url="https://xingqiao-advisor.vercel.app/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">宏观/轮动</span>
+                <h4>星桥财经课</h4>
+              </div>
+              <p>大类资产轮动实盘数据、宏观政策与产业链上下游中线逻辑跟踪。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="mybbond" data-url="https://www.mybbond.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge orange">券商研报</span>
+                <h4>迈博汇金</h4>
+              </div>
+              <p>全市场券商研报深度聚合、机构一致预期与行业调研报告。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="stats" data-url="https://www.stats.gov.cn/sj/zxfb/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge green">宏观大周期</span>
+                <h4>国家统计局</h4>
+              </div>
+              <p>国内官方宏观数据库，PMI、社融、CPI/PPI、工业增加值大周期数据。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="cls" data-url="https://www.cls.cn/telegraph">
+              <div class="crawler-card-header">
+                <span class="crawler-badge red">7x24突发快讯</span>
+                <h4>财联社电报</h4>
+              </div>
+              <p>在授权范围内浏览公开快讯、上市公司动态与政策信息。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="wsn" data-url="https://wallstreetcn.com/live/global">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">全球宏观</span>
+                <h4>华尔街见闻</h4>
+              </div>
+              <p>海外央行决议、大宗商品异动、全球大类资产联动实时快讯与深度解析。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="irm" data-url="https://irm.cninfo.com.cn/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge green">董秘问答一手</span>
+                <h4>深交所互动易</h4>
+              </div>
+              <p>上市公司董秘第一手官方问答，挖掘供应链实锤、题材预热核心认知差。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="jiuyan" data-url="https://www.jiuyangongshe.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge orange">游资题材拆解</span>
+                <h4>韭研公社</h4>
+              </div>
+              <p>硬核短线题材逻辑拆解、热点事件驱动分析与涨停逻辑梳理。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="kaipanla" data-url="https://www.kaipanla.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge red">短线连板打板</span>
+                <h4>开盘啦</h4>
+              </div>
+              <p>游资席位龙虎榜追踪、连板梯队、炸板率与赚钱效应情绪周期。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="100ppi" data-url="http://www.100ppi.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge purple">大宗商品现货</span>
+                <h4>生意社</h4>
+              </div>
+              <p>化工、有色、橡塑每日出厂现货报价、商品涨跌榜与周期股景气度。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="lixinger" data-url="https://www.lixinger.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">估值与财务</span>
+                <h4>理杏仁</h4>
+              </div>
+              <p>高精度历年财务指标、PB-ROE 选股矩阵、全市场行业估值中位数。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="xueqiu" data-url="https://xueqiu.com/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">社区/热帖</span>
+                <h4>雪球网</h4>
+              </div>
+              <p>投资者深度长文、热门讨论榜单、个股组合调仓动向。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="sse" data-url="https://www.sse.com.cn/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge green">法定交易所</span>
+                <h4>上海证券交易所</h4>
+              </div>
+              <p>官方权威监管公告、大宗交易、融资融券官方数据源。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="sina" data-url="https://finance.sina.com.cn/stock/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge orange">全市场行情</span>
+                <h4>新浪财经</h4>
+              </div>
+              <p>大盘实时行情分时、行业板块涨跌排行、资金流入流出看板。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+
+            <div class="crawler-preset-card" data-site="ifind" data-url="https://ifind.10jqka.com.cn/">
+              <div class="crawler-card-header">
+                <span class="crawler-badge red">资金情绪/两融</span>
+                <h4>同花顺 iFinD</h4>
+              </div>
+              <p>概念题材热度、北向资金、两融余额与盘中大单资金脉冲监测。</p>
+              <button class="btn btn-sm btn-primary btn-run-crawler">🚀 启动采集</button>
+            </div>
+          </div>
+
+          <!-- 采集结果输出区域 -->
+          <div class="crawler-result-panel" id="crawler-result-panel" style="display: none;">
+            <div class="panel-header">
+              <h4 id="crawler-result-title">抓取结果</h4>
+              <div class="header-actions">
+                <button class="btn btn-sm btn-secondary" id="btn-close-crawler-result">关闭</button>
+              </div>
+            </div>
+            <div class="crawler-result-body" id="crawler-result-body">
+              <!-- 动态内容 -->
+            </div>
+
+            <!-- AI 投研大脑推理栏 -->
+            <div class="ai-analysis-bar" style="margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-color);">
+              <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                <span style="font-weight: 700; color: #818cf8;">🧠 发送至 AI 大脑深度推理：</span>
+                <select id="ai-provider-select" style="background: var(--bg-surface); border: 1px solid var(--border-color); color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 12px;">
+                  <option value="deepseek">DeepSeek (R1 API)</option>
+                  <option value="qwen">通义千问 (Qwen-Max 产业分析)</option>
+                  <option value="doubao">字节豆包 (Doubao-Pro 极速提炼)</option>
+                </select>
+                <input type="password" id="ai-key-input" placeholder="输入 API Key (留空使用内置体验模式)" style="background: var(--bg-surface); border: 1px solid var(--border-color); color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 12px; flex: 1;" />
+                <button class="btn btn-sm btn-primary" id="btn-run-ai-analysis">⚡ 立即深度推理</button>
+              </div>
+              <div class="ai-result-box" id="ai-result-box" style="display: none; background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.3); border-radius: 8px; padding: 14px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; color: #e2e8f0;">
+                <!-- AI 输出 -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 选项卡：GEO 生成式引擎优化 (GEO Hub) -->
+      <section class="tab-content" id="tab-geo">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <h3>🌐 GEO (Generative Engine Optimization) 生成式引擎优化工作台</h3>
+              <p>针对 DeepSeek、豆包、通义千问网页端进行多地域指纹隔离多开、AI 搜索品牌占位与推荐提及率实时监测</p>
+            </div>
+            <div class="panel-header-actions">
+              <button class="btn btn-sm btn-primary" id="btn-generate-geo-profiles">
+                ⚡ 一键批量生成 AI 网页多地域沙箱 (京/沪/粤/川/港/美)
+              </button>
+            </div>
+          </div>
+
+          <!-- GEO AI 网页端矩阵卡片 (国内 + 海外主流全覆盖) -->
+          <div class="crawler-grid">
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">深度推理旗舰</span>
+                <h4>DeepSeek 网页端</h4>
+              </div>
+              <p>官方入口：<code>chat.deepseek.com</code>。每个 Profile 使用独立的持久存储。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://chat.deepseek.com/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge purple">字节跳动AI</span>
+                <h4>豆包网页端</h4>
+              </div>
+              <p>官方入口：<code>doubao.com</code>。支持独立 Profile 与按需代理绑定。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://www.doubao.com/chat/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge orange">阿里巴巴AI</span>
+                <h4>通义千问网页端</h4>
+              </div>
+              <p>官方入口：<code>tongyi.aliyun.com</code>。阿里云多账号隔离，全天候保持登录 Session。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://tongyi.aliyun.com/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">长文本/科研</span>
+                <h4>Kimi 网页端</h4>
+              </div>
+              <p>官方入口：<code>kimi.moonshot.cn</code>。月之暗面长文本大模型，多账号环境隔离防串号。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://kimi.moonshot.cn/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge green">GEO核心搜索引擎</span>
+                <h4>秘塔 AI 搜索</h4>
+              </div>
+              <p>官方入口：<code>metaso.cn</code>。无广告权威 AI 搜索，GEO 品牌与知识库引用占位必选平台。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://metaso.cn/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge red">腾讯生态AI</span>
+                <h4>腾讯元宝</h4>
+              </div>
+              <p>官方入口：<code>yuanbao.tencent.com</code>。打通微信公众号生态的 AI 引擎，多地域流量监测。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://yuanbao.tencent.com/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge purple">清华系大模型</span>
+                <h4>智谱清言 (GLM)</h4>
+              </div>
+              <p>官方入口：<code>chatglm.cn</code>。GLM 系列中文大模型，多账号独立登录与智能体对话。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://chatglm.cn/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge green">全球AI霸主</span>
+                <h4>ChatGPT (OpenAI)</h4>
+              </div>
+              <p>官方入口：<code>chatgpt.com</code>。可绑定由用户提供并验证的代理；不承诺绕过挑战或避免账号限制。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://chatgpt.com/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge orange">海外最强写作/代码</span>
+                <h4>Claude (Anthropic)</h4>
+              </div>
+              <p>官方入口：<code>claude.ai</code>。极严苛的风控检测，配合真实 WebRTC 拦截与海外指纹环境。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://claude.ai/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+
+            <div class="crawler-preset-card">
+              <div class="crawler-card-header">
+                <span class="crawler-badge blue">全球AI搜索之王</span>
+                <h4>Perplexity AI</h4>
+              </div>
+              <p>官方入口：<code>perplexity.ai</code>。全球最大 AI 搜索引擎，全球化 GEO 品牌信源引用的兵家必争之地。</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button class="btn btn-sm btn-primary btn-open-ai-web" data-url="https://www.perplexity.ai/">🪟 打开独立窗口</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- GEO 自动化关键词占位与提及率监测器 -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <h3>🎯 GEO 关键词 AI 推荐占位与引用信源自动化监测器</h3>
+              <p>模拟不同地域真实用户向 AI 提问，自动化抓取 AI 回答、统计目标品牌/股票提及率与引用信源</p>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label>目标 Prompt 提问词 *</label>
+              <input type="text" id="geo-prompt-input" placeholder="例如: 请比较几种浏览器环境隔离方案" value="请比较几种浏览器环境隔离方案" />
+            </div>
+            <div class="form-group flex-1">
+              <label>监测目标品牌/标的词 *</label>
+              <input type="text" id="geo-target-word" placeholder="例如: Antigravity 或 某公司名" value="Antigravity" />
+            </div>
+            <div class="form-group flex-1">
+              <label>目标 AI 平台</label>
+              <select id="geo-platform-select">
+                <option value="deepseek">DeepSeek (R1 / V3)</option>
+                <option value="doubao">字节豆包 (Doubao)</option>
+                <option value="qwen">通义千问 (Qwen)</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn btn-primary" id="btn-run-geo-tracker">🚀 启动 GEO 自动化提问与占位监测</button>
+
+          <!-- 监测输出面板 -->
+          <div class="crawler-result-panel" id="geo-result-panel" style="display: none; margin-top: 16px;">
+            <div class="panel-header">
+              <h4 id="geo-result-title">GEO 监测分析报告</h4>
+              <button class="btn btn-sm btn-secondary" id="btn-close-geo-result">关闭</button>
+            </div>
+            <div class="crawler-result-body" id="geo-result-body">
+              <!-- 输出 -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 选项卡 4：数据与指纹迁移 (Migration) -->
+      <section class="tab-content" id="tab-migration">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <h3>全生态数据导入与迁移中心</h3>
+              <p>一键导入本地常用浏览器（Chrome / Edge）或商业指纹浏览器（AdsPower / 比特 / Hubstudio）数据</p>
+            </div>
+          </div>
+          <div class="migration-grid">
+            <div class="migration-card">
+              <div class="mig-icon">🖥️</div>
+              <h4>常用浏览器数据一键扫描与同步</h4>
+              <p>自动检测 Windows 本机 Chrome / Edge / Firefox 配置文件，一键克隆登录会话。</p>
+              <button class="btn btn-primary" id="btn-scan-local-browsers">🔍 扫描本机常用浏览器</button>
+            </div>
+
+            <div class="migration-card">
+              <div class="mig-icon">🍪</div>
+              <h4>通用 Cookie 批量导入</h4>
+              <p>粘贴标准 JSON 格式或 Netscape 文本格式 Cookie，直接创建已登录环境。</p>
+              <button class="btn btn-secondary" id="btn-open-cookie-import-modal">📥 导入 Cookie</button>
+            </div>
+
+            <div class="migration-card">
+              <div class="mig-icon">⚡</div>
+              <h4>AdsPower / 比特浏览器迁移</h4>
+              <p>导入 AdsPower / BitBrowser 导出的环境 JSON 配置包，自动对齐指纹与代理。</p>
+              <button class="btn btn-secondary" id="btn-open-adspower-import">🔄 导入指纹配置</button>
+            </div>
+          </div>
+
+          <!-- 本地浏览器扫描结果面板 -->
+          <div class="panel" id="local-browser-scan-panel" style="display: none; margin-top: 16px; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border-color);">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h4>已检测到的本机常用浏览器配置</h4>
+                <p>点击「一键导入环境」会将支持的数据导入独立 Profile；源浏览器密钥和受保护凭据不会被绕过读取</p>
+              </div>
+              <button class="btn btn-sm btn-secondary" id="btn-close-scan-panel">关闭</button>
+            </div>
+            <div id="local-browser-list" style="display: flex; flex-direction: column; gap: 10px; margin-top: 12px;">
+              <!-- 动态填充 -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-content" id="tab-team">
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><h3>工作区、成员与资源授权</h3><p>API Key 仅在签发时显示一次，服务端只保存 SHA-256 摘要</p></div></div>
+          <div class="form-row">
+            <div class="form-group flex-2"><label>新工作区名称</label><input id="team-workspace-name" placeholder="跨境业务组"></div>
+            <button class="btn btn-primary" id="btn-create-workspace">创建工作区</button>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1"><label>工作区</label><select id="team-member-workspace"></select></div>
+            <div class="form-group flex-1"><label>成员名称</label><input id="team-member-name" placeholder="运营-Alice"></div>
+            <div class="form-group flex-1"><label>角色</label><select id="team-member-role"><option>viewer</option><option>operator</option><option>manager</option><option>owner</option></select></div>
+            <div class="form-group flex-2"><label>可访问 Profile ID（逗号分隔，* 为全部）</label><input id="team-member-profiles" placeholder="prf_xxx,prf_yyy"></div>
+            <div class="form-group flex-2"><label>可访问扩展 ID（逗号分隔，* 为全部）</label><input id="team-member-extensions" placeholder="ext_xxx,ext_yyy"></div>
+            <button class="btn btn-primary" id="btn-create-team-member">添加成员</button>
+          </div>
+          <div id="team-member-list" style="margin-top:16px"></div>
+          <div id="team-issued-key" class="proxy-test-result" style="display:none;margin-top:12px"></div>
+        </div>
+      </section>
+
+      <section class="tab-content" id="tab-extensions">
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><h3>受管浏览器扩展中心</h3><p>只接受管理员上传的 ZIP/XPI；系统检查 Manifest、权限、文件类型与 SHA-256，禁止任意本机路径</p></div></div>
+          <div class="form-row">
+            <div class="form-group flex-2"><label>扩展包（最大 12 MiB）</label><input id="managed-extension-file" type="file" accept=".zip,.xpi,application/zip"></div>
+            <label style="display:flex;align-items:center;gap:8px"><input id="managed-extension-risk-approval" type="checkbox"> 我已审核 cookies、代理、全站访问等高风险权限</label>
+            <button class="btn btn-primary" id="btn-import-managed-extension">导入并校验</button>
+          </div>
+          <div id="managed-extension-list" style="margin-top:14px"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><h3>分配到浏览器环境</h3><p>停止并重新启动 Profile 后生效；Firefox 扩展必须声明固定 Gecko ID，并仍受 Firefox 自身签名校验</p></div></div>
+          <div class="form-row">
+            <div class="form-group flex-1"><label>Profile</label><select id="extension-profile-select"></select></div>
+            <div class="form-group flex-2"><label>已授权扩展（可多选）</label><select id="extension-assignment-select" multiple size="7"></select></div>
+            <button class="btn btn-primary" id="btn-save-extension-assignment">保存分配</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 系统设置与隔离状态 -->
+      <section class="tab-content" id="tab-settings">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <h3>🛡️ 浏览器隔离、指纹一致性与自动化安全状态</h3>
+              <p>展示当前已启用的隔离与一致性能力；检测站分数和网站可用性不作通过率或不封号承诺</p>
+            </div>
+          </div>
+          <div class="settings-list">
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">1. 底层 WebDriver 原型链剥离 (Anti-Automation)</span>
+                <span class="setting-desc">降低常见自动化表面差异；实际结果由浏览器版本与目标站点检测策略决定</span>
+              </div>
+              <span class="badge-status-on">🟢 已启用</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">2. Canvas 确定性微扰</span>
+                <span class="setting-desc">同一 Profile 使用稳定种子产生可复现差异；实际隔离效果需结合浏览器版本测试</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (ACTIVE)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">3. WebGL / WebGPU 硬件参数矩阵对齐</span>
+                <span class="setting-desc">按 Profile 配置 Vendor、Renderer 等页面侧属性，不宣称覆盖原生驱动或协议层表面</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (ACTIVE)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">4. 真人动力学交互 (Human-like Kinetics)</span>
+                <span class="setting-desc">受限的平滑移动、间隔输入与滚动节奏；不承诺规避站点风控</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (PACED)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">5. AudioContext 音频空间噪声注入</span>
+                <span class="setting-desc">提供稳定的页面侧音频微扰；不承诺阻断所有设备关联方式</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (ACTIVE)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">6. WebRTC 真实 IP 拦截防护 (Anti-Leak)</span>
+                <span class="setting-desc">限制 WebRTC 暴露面；代理出口仍应通过实际网络检查验证</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (PROTECTED)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">7. 页面加载等待与 DOM 就绪</span>
+                <span class="setting-desc">为获授权页面的客户端渲染预留有界等待时间，不提取或伪造站点安全 Token</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (WARMUP)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">8. 慢速外部资源隔离与优雅降级 (Anti-Timeout)</span>
+                <span class="setting-desc">智能隔离慢速广告打点与外部字体，防止 DOM 渲染被外部阻塞</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (RESILIENT)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">9. 挑战检测与人工接管</span>
+                <span class="setting-desc">检测到挑战后自动安全暂停；一次性 Lease 只用于受信任人员显式接管，不自动处理挑战</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (HANDOFF)</span>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-info">
+                <span class="setting-name">10. 独享持久化 Profile 隔离目录</span>
+                <span class="setting-desc">每个环境使用独立持久目录保存 Cookie 与站点存储，并由会话所有权防止同目录并发打开</span>
+              </div>
+              <span class="badge-status-on">🟢 已激活 (ISOLATED)</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 新建/编辑环境模态弹窗 -->
+  <div class="modal-overlay" id="profile-modal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-title">新建指纹浏览器环境</h3>
+        <button class="btn-close" id="btn-close-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="profile-form">
+          <div class="form-section">
+            <div class="section-title">
+              <span>基本信息</span>
+              <button type="button" class="btn btn-xs btn-outline" id="btn-random-all-fingerprint">🎲 一键随机生成指纹</button>
+            </div>
+            <div class="form-row">
+              <div class="form-group flex-2">
+                <label>环境名称 *</label>
+                <input type="text" id="p-name" placeholder="例如: 问财量化A组-01" required />
+              </div>
+              <div class="form-group flex-1">
+                <label>浏览器内核</label>
+                <select id="p-engine">
+                  <option value="firefox">Firefox (推荐防检测)</option>
+                  <option value="chromium">Chromium</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>环境描述 / 标签 (以逗号分隔)</label>
+              <input type="text" id="p-tags" placeholder="A股投研, 问财, 高股息" />
+            </div>
+            <div class="form-group">
+              <label>2FA Secret（选填，加密保存）</label>
+              <input type="password" id="p-2fa-secret" autocomplete="off" placeholder="Base32 Secret；列表和接口不会回显" />
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title">网络与代理设置</div>
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label>代理类型</label>
+                <select id="p-proxy-type">
+                  <option value="direct">直连 (不使用代理)</option>
+                  <option value="socks5">SOCKS5 代理</option>
+                  <option value="http">HTTP 代理</option>
+                  <option value="https">HTTPS 代理</option>
+                </select>
+              </div>
+              <div class="form-group flex-2">
+                <label>代理服务器 (Host:Port)</label>
+                <input type="text" id="p-proxy-server" placeholder="例如: 127.0.0.1:10808" />
+              </div>
+            </div>
+            <div class="form-row proxy-auth-row" style="display: none;">
+              <div class="form-group flex-1">
+                <label>代理账号 (选填)</label>
+                <input type="text" id="p-proxy-user" placeholder="用户名" />
+              </div>
+              <div class="form-group flex-1">
+                <label>代理密码 (选填)</label>
+                <input type="password" id="p-proxy-pass" placeholder="密码" />
+              </div>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title">地理与环境伪装 (GeoIP)</div>
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label>目标国家/地区</label>
+                <select id="p-country">
+                  <option value="CN">🇨🇳 中国 (CN)</option>
+                  <option value="US">🇺🇸 美国 (US)</option>
+                  <option value="HK">🇭🇰 中国香港 (HK)</option>
+                  <option value="JP">🇯🇵 日本 (JP)</option>
+                  <option value="SG">🇸🇬 新加坡 (SG)</option>
+                  <option value="GB">🇬🇧 英国 (GB)</option>
+                </select>
+              </div>
+              <div class="form-group flex-1">
+                <label>时区 (Timezone)</label>
+                <input type="text" id="p-timezone" value="Asia/Shanghai" />
+              </div>
+              <div class="form-group flex-1">
+                <label>语言 (Locale)</label>
+                <input type="text" id="p-locale" value="zh-CN" />
+              </div>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title">系统与硬件指纹</div>
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label>操作系统</label>
+                <select id="p-os">
+                  <option value="windows">Windows 11</option>
+                  <option value="macos">macOS (Apple Silicon)</option>
+                  <option value="linux">Linux x86_64</option>
+                </select>
+              </div>
+              <div class="form-group flex-1">
+                <label>CPU 核心数</label>
+                <select id="p-cpu">
+                  <option value="8">8 核心</option>
+                  <option value="16">16 核心</option>
+                  <option value="4">4 核心</option>
+                </select>
+              </div>
+              <div class="form-group flex-1">
+                <label>屏幕分辨率</label>
+                <select id="p-resolution">
+                  <option value="1920x1080">1920 x 1080 (FHD)</option>
+                  <option value="2560x1440">2560 x 1440 (2K)</option>
+                  <option value="1440x900">1440 x 900</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>User-Agent</label>
+              <input type="text" id="p-ua" placeholder="留空则自动匹配受管浏览器内核版本" />
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title">初始化 Cookie (选填)</div>
+            <div class="form-group">
+              <label>导入 Cookie (支持 JSON 数组或 Netscape cookies.txt 格式)</label>
+              <textarea id="p-cookies" rows="3" placeholder="例如: [{&quot;name&quot;:&quot;session&quot;,&quot;value&quot;:&quot;xyz&quot;,&quot;domain&quot;:&quot;.example.com&quot;}]"></textarea>
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-modal">取消</button>
+        <button type="button" class="btn btn-primary" id="btn-save-profile">💾 保存并创建环境</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cookie 快速导入导出模态框 -->
+  <div class="modal-overlay" id="cookie-modal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="cookie-modal-title">Cookie 管理</h3>
+        <button class="btn-close" id="btn-close-cookie-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="cookie-tabs">
+          <button class="btn btn-xs btn-secondary active" id="cookie-tab-json">JSON 格式</button>
+          <button class="btn btn-xs btn-secondary" id="cookie-tab-netscape">Netscape 格式</button>
+        </div>
+        <textarea id="cookie-content" rows="10" placeholder="在此粘贴或查看 Cookie 内容..."></textarea>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btn-copy-cookie">📋 复制到剪贴板</button>
+        <button type="button" class="btn btn-primary" id="btn-save-cookie">💾 注入保存 Cookie</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CSV / Excel 批量环境导入模态框 -->
+  <div class="modal-overlay" id="csv-modal">
+    <div class="modal-dialog" style="max-width: 680px;">
+      <div class="modal-header">
+        <h3>📥 批量导入环境 (CSV / Excel 格式)</h3>
+        <button class="btn-close" id="btn-close-csv-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 12px;">
+          支持标准 CSV 字段：<code>环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie</code>
+        </p>
+        <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+          <button class="btn btn-xs btn-outline" id="btn-download-csv-template">📄 下载标准 CSV 导入模板</button>
+        </div>
+        <textarea id="csv-import-content" rows="9" placeholder="环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie
+亚马逊店铺-01,跨境电商/美区,firefox,socks5,127.0.0.1:10808,,,JBSWY3DPEHPK3PXP,
+TikTok营销-02,社媒矩阵/东南亚,chromium,http,user:pass@1.2.3.4:8080,,,," style="font-family: var(--font-mono); font-size: 12px;"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-csv-modal">取消</button>
+        <button type="button" class="btn btn-primary" id="btn-submit-csv-import">🚀 立即批量导入环境</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2FA 谷歌双重验证动态口令模态框 -->
+  <div class="modal-overlay" id="2fa-modal">
+    <div class="modal-dialog" style="max-width: 480px;">
+      <div class="modal-header">
+        <h3>🔑 谷歌 2FA 实时动态验证码 (TOTP)</h3>
+        <button class="btn-close" id="btn-close-2fa-modal">&times;</button>
+      </div>
+      <div class="modal-body" style="text-align: center; padding: 24px;">
+        <div style="font-size: 13px; color: var(--text-dim); margin-bottom: 8px;" id="2fa-profile-name">环境名称</div>
+        <div style="font-size: 40px; font-weight: 800; font-family: var(--font-mono); color: #38bdf8; letter-spacing: 6px; margin: 16px 0;" id="2fa-code-display">
+          ------
+        </div>
+        <div style="display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12px; color: var(--text-dim);">
+          <span>⏱️ 剩余有效时间:</span>
+          <span id="2fa-timer" style="font-weight: 700; color: #34d399;">30s</span>
+        </div>
+        <div style="margin-top: 16px;">
+          <input type="password" id="2fa-secret-input" readonly placeholder="密钥由服务端加密保存，不在此处显示" style="width: 100%; text-align: center; font-family: var(--font-mono); font-size: 12px;" />
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content: center;">
+        <button type="button" class="btn btn-primary" id="btn-copy-2fa-code">📋 一键复制 6 位验证码</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 主从多窗口群控同步器控制弹窗 -->
+  <div class="modal-overlay" id="synchronizer-modal">
+    <div class="modal-dialog" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3>🔗 多窗口主从群控同步器 (Multi-Window Synchronizer)</h3>
+        <button class="btn-close" id="btn-close-sync-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.3); border-radius: 8px; padding: 12px; font-size: 12px; color: #818cf8; margin-bottom: 16px;">
+          💡 <strong>群控原理</strong>：显式开启后捕获主控窗口的导航、语义点击、非密码输入和滚动，并按顺序广播至从窗口。密码字段不会同步。
+        </div>
+        <div class="form-group">
+          <label>1. 选择主控窗口 (Master)</label>
+          <select id="sync-master-select" style="width: 100%;">
+            <!-- 动态填充运行中的窗口 -->
+          </select>
+        </div>
+        <div class="form-group">
+          <label>2. 快捷广播导航网址</label>
+          <div class="input-with-btn">
+            <input type="text" id="sync-url-input" placeholder="例如: https://chat.deepseek.com" value="https://chat.deepseek.com/" />
+            <button class="btn btn-primary" id="btn-sync-navigate">🚀 全体同步导航</button>
+          </div>
+        </div>
+        <div style="display: flex; gap: 10px; margin-top: 14px;">
+          <button class="btn btn-primary" id="btn-sync-start-capture">▶ 开始实时同步</button>
+          <button class="btn btn-danger" id="btn-sync-stop-capture" disabled>■ 停止实时同步</button>
+          <button class="btn btn-outline" id="btn-sync-reload-all">🔄 全体同步刷新</button>
+          <button class="btn btn-outline" id="btn-sync-scroll-down">⬇️ 全体向下滚动</button>
+          <button class="btn btn-outline" id="btn-sync-scroll-up">⬆️ 全体向上滚动</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-sync-modal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局 Toast 提示容器 -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
