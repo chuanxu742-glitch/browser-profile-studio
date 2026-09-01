@@ -655,7 +655,7 @@
             <div class="migration-card">
               <div class="mig-icon">🖥️</div>
               <h4>常用浏览器数据一键扫描与同步</h4>
-              <p>自动检测 Windows 本机 Chrome / Edge / Firefox 配置文件，一键克隆登录会话。</p>
+              <p>自动检测本机 Chrome / Edge / Firefox 配置文件，迁移 Cookie 与站点存储；导入前必须完全退出源浏览器。</p>
               <button class="btn btn-primary" id="btn-scan-local-browsers">🔍 扫描本机常用浏览器</button>
             </div>
 
@@ -679,7 +679,7 @@
             <div class="panel-header">
               <div class="panel-title">
                 <h4>已检测到的本机常用浏览器配置</h4>
-                <p>点击「一键导入环境」会将支持的数据导入独立 Profile；源浏览器密钥和受保护凭据不会被绕过读取</p>
+                <p>导入 Cookie、Local/Session Storage、IndexedDB 与 Service Worker 存储；密码、历史记录、自动填充和未受管扩展不会导入</p>
               </div>
               <button class="btn btn-sm btn-secondary" id="btn-close-scan-panel">关闭</button>
             </div>

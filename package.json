@@ -34,6 +34,7 @@
     "test:fingerprint-runtime": "vitest run tests/integration/fingerprint-runtime-real.test.ts",
     "test:extensions": "vitest run tests/integration/managed-extension-real.test.ts",
     "test:benchmarks": "node --import tsx/esm scripts/run-online-benchmarks.ts",
+    "import:local": "node --import tsx/esm scripts/import-local-browser.ts",
     "studio": "node --import tsx/esm scripts/start-studio.ts",
     "demo": "node --import tsx/esm scripts/demo-headed-check.ts",
     "start": "node dist/index.js",

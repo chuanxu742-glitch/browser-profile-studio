@@ -1035,6 +1035,11 @@ function initLocalBrowserMigration() {
 
           json.data.forEach((b) => {
             b.profiles.forEach((p) => {
+              const dataBadges = [
+                p.hasCookies ? 'Cookie' : '',
+                p.hasLocalStorage ? 'Local Storage' : '',
+                p.hasIndexedDb ? 'IndexedDB' : '',
+              ].filter(Boolean);
               const item = document.createElement('div');
               item.style.display = 'flex';
               item.style.justifyContent = 'space-between';
@@ -1048,13 +1053,15 @@ function initLocalBrowserMigration() {
                 <div>
                   <div style="font-weight: 600; color: #fff; display: flex; align-items: center; gap: 8px;">
                     <span>${b.type === 'chrome' ? '🌐 Google Chrome' : (b.type === 'edge' ? '🌊 Microsoft Edge' : '🦊 Firefox')}</span>
-                    <span style="font-size: 11px; background: rgba(99, 102, 241, 0.2); color: #818cf8; padding: 2px 6px; border-radius: 4px;">${p.name}</span>
-                    ${p.hasCookies ? '<span style="font-size: 11px; background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 2px 6px; border-radius: 4px;">🟢 包含已登录会话</span>' : ''}
+                    <span style="font-size: 11px; background: rgba(99, 102, 241, 0.2); color: #818cf8; padding: 2px 6px; border-radius: 4px;">${escapeHtml(p.name)}</span>
+                    ${dataBadges.length ? `<span style="font-size: 11px; background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 2px 6px; border-radius: 4px;">🟢 ${escapeHtml(dataBadges.join(' / '))}</span>` : ''}
+                    ${p.inUse ? '<span style="font-size: 11px; background: rgba(245, 158, 11, 0.2); color: #fbbf24; padding: 2px 6px; border-radius: 4px;">⚠️ 浏览器运行中</span>' : ''}
                   </div>
-                  <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">${p.path}</div>
+                  <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">${escapeHtml(p.path)}</div>
+                  ${p.hasSavedPasswords ? '<div style="font-size: 11px; color: var(--text-dim); margin-top: 3px;">检测到密码库；为保护凭据，密码不会导入</div>' : ''}
                 </div>
-                <button class="btn btn-sm btn-primary btn-do-import" data-browser="${b.name}" data-profile="${p.name}" data-type="${b.type}">
-                  📥 一键导入为指纹环境
+                <button class="btn btn-sm btn-primary btn-do-import" data-source-id="${p.sourceId}" data-browser="${escapeHtml(b.name)}" data-profile="${escapeHtml(p.name)}" ${p.inUse ? 'disabled' : ''}>
+                  ${p.inUse ? '请先完全退出浏览器' : '📥 导入网站会话数据'}
                 </button>
               `;
 
@@ -1067,7 +1074,8 @@ function initLocalBrowserMigration() {
             importBtn.onclick = async () => {
               const browserName = importBtn.getAttribute('data-browser');
               const profileName = importBtn.getAttribute('data-profile');
-              const browserType = importBtn.getAttribute('data-type');
+              const sourceId = importBtn.getAttribute('data-source-id');
+              if (!window.confirm(`请先完全退出【${browserName}】，再导入 ${profileName}。\n\n将复制 Cookie、Local Storage、IndexedDB 和 Service Worker 存储；不会复制密码、历史记录或扩展。是否继续？`)) return;
               importBtn.textContent = '⏳ 正在导入...';
               importBtn.disabled = true;
 
@@ -1075,16 +1083,18 @@ function initLocalBrowserMigration() {
                 const impRes = await fetch(`${API_BASE}/migration/import-local`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ browserName, profileName, browserType }),
+                  body: JSON.stringify({ sourceId, confirmBrowserClosed: true }),
                 });
                 const impJson = await impRes.json();
                 if (impJson.success) {
-                  showToast(`成功将【${browserName} - ${profileName}】导入为指纹环境！`, 'success');
+                  const result = impJson.data;
+                  showToast(`已导入 ${result.copiedFiles} 个会话文件：${(result.importedData || []).join('、') || '未发现可迁移数据'}`, 'success');
+                  if (result.warnings?.length) showToast(result.warnings.join('；'), 'info');
                   importBtn.textContent = '✅ 已成功导入';
                   loadProfiles();
                 } else {
                   showToast(`导入失败: ${impJson.message}`, 'error');
-                  importBtn.textContent = '📥 一键导入为指纹环境';
+                  importBtn.textContent = '📥 导入网站会话数据';
                   importBtn.disabled = false;
                 }
               } catch (err) {

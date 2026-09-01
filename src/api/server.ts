@@ -1,9 +1,8 @@
 import { createServer, IncomingMessage, ServerResponse, Server } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
 import { URL } from 'node:url';
-import os from 'node:os';
 import type { SessionManager } from '../browser/session-manager.js';
 import type { ApiResponse } from './types.js';
 import { SERVER_VERSION } from '../capabilities.js';
@@ -17,6 +16,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { ExternalRuntimeRegistry } from '../platform/provider-registry.js';
 import type { ManagedExtensionStore } from '../extension/managed-extension-store.js';
 import { managedBrowserIdentity } from '../fingerprint/runtime-identity.js';
+import { LocalBrowserImporter } from '../migration/local-browser-importer.js';
 
 export type StudioRole = 'viewer' | 'operator' | 'manager' | 'owner';
 export interface StudioCredential { readonly token: string; readonly role: StudioRole; readonly label?: string; readonly workspaceId?: string; readonly grants?: TeamIdentity['grants']; }
@@ -35,6 +35,7 @@ export interface RestApiServerOptions {
   readonly teamAccess?: TeamAccessStore;
   readonly externalRuntimes?: ExternalRuntimeRegistry;
   readonly extensionStore?: ManagedExtensionStore;
+  readonly localBrowserImporter?: Pick<LocalBrowserImporter, 'scan' | 'importProfile'>;
 }
 
 export class RestApiServer {
@@ -45,6 +46,7 @@ export class RestApiServer {
   private actualHost = '127.0.0.1';
   private bootstrapUsed = false;
   private readonly synchronizer: WindowSynchronizer;
+  private readonly localBrowserImporter: Pick<LocalBrowserImporter, 'scan' | 'importProfile'>;
   private webSockets: WebSocketServer | undefined;
 
   constructor(
@@ -53,6 +55,7 @@ export class RestApiServer {
   ) {
     this.publicDir = options.publicDir || resolve(process.cwd(), 'public');
     this.synchronizer = new WindowSynchronizer(manager);
+    this.localBrowserImporter = options.localBrowserImporter ?? new LocalBrowserImporter(manager.getStore());
   }
 
   public async start(): Promise<{ port: number; host: string }> {
@@ -862,78 +865,22 @@ export class RestApiServer {
 
       // 6. Local Browsers Scan & Migration (Chrome / Edge / Firefox)
       if (pathname === '/api/v1/migration/local-browsers' && method === 'GET') {
-        const home = os.homedir();
-        const isWin = process.platform === 'win32';
-        const isMac = process.platform === 'darwin';
-
-        const localAppData = process.env.LOCALAPPDATA || (isWin ? join(home, 'AppData', 'Local') : '');
-        const appData = process.env.APPDATA || (isWin ? join(home, 'AppData', 'Roaming') : '');
-
-        const candidates: Array<{ name: string; type: 'chrome' | 'edge' | 'firefox'; userDataPath: string }> = [];
-
-        if (isWin) {
-          if (localAppData) {
-            candidates.push({ name: 'Google Chrome', type: 'chrome', userDataPath: join(localAppData, 'Google', 'Chrome', 'User Data') });
-            candidates.push({ name: 'Microsoft Edge', type: 'edge', userDataPath: join(localAppData, 'Microsoft', 'Edge', 'User Data') });
-          }
-          if (appData) {
-            candidates.push({ name: 'Mozilla Firefox', type: 'firefox', userDataPath: join(appData, 'Mozilla', 'Firefox', 'Profiles') });
-          }
-        } else if (isMac) {
-          candidates.push({ name: 'Google Chrome', type: 'chrome', userDataPath: join(home, 'Library', 'Application Support', 'Google', 'Chrome') });
-          candidates.push({ name: 'Microsoft Edge', type: 'edge', userDataPath: join(home, 'Library', 'Application Support', 'Microsoft Edge') });
-          candidates.push({ name: 'Mozilla Firefox', type: 'firefox', userDataPath: join(home, 'Library', 'Application Support', 'Firefox', 'Profiles') });
-        } else {
-          candidates.push({ name: 'Google Chrome', type: 'chrome', userDataPath: join(home, '.config', 'google-chrome') });
-          candidates.push({ name: 'Microsoft Edge', type: 'edge', userDataPath: join(home, '.config', 'microsoft-edge') });
-          candidates.push({ name: 'Mozilla Firefox', type: 'firefox', userDataPath: join(home, '.mozilla', 'firefox') });
-        }
-
-        const detected: any[] = [];
-        for (const c of candidates) {
-          if (!existsSync(c.userDataPath)) continue;
-          const profiles: any[] = [];
-          try {
-            const items = readdirSync(c.userDataPath);
-            for (const item of items) {
-              if (item === 'Default' || item.startsWith('Profile ') || c.type === 'firefox') {
-                const pPath = join(c.userDataPath, item);
-                if (statSync(pPath).isDirectory()) {
-                  const hasCookies = existsSync(join(pPath, 'Network', 'Cookies')) || existsSync(join(pPath, 'Cookies')) || existsSync(join(pPath, 'cookies.sqlite'));
-                  profiles.push({ name: item, path: pPath, hasCookies });
-                }
-              }
-            }
-          } catch {}
-
-          if (profiles.length > 0) {
-            detected.push({ name: c.name, type: c.type, userDataPath: c.userDataPath, profiles });
-          }
-        }
-
+        const detected = await this.localBrowserImporter.scan();
         this.sendJson(res, 200, { success: true, code: 'OK', data: detected, timestamp: Date.now() });
         return;
       }
 
       if (pathname === '/api/v1/migration/import-local' && method === 'POST') {
         const body = await this.readJsonBody(req);
-        const { browserName, profileName, browserType } = body;
-        if (!browserName || !profileName) {
-          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'browserName and profileName are required', timestamp: Date.now() });
+        if (typeof body.sourceId !== 'string') {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'sourceId is required', timestamp: Date.now() });
           return;
         }
-
-        const profileId = `imported-${(browserType || 'browser')}-${profileName.toLowerCase().replace(/\s+/g, '-')}`;
-        const newName = `从${browserName}导入-${profileName}`;
-
-        const created = await this.manager.createProfile({
-          profileId,
-          name: newName,
-          tags: ['已导入', browserName, profileName],
-          engine: browserType === 'firefox' ? 'firefox' : 'chromium',
+        const imported = await this.localBrowserImporter.importProfile({
+          sourceId: body.sourceId,
+          confirmBrowserClosed: body.confirmBrowserClosed === true,
         });
-
-        this.sendJson(res, 200, { success: true, code: 'OK', data: created, timestamp: Date.now() });
+        this.sendJson(res, 200, { success: true, code: 'OK', data: imported, timestamp: Date.now() });
         return;
       }
 
@@ -1297,7 +1244,7 @@ function roleAllows(actual: StudioRole, required: StudioRole): boolean {
 }
 
 function requiredRole(method: string | undefined, pathname: string): StudioRole {
-  if (pathname.startsWith('/api/v1/team/') || pathname.includes('/purge') || pathname.includes('/extensions/import') || (pathname.startsWith('/api/v1/extensions/') && method === 'DELETE')) return 'owner';
+  if (pathname.startsWith('/api/v1/team/') || pathname.startsWith('/api/v1/migration/') || pathname.includes('/purge') || pathname.includes('/extensions/import') || (pathname.startsWith('/api/v1/extensions/') && method === 'DELETE')) return 'owner';
   if (pathname.includes('/cookies') || pathname.includes('/2fa/') || method === 'DELETE') return 'owner';
   if (method === 'GET') return 'viewer';
   if (pathname.includes('/start') || pathname.includes('/stop') || pathname.includes('/navigate') || pathname.includes('/rpa/tasks') || pathname.includes('/external-runtimes/')) return 'operator';
@@ -1315,7 +1262,7 @@ function resourceFromPath(pathname: string): { kind: 'profile' | 'proxy' | 'work
 function boundedQueryInteger(raw: string | null, minimum: number, maximum: number, fallback: number): number { const value = Number(raw); return Number.isInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback; }
 
 function studioOpenApiDocument(host: string, port: number): Record<string, unknown> {
-  const paths = ['/health', '/auth/me', '/profiles', '/profiles/trash', '/profiles/{id}/extensions', '/extensions', '/extensions/import', '/extensions/{id}', '/proxies', '/rpa/workflows', '/rpa/tasks', '/external-runtimes/{provider}/create', '/external-runtimes/{provider}/{runtime}/stop', '/team/workspaces', '/team/members', '/synchronizer/broadcast'];
+  const paths = ['/health', '/auth/me', '/profiles', '/profiles/trash', '/profiles/{id}/extensions', '/extensions', '/extensions/import', '/extensions/{id}', '/migration/local-browsers', '/migration/import-local', '/proxies', '/rpa/workflows', '/rpa/tasks', '/external-runtimes/{provider}/create', '/external-runtimes/{provider}/{runtime}/stop', '/team/workspaces', '/team/members', '/synchronizer/broadcast'];
   return { openapi: '3.1.0', info: { title: 'Antigravity Browser Studio API', version: SERVER_VERSION }, servers: [{ url: `http://${host}:${port}/api/v1` }], security: [{ bearerAuth: [] }], paths: Object.fromEntries(paths.map((path) => [path, { get: { summary: path }, post: { summary: path } }])), components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } } };
 }
 
