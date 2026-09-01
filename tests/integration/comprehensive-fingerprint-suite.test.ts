@@ -66,10 +66,9 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         const gl = canvas.getContext('webgl');
         if (gl) {
           const debug = gl.getExtension('WEBGL_debug_renderer_info');
-          if (debug) {
-            metrics.webglVendor = gl.getParameter(debug.UNMASKED_VENDOR_WEBGL);
-            metrics.webglRenderer = gl.getParameter(debug.UNMASKED_RENDERER_WEBGL);
-          }
+          metrics.webglVendor = gl.getParameter(debug ? debug.UNMASKED_VENDOR_WEBGL : gl.VENDOR);
+          metrics.webglRenderer = gl.getParameter(debug ? debug.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+          metrics.webglDebugExtension = Boolean(debug);
         }
       } catch (e) {
         metrics.webglError = e.message;
