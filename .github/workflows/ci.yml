@@ -19,7 +19,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:unit
       - run: npm run test:mcp
-      - run: npm run test:integration
+      - run: FINGERPRINT_TEST_HEADED=1 xvfb-run --auto-servernum npm run test:integration
       - run: npm run build
       - run: npm audit --omit=dev
   firefox:
