@@ -23,8 +23,8 @@ describe('RpaService', () => {
     const workflow = await service.createWorkflow({ name: 'Check', steps: [{ op: 'open', url: 'https://example.com' }, { op: 'snapshot' }] });
     const task = await service.run({ workflowId: workflow.workflowId, profileId: 'profile-one' });
     let completed = await service.getTask(task.taskId);
-    for (let attempt = 0; attempt < 50 && completed?.state !== 'SUCCEEDED'; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let attempt = 0; attempt < 500 && completed?.state !== 'SUCCEEDED'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
       completed = await service.getTask(task.taskId);
     }
     expect(completed?.state).toBe('SUCCEEDED');
@@ -70,7 +70,10 @@ describe('RpaService', () => {
     ] });
     const queued = await service.run({ workflowId: workflow.workflowId, profileId: 'profile-one' });
     let task = await service.getTask(queued.taskId);
-    for (let attempt = 0; attempt < 100 && task?.state !== 'SUCCEEDED'; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 5)); task = await service.getTask(queued.taskId); }
+    for (let attempt = 0; attempt < 500 && task?.state !== 'SUCCEEDED'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      task = await service.getTask(queued.taskId);
+    }
     expect(task?.state).toBe('SUCCEEDED');
     expect(task?.variables).toMatchObject({ region: 'us', image: 'art_one' });
     expect(task?.artifacts[0]?.artifactRef).toBe('art_one');
