@@ -7,6 +7,7 @@ export type ChallengeCategory =
   | 'robot_check'
   | 'verification'
   | 'interstitial'
+  | 'login_required'
   | 'unknown';
 
 export type ChallengeSignalSource = 'url' | 'title' | 'text' | 'iframe' | 'container' | 'response' | 'frame';
@@ -75,6 +76,16 @@ export function challengeCategoryFor(marker: string): ChallengeCategory {
   if (normalized.includes('robot') || normalized.includes('human')) return 'robot_check';
   if (normalized.includes('verify') || normalized.includes('verification') || normalized.includes('security')) {
     return 'verification';
+  }
+  if (
+    normalized.includes('login') ||
+    normalized.includes('signin') ||
+    normalized.includes('passport') ||
+    normalized.includes('登录') ||
+    normalized.includes('网络出了点问题') ||
+    normalized.includes('亲，请登录')
+  ) {
+    return 'login_required';
   }
   return 'unknown';
 }

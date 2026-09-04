@@ -255,7 +255,7 @@ describe('BrowserSession lifecycle', () => {
     expect(session.status().state).toBe('READY');
     await session.open('https://fixture.test/normal');
     expect(session.status().state).toBe('READY');
-    await expect(session.open('https://fixture.test/challenge')).rejects.toMatchObject({ code: 'SESSION_PAUSED_CHALLENGE' });
+    await expect(session.open('https://challenges.cloudflare.com/fixture')).rejects.toMatchObject({ code: 'SESSION_PAUSED_CHALLENGE' });
     expect(session.status().state).toBe('PAUSED_CHALLENGE');
     expect((await session.challengeStatus()).detected).toBe(true);
     expect((await session.wait(50)).waitedMs).toBeGreaterThanOrEqual(40);

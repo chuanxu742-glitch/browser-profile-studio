@@ -34,5 +34,37 @@ describe('ChallengeDetector', () => {
     expect(result.signals[0]?.source).toBe('iframe');
     expect(result.signals[0]?.origin).toBe('https://challenges.cloudflare.com');
   });
+
+  it('does not pause for documentation or test pages merely mentioning captcha or turnstile in text', async () => {
+    const detector = new ChallengeDetector();
+    const result = await detector.detect({
+      url: 'https://fixture.test/docs/security',
+      title: 'Security Architecture Overview',
+      text: 'This documentation explains how CAPTCHA and Turnstile protect against automated bot attacks.',
+    });
+    expect(result.detected).toBe(false);
+    expect(result.signals.length).toBeGreaterThan(0);
+    expect(result.signals.every((s) => s.confidence === 'low')).toBe(true);
+  });
+
+  it('correctly detects challenge when weak text signal is paired with a challenge container or iframe', async () => {
+    const detector = new ChallengeDetector();
+    const result = await detector.detect({
+      url: 'https://fixture.test/verify',
+      text: 'Please solve the captcha below.',
+      containers: [{ selector: '#cf-chl-widget', marker: '#cf-chl-widget' }],
+    });
+    expect(result.detected).toBe(true);
+  });
+
+  it('does not pause for documentation URLs containing turnstile or captcha in path without challenge DOM', async () => {
+    const detector = new ChallengeDetector();
+    const result = await detector.detect({
+      url: 'https://developers.cloudflare.com/turnstile/troubleshooting/testing/',
+      title: 'Testing Turnstile · Cloudflare Turnstile docs',
+      text: 'Learn how to test Turnstile in your development and staging environments.',
+    });
+    expect(result.detected).toBe(false);
+  });
 });
 
