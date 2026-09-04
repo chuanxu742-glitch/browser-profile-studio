@@ -70,6 +70,10 @@ export class RedisQueueAdapter implements TaskQueueAdapter {
     }
   }
 
+  public get underlyingRedisClient(): unknown {
+    return this.redis;
+  }
+
   public async enqueueTask(task: DistributedTaskRecord): Promise<void> {
     if (task.leaseId !== undefined) {
       await this.enqueueOwnedTask(task);

@@ -61,7 +61,7 @@ async function testStudioApi() {
     // 3. 测试获取列表
     const listResp = await fetch(`${baseUrl}/api/v1/profiles`);
     const listJson = await listResp.json();
-    console.log(`[5] GET /api/v1/profiles -> 找到 ${listJson.data?.length} 个环境`);
+    console.log(`[5] GET /api/v1/profiles -> 找到 ${listJson.data?.total} 个环境`);
 
     // 4. 测试 Cookie 注入与读取
     await fetch(`${baseUrl}/api/v1/profiles/${pid}/cookies`, {

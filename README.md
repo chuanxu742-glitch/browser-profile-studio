@@ -36,7 +36,7 @@ npm run studio
 
 Studio API 默认只监听 `127.0.0.1`，除 `/api/v1/health` 外均需认证。主要端点包括：
 
-- `/api/v1/openapi.json`：OpenAPI 3.1 入口；Profile 列表支持 `q`、`offset`、`limit`，总数返回在 `X-Total-Count`。
+- `/api/v1/openapi.json`：OpenAPI 3.1 入口；Profile 列表支持 `q`、`name`、`tag`、`country`、`engine`、`cursor`、`limit`，响应为 `{ items, nextCursor, total }`，总数同时返回在 `X-Total-Count`。
 - `/api/v1/profiles/trash`、`/profiles/{id}/restore`、`/profiles/{id}/purge`：回收站、恢复与仅 owner 可用的永久清除。
 - `/api/v1/team/*`：工作区、成员、资源 grants 以及只在创建时返回明文的可撤销 API Key。
 - `/api/v1/extensions`、`/extensions/import`、`/profiles/{id}/extensions`：仅 owner 可导入的受管 ZIP/XPI 仓库，以及按 Profile 分配扩展。
@@ -44,6 +44,8 @@ Studio API 默认只监听 `127.0.0.1`，除 `/api/v1/health` 外均需认证。
 - `/api/v1/sessions/{sessionId}/ws`：`abs-rpc/1` 有界 WebSocket 自动化协议，支持 status/open/click/type/select/scroll/snapshot/screenshot；它不是原始 CDP。
 - `/api/v1/synchronizer/captures`：显式启停主窗口动作捕获。只同步可解析的语义目标，密码字段被排除。
 - `/api/v1/product/capabilities`、`/product/runtime-health`、`/metrics`：真实能力边界、外部云运行时适配器状态和本机运行指标。
+
+受管 Profile 在安全停止时原子保存 cookies、localStorage、IndexedDB 与虚拟 WebAuthn 凭据；Studio 主密钥启用时检查点整体使用 AES-256-GCM 加密，并可从 `.bak` 恢复上一份有效状态。服务端失效、验证码和站点主动登出仍会使登录态失效。
 
 小状态文件使用同目录临时文件、`fsync`、原子替换和 `.bak` 上一版本恢复。该方案为单 Studio 进程设计，不等于支持多个进程同时写入，也不等于已经提供云数据库。云浏览器与 Android 云手机提供标准 provider 适配边界，以及经过鉴权的创建、停止和健康检查 API；未注册并配置真实供应商与凭据时，能力接口会返回未配置，不会创建模拟设备或伪造连接地址。
 

@@ -1,3 +1,5 @@
+import type { BrowserStorageState } from '../profile/types.js';
+
 /**
  * Narrow Playwright Firefox adapter. Keeping launch behind this interface
  * makes lifecycle tests use a local fake without weakening production rules.
@@ -32,6 +34,8 @@ export interface FirefoxContextLike {
     secure: boolean;
     sameSite: 'Strict' | 'Lax' | 'None';
   }>>;
+  setStorageState?(state: BrowserStorageState): Promise<void>;
+  storageState?(options?: { indexedDB?: boolean; credentials?: boolean }): Promise<BrowserStorageState>;
 }
 
 export interface FirefoxPageLike {

@@ -15,6 +15,36 @@ export interface CookieRecord {
   readonly secure?: boolean;
   readonly sameSite?: CookieSameSite;
 }
+export interface BrowserStorageState {
+  readonly cookies: readonly CookieRecord[];
+  readonly origins: readonly {
+    readonly origin: string;
+    readonly localStorage: readonly {
+      readonly name: string;
+      readonly value: string;
+    }[];
+    readonly indexedDB?: readonly {
+      readonly name: string;
+      readonly version: number;
+      readonly stores: readonly {
+        readonly name: string;
+        readonly keyPath?: string | readonly string[] | null;
+        readonly autoIncrement: boolean;
+        readonly indexes: readonly {
+          readonly name: string;
+          readonly keyPath: string | readonly string[] | null;
+          readonly unique: boolean;
+          readonly multiEntry: boolean;
+        }[];
+        readonly records: readonly {
+          readonly key: unknown;
+          readonly value: unknown;
+        }[];
+      }[];
+    }[];
+  }[];
+  readonly credentials?: readonly unknown[];
+}
 
 export type CookieFormat = 'json' | 'netscape';
 
