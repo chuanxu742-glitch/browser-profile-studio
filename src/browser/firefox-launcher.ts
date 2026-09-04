@@ -97,8 +97,9 @@ export function firefoxFingerprintUserPrefs(profile?: UnifiedFingerprintProfile)
     'dom.maxHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintTimezone': profile.geo.timezoneId,
-    'webgl.vendor-string-override': profile.webgl.vendor || 'Mozilla',
-    'webgl.renderer-string-override': profile.webgl.renderer || 'Mozilla',
+    'webgl.sanitize-unmasked-renderer': false,
+    'webgl.override-unmasked-vendor': profile.webgl.unmaskedVendor || profile.webgl.vendor,
+    'webgl.override-unmasked-renderer': profile.webgl.unmaskedRenderer || profile.webgl.renderer,
   };
 }
 

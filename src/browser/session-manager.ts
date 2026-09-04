@@ -313,6 +313,13 @@ export class SessionManager {
         : [];
     }
 
+    if (effectiveProxy && effectiveFingerprint && !geoTimezone) {
+      throw new BrowserSessionError(
+        'INVALID_ARGUMENT',
+        'Proxy-backed fingerprint sessions require an explicit IANA timezone matching the verified proxy exit',
+      );
+    }
+
     let normalizedProxy;
     if (effectiveProxy) {
       normalizedProxy = normalizeProxyConfig(effectiveProxy);

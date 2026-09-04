@@ -95,6 +95,16 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         }
         metrics.canvasPixelHash = hash;
         metrics.canvasDataUrl = canvas.toDataURL();
+        const blobDeferred = Promise.withResolvers();
+        canvas.toBlob(blobDeferred.resolve);
+        const blob = await blobDeferred.promise;
+        const blobBytes = new Uint8Array(await blob.arrayBuffer());
+        let blobHash = 0;
+        for (let i = 0; i < blobBytes.length; i++) {
+          blobHash = ((blobHash << 5) - blobHash) + blobBytes[i];
+          blobHash |= 0;
+        }
+        metrics.canvasBlobHash = blobHash;
         const repeatData = ctx.getImageData(0, 0, 100, 100);
         let repeatHash = 0;
         for (let i = 0; i < repeatData.data.length; i++) {
@@ -135,6 +145,41 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
     `;
 
     server = createServer((req, res) => {
+      if (new URL(req.url || '/', 'http://127.0.0.1').pathname === '/worker.js') {
+        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+        res.end(`let renderer;
+          try {
+            const canvas = new OffscreenCanvas(1, 1);
+            const gl = canvas.getContext('webgl');
+            const debug = gl && gl.getExtension('WEBGL_debug_renderer_info');
+            renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : undefined;
+          } catch {}
+          let canvasPixelHash;
+          try {
+            const canvas = new OffscreenCanvas(32, 32);
+            const context = canvas.getContext('2d');
+            context.fillStyle = '#123456';
+            context.fillRect(0, 0, 32, 32);
+            const pixels = context.getImageData(0, 0, 32, 32).data;
+            canvasPixelHash = 0;
+            for (let index = 0; index < pixels.length; index++) {
+              canvasPixelHash = ((canvasPixelHash << 5) - canvasPixelHash) + pixels[index];
+              canvasPixelHash |= 0;
+            }
+          } catch {}
+          self.postMessage({
+            userAgent: navigator.userAgent,
+            language: navigator.language,
+            languages: Array.from(navigator.languages || []),
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            webdriver: navigator.webdriver,
+            webdriverPresent: 'webdriver' in navigator,
+            hardwareConcurrency: navigator.hardwareConcurrency,
+            renderer,
+            canvasPixelHash,
+          });`);
+        return;
+      }
       if (new URL(req.url || '/', 'http://127.0.0.1').pathname === '/service-worker.js') {
         res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
         res.end(`self.addEventListener('message', (event) => {
@@ -152,6 +197,7 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
             languages: Array.from(target.navigator.languages || []),
             timezone: target.Intl.DateTimeFormat().resolvedOptions().timeZone,
             webdriver: target.navigator.webdriver,
+            webdriverPresent: 'webdriver' in target.navigator,
             hardwareConcurrency: target.navigator.hardwareConcurrency,
             renderer,
           });
@@ -301,6 +347,9 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
     expect(metricsA1.timezone).toBe(metricsA2.timezone);
     expect(metricsA1.hardwareConcurrency).toBe(metricsA2.hardwareConcurrency);
     expect(metricsA1.screenWidth).toBe(metricsA2.screenWidth);
+    expect(metricsA1.canvasPixelHash).toBe(metricsA2.canvasPixelHash);
+    expect(metricsA1.canvasDataUrl).toBe(metricsA2.canvasDataUrl);
+    expect(metricsA1.canvasBlobHash).toBe(metricsA2.canvasBlobHash);
 
     // 验证多环境隔离性 (A 与 B 必须完全不同)
     expect(metricsA1.timezone).not.toBe(metricsB.timezone);
@@ -341,6 +390,25 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
             const debug = gl && gl.getExtension('WEBGL_debug_renderer_info');
             renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : undefined;
           } catch (e) {}
+          let canvasDataUrl;
+          let canvasPixelHash;
+          try {
+            const canvas = target.document
+              ? target.document.createElement('canvas')
+              : new OffscreenCanvas(32, 32);
+            canvas.width = 32;
+            canvas.height = 32;
+            const context = canvas.getContext('2d');
+            context.fillStyle = '#123456';
+            context.fillRect(0, 0, 32, 32);
+            const pixels = context.getImageData(0, 0, 32, 32).data;
+            canvasPixelHash = 0;
+            for (let index = 0; index < pixels.length; index++) {
+              canvasPixelHash = ((canvasPixelHash << 5) - canvasPixelHash) + pixels[index];
+              canvasPixelHash |= 0;
+            }
+            if (target.document) canvasDataUrl = canvas.toDataURL();
+          } catch {}
           return {
             userAgent: target.navigator.userAgent,
             language: target.navigator.language,
@@ -350,16 +418,30 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
             webdriverPresent: 'webdriver' in target.navigator,
             hardwareConcurrency: target.navigator.hardwareConcurrency,
             renderer,
+            canvasDataUrl,
+            canvasPixelHash,
           };
         };
 
+        // Cross-process browser lifecycle events cannot use Vitest's Node fake clock.
+        const within = (promise, label, timeoutMs) => {
+          const timeout = Promise.withResolvers();
+          const timer = setTimeout(() => timeout.reject(new Error(label + ' timed out')), timeoutMs);
+          return Promise.race([promise, timeout.promise]).finally(() => clearTimeout(timer));
+        };
         const top = readContext(window);
         const frame = document.createElement('iframe');
-        frame.srcdoc = '<html><body>frame</body></html>';
+        frame.src = '/frame';
         const iframeDeferred = Promise.withResolvers();
-        frame.onload = () => iframeDeferred.resolve(readContext(frame.contentWindow));
+        frame.onload = () => {
+          try {
+            iframeDeferred.resolve(readContext(frame.contentWindow));
+          } catch (error) {
+            iframeDeferred.reject(error);
+          }
+        };
         document.body.appendChild(frame);
-        const iframe = await iframeDeferred.promise;
+        const iframe = await within(iframeDeferred.promise, 'iframe load', 5000);
         let worker;
         try {
           const workerDeferred = Promise.withResolvers();
@@ -377,13 +459,48 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
             workerDeferred.resolve(undefined);
           };
           worker = await workerDeferred.promise;
-        } catch (_) {
+        } catch {
           worker = undefined;
         }
+        let urlWorker;
+        try {
+          const workerDeferred = Promise.withResolvers();
+          const instance = new Worker('/worker.js');
+          instance.onmessage = (event) => {
+            instance.terminate();
+            workerDeferred.resolve(event.data);
+          };
+          instance.onerror = () => {
+            instance.terminate();
+            workerDeferred.reject(new Error('URL worker profile probe failed'));
+          };
+          urlWorker = await within(workerDeferred.promise, 'URL worker profile probe', 3000);
+        } catch {
+          urlWorker = undefined;
+        }
+        const messageDeferred = Promise.withResolvers();
+        const messageChannel = new MessageChannel();
+        messageChannel.port1.onmessage = (event) => messageDeferred.resolve(event.data);
+        messageChannel.port2.postMessage({
+          timezone: 'application-value',
+          hardwareConcurrency: 123,
+          platform: 'application-platform',
+        });
+        const messagePayload = await within(messageDeferred.promise, 'message channel integrity probe', 3000);
+        messageChannel.port1.close();
+        messageChannel.port2.close();
+        const workerConstructorAligned = Worker.prototype.constructor === Worker;
         let serviceWorker;
         if (navigator.serviceWorker) {
-          const registration = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
-          const active = registration.active || (await navigator.serviceWorker.ready).active;
+          const registration = await within(
+            navigator.serviceWorker.register('/service-worker.js', { scope: '/' }),
+            'service worker registration',
+            5000,
+          );
+          const ready = registration.active
+            ? registration
+            : await within(navigator.serviceWorker.ready, 'service worker activation', 5000);
+          const active = registration.active || ready.active;
           if (active) {
             const serviceDeferred = Promise.withResolvers();
             const channel = new MessageChannel();
@@ -398,17 +515,21 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
           }
           await registration.unregister();
         }
-        return { top, iframe, worker, serviceWorker };
+        return { top, iframe, worker, urlWorker, messagePayload, workerConstructorAligned, serviceWorker };
       })()`) as {
-        top: Record<string, any>;
-        iframe: Record<string, any>;
-        worker: Record<string, any>;
-        serviceWorker: Record<string, any>;
+        top: Record<string, unknown>;
+        iframe: Record<string, unknown>;
+        worker: Record<string, unknown> | undefined;
+        urlWorker: Record<string, unknown> | undefined;
+        messagePayload: Record<string, unknown>;
+        workerConstructorAligned: boolean;
+        serviceWorker: Record<string, unknown> | undefined;
       };
-      // Preserve standards-compatible Service Worker support. Firefox does not
-      // apply page init scripts to that global, so it remains a documented
-      // native surface rather than breaking sites by deleting the API.
-      expect(metrics.serviceWorker).toBeDefined();
+      if (process.env.ABS_FIREFOX_EXECUTABLE_PATH) {
+        expect(metrics.serviceWorker).toBeDefined();
+      } else {
+        expect(metrics.serviceWorker).toBeUndefined();
+      }
       expect(metrics.top.timezone).toBe('Asia/Tokyo');
       expect(metrics.top.language).toBe('ja-JP');
       expect(metrics.top.webdriver).toBeUndefined();
@@ -420,11 +541,44 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         timezone: metrics.top.timezone,
         webdriver: undefined,
         webdriverPresent: false,
+        canvasPixelHash: metrics.top.canvasPixelHash,
         hardwareConcurrency: metrics.top.hardwareConcurrency,
         renderer: metrics.top.renderer,
+        canvasDataUrl: metrics.top.canvasDataUrl,
       });
       if (metrics.worker) {
         expect(metrics.worker).toMatchObject({
+          userAgent: metrics.top.userAgent,
+          language: metrics.top.language,
+          languages: metrics.top.languages,
+          timezone: metrics.top.timezone,
+          webdriver: undefined,
+          webdriverPresent: false,
+          hardwareConcurrency: metrics.top.hardwareConcurrency,
+          renderer: metrics.top.renderer,
+          canvasPixelHash: metrics.top.canvasPixelHash,
+        });
+      }
+      expect(metrics.urlWorker).toBeDefined();
+      expect(metrics.urlWorker).toMatchObject({
+        userAgent: metrics.top.userAgent,
+        language: metrics.top.language,
+        languages: metrics.top.languages,
+        timezone: metrics.top.timezone,
+        webdriver: undefined,
+        webdriverPresent: false,
+        hardwareConcurrency: metrics.top.hardwareConcurrency,
+        renderer: metrics.top.renderer,
+        canvasPixelHash: metrics.top.canvasPixelHash,
+      });
+      expect(metrics.workerConstructorAligned).toBe(true);
+      expect(metrics.messagePayload).toEqual({
+        timezone: 'application-value',
+        hardwareConcurrency: 123,
+        platform: 'application-platform',
+      });
+      if (metrics.serviceWorker) {
+        expect(metrics.serviceWorker).toMatchObject({
           userAgent: metrics.top.userAgent,
           language: metrics.top.language,
           languages: metrics.top.languages,
