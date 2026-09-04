@@ -11,6 +11,7 @@ const config = loadConfig();
 const port = boundedPort(process.env.CONTROL_PLANE_PORT ?? '8081');
 const host = process.env.CONTROL_PLANE_HOST?.trim() || '127.0.0.1';
 const audit = new AuditLogger(config.auditPath);
+const urlPolicy = new UrlPolicy(config);
 const manager = new SessionManager({
   cluster: false,
   maxSessions: config.maxSessions,
@@ -20,7 +21,7 @@ const manager = new SessionManager({
   persistentProfile: config.persistentProfiles,
   profileRoot: join(config.dataDir, 'profiles'),
   artifactsRoot: join(config.dataDir, 'artifacts'),
-  urlPolicy: new UrlPolicy(config),
+  urlPolicy,
   audit,
   defaultTimeoutMs: config.timeoutMs,
   privateNetworkEnabled: config.allowPrivateNetwork,
@@ -36,6 +37,7 @@ const control = createControlPlane(manager, {
   statePath: join(config.dataDir, 'control-plane.json'),
   runtimeGuard,
   audit,
+  urlPolicy,
 });
 
 await control.start();

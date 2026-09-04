@@ -17,6 +17,7 @@ export interface ControlPlaneOptions {
   runtimeGuard?: McpRuntimeGuard;
   audit?: { record(event: Record<string, unknown>): Promise<void> | void };
   tenantAuthenticator?: TenantAuthenticator;
+  urlPolicy?: { assertAllowed(url: string, purpose?: 'navigation' | 'resource'): Promise<unknown> | unknown };
 }
 
 export interface ControlPlane {
@@ -29,11 +30,14 @@ export interface ControlPlane {
 const MAX_BODY_BYTES = 128 * 1024;
 
 export function createControlPlane(manager: SessionManager, options: ControlPlaneOptions = {}): ControlPlane {
-  const pool = new BrowserPool(manager, { ...(options.statePath ? { statePath: options.statePath } : {}) });
+  const pool = new BrowserPool(manager, {
+    ...(options.statePath ? { statePath: options.statePath } : {}),
+    ...(options.urlPolicy ? { bridgeUrlPolicy: options.urlPolicy } : {}),
+  });
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 8081;
   const agentWss = new WebSocketServer({ noServer: true });
-  const bridgeWss = new WebSocketServer({ noServer: true });
+  const bridgeWss = new WebSocketServer({ noServer: true, maxPayload: 9 * 1024 * 1024 });
 
   const server = createServer(async (request, response) => {
     try {
@@ -51,15 +55,19 @@ export function createControlPlane(manager: SessionManager, options: ControlPlan
       return;
     }
     const pathname = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`).pathname;
-    const bridgeMatch = pathname.match(/^\/ws\/bridge\/([^/]+)$/);
+    const bridgeMatch = pathname.match(/^\/ws\/bridge(?:\/([^/]+))?$/);
     if (pathname !== '/ws/agents' && !bridgeMatch) {
       socket.destroy();
       return;
     }
     if (bridgeMatch) {
       bridgeWss.handleUpgrade(request, socket, head, (client) => {
-        try { pool.attachBridge(decodeURIComponent(bridgeMatch[1]!), client); }
-        catch { client.close(1008, 'invalid bridge'); }
+        try {
+          const specifiedId = bridgeMatch[1] ? decodeURIComponent(bridgeMatch[1]) : undefined;
+          pool.attachOrAutoRegisterBridge(client, specifiedId);
+        } catch {
+          client.close(1008, 'invalid bridge');
+        }
       });
       return;
     }
@@ -103,12 +111,14 @@ export function createControlPlane(manager: SessionManager, options: ControlPlan
 
 async function route(request: IncomingMessage, response: ServerResponse, pool: BrowserPool, manager: SessionManager, options: ControlPlaneOptions): Promise<void> {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
-  if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { ok: true, service: 'browser-control-plane' });
+  if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/ping')) {
+    return send(response, 200, { ok: true, service: 'browser-control-plane', timestamp: Date.now() });
+  }
   if (request.method === 'GET' && url.pathname === '/') return sendHtml(response);
   if (request.method === 'GET' && url.pathname === '/api/browsers') return send(response, 200, { items: pool.list() });
   if (request.method === 'GET' && url.pathname === '/api/bindings') return send(response, 200, { items: pool.bindingsList() });
   if (request.method === 'GET' && url.pathname === '/api/capabilities') {
-    return send(response, 200, { engine: 'firefox+chromium', bridge: 'ws-rpc', bridgeOperations: ['navigate', 'click', 'input', 'select', 'scroll', 'snapshot', 'screenshot', 'tabs.list', 'tabs.create', 'tabs.switch', 'tabs.close', 'bind.current'], cdp: true, noVnc: 'container', remoteAgent: true });
+    return send(response, 200, { engine: 'firefox+chromium', bridge: 'chrome-extension+ws-rpc', bridgeExtension: 'browser-bridge-extension', bridgeOperations: ['navigate', 'click', 'input', 'select', 'scroll', 'snapshot', 'screenshot', 'tabs.list', 'tabs.create', 'tabs.switch', 'tabs.close', 'bind.current'], cdp: true, noVnc: 'container', remoteAgent: true });
   }
   if (request.method === 'GET' && url.pathname === '/api/platforms') return send(response, 200, { items: PLATFORM_ADAPTERS });
   if (request.method === 'GET' && url.pathname === '/api/skills') return send(response, 200, { items: ACTION_PACKS });
@@ -117,10 +127,69 @@ async function route(request: IncomingMessage, response: ServerResponse, pool: B
     if (!input.name) throw new Error('NAME_REQUIRED');
     return send(response, 201, await pool.add({ ...input, name: input.name }));
   }
+
+  // 1. 拉取指定浏览器的所有标签页 (OpenCLI browser tab list)
+  const tabsMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/tabs$/);
+  if (request.method === 'GET' && tabsMatch) {
+    const tabs = await pool.pullTabs(tabsMatch[1]!);
+    return send(response, 200, { ok: true, browserId: tabsMatch[1]!, tabs });
+  }
+
+  // 2. 绑定或切换标签页
+  const bindTabMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/tabs\/bind$/);
+  if (request.method === 'POST' && bindTabMatch) {
+    const input = await body(request).catch(() => ({})) as { tabId?: number };
+    const result = typeof input.tabId === 'number'
+      ? await pool.switchTab(bindTabMatch[1]!, input.tabId)
+      : await pool.bindCurrentTab(bindTabMatch[1]!);
+    return send(response, 200, { ok: true, result });
+  }
+
+  // 3. 打开新标签页
+  const openTabMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/tabs\/open$/);
+  if (request.method === 'POST' && openTabMatch) {
+    const input = await body(request) as { url?: string; active?: boolean };
+    const result = await pool.createTab(openTabMatch[1]!, input.url, input.active !== false);
+    return send(response, 200, { ok: true, result });
+  }
+
+  // 4. 关闭指定标签页
+  const closeTabMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/tabs\/close$/);
+  if (request.method === 'POST' && closeTabMatch) {
+    const input = await body(request) as { tabId: number };
+    if (typeof input.tabId !== 'number') throw new Error('TAB_ID_REQUIRED');
+    const result = await pool.closeTab(closeTabMatch[1]!, input.tabId);
+    return send(response, 200, { ok: true, result });
+  }
+
+  // 5. 快速获取页面语义快照
+  const snapshotMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/snapshot$/);
+  if (request.method === 'GET' && snapshotMatch) {
+    const result = await pool.bridgeCall(snapshotMatch[1]!, { op: 'snapshot' });
+    return send(response, 200, { ok: true, result });
+  }
+
   const browserMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/(start|stop)$/);
   if (request.method === 'POST' && browserMatch) {
     const instance = browserMatch[2] === 'start' ? await pool.start(browserMatch[1]!) : await pool.stop(browserMatch[1]!);
     return send(response, 200, instance);
+  }
+  const bridgeSetupMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/bridge-setup$/);
+  if (request.method === 'GET' && bridgeSetupMatch) {
+    const instance = pool.get(bridgeSetupMatch[1]!);
+    if (instance.mode !== 'bridge') throw new Error('BROWSER_NOT_IN_BRIDGE_MODE');
+    return send(response, 200, {
+      browserId: instance.id,
+      state: instance.state,
+      webSocketPath: `/ws/bridge/${encodeURIComponent(instance.id)}`,
+      endpoint: `ws://${request.headers.host ?? '127.0.0.1:8081'}`,
+      requiresToken: Boolean(options.token),
+      extensionDirectory: 'browser-bridge-extension',
+    });
+  }
+  const bridgeCallMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)\/call$/);
+  if (request.method === 'POST' && bridgeCallMatch) {
+    return send(response, 200, await pool.bridgeCall(bridgeCallMatch[1]!, await body(request)));
   }
   const configureMatch = url.pathname.match(/^\/api\/browsers\/([^/]+)$/);
   if (request.method === 'PATCH' && configureMatch) {
@@ -159,6 +228,11 @@ async function dispatchAgentMessage(message: Record<string, unknown>, pool: Brow
       ...(options?.audit ? { audit: options.audit } : {}),
       ...(options?.tenantAuthenticator ? { tenantAuthenticator: options.tenantAuthenticator } : {}),
     });
+    case 'pull_tabs': return pool.pullTabs(String(message.browserId));
+    case 'switch_tab': return pool.switchTab(String(message.browserId), Number(message.tabId));
+    case 'bind_current_tab': return pool.bindCurrentTab(String(message.browserId));
+    case 'create_tab': return pool.createTab(String(message.browserId), typeof message.url === 'string' ? message.url : undefined, message.active !== false);
+    case 'close_tab': return pool.closeTab(String(message.browserId), Number(message.tabId));
     case 'bridge_call': {
       const payload = message.input;
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('BRIDGE_INPUT_REQUIRED');
@@ -172,6 +246,7 @@ function authorized(request: IncomingMessage, token: string | undefined): boolea
   if (!token) return true;
   const header = request.headers.authorization;
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+  if (url.pathname === '/health' || url.pathname === '/ping') return true;
   return header === `Bearer ${token}` || url.searchParams.get('token') === token;
 }
 
@@ -198,5 +273,5 @@ function send(response: ServerResponse, status: number, value: unknown): void {
 
 function sendHtml(response: ServerResponse): void {
   response.setHeader('content-type', 'text/html; charset=utf-8');
-  response.end(`<!doctype html><meta charset="utf-8"><title>Browser Control Plane</title><style>body{font:14px system-ui;margin:2rem;background:#f6f7f9;color:#17202a}main{max-width:960px;margin:auto}form,section{background:white;padding:1rem;border-radius:8px;margin:1rem 0;box-shadow:0 1px 4px #0001}input,select,button{padding:.45rem;margin:.2rem}button{cursor:pointer}table{width:100%;border-collapse:collapse}td,th{padding:.5rem;text-align:left;border-bottom:1px solid #eee}.state{font-weight:600}</style><main><h1>Browser Control Plane</h1><p>管理 Chromium/Firefox、Bridge/CDP 连接与站点绑定。远程 Agent WebSocket：<code>/ws/agents</code>。</p><form id="add"><input name="name" placeholder="实例名" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"><select name="engine"><option value="chromium">Chromium</option><option value="firefox">Firefox</option></select><select name="mode"><option value="managed">managed</option><option value="cdp">cdp</option><option value="bridge">bridge</option></select><input name="cdpEndpoint" placeholder="CDP endpoint（cdp 模式）"><button>添加实例</button></form><section><table><thead><tr><th>名称</th><th>模式</th><th>引擎</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></section></main><script>const rows=document.querySelector('#rows');const form=document.querySelector('#add');const q=location.search;async function load(){const x=await fetch('/api/browsers'+q).then(r=>r.json());rows.replaceChildren(...x.items.map(i=>{const tr=document.createElement('tr');for(const k of ['name','mode','engine','state']){const td=document.createElement('td');td.textContent=i[k];if(k==='state')td.className='state';tr.append(td)}const td=document.createElement('td');const b=document.createElement('button');b.textContent=i.state==='READY'?'停止':'启动';b.onclick=async()=>{await fetch('/api/browsers/'+encodeURIComponent(i.id)+'/'+(i.state==='READY'?'stop':'start')+q,{method:'POST'});load()};td.append(b);tr.append(td);return tr}))}form.onsubmit=async e=>{e.preventDefault();const data=Object.fromEntries(new FormData(form));if(!data.cdpEndpoint)delete data.cdpEndpoint;await fetch('/api/browsers'+q,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...data,start:true})});form.reset();load()};load();setInterval(load,5000)</script>`);
+  response.end(`<!doctype html><meta charset="utf-8"><title>Browser Control Plane</title><style>body{font:14px system-ui;margin:2rem;background:#f6f7f9;color:#17202a}main{max-width:1100px;margin:auto}form,section{background:white;padding:1rem;border-radius:8px;margin:1rem 0;box-shadow:0 1px 4px #0001}input,select,button{padding:.45rem;margin:.2rem}button{cursor:pointer}table{width:100%;border-collapse:collapse}td,th{padding:.5rem;text-align:left;border-bottom:1px solid #eee}.state{font-weight:600}code{font-size:12px}</style><main><h1>Browser Control Plane</h1><p>管理 Chromium/Firefox、Bridge/CDP 连接与站点绑定。Bridge 扩展目录：<code>browser-bridge-extension</code>。</p><form id="add"><input name="name" placeholder="实例名" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"><select name="engine"><option value="chromium">Chromium</option><option value="firefox">Firefox</option></select><select name="mode"><option value="managed">managed</option><option value="cdp">cdp</option><option value="bridge">bridge</option></select><input name="cdpEndpoint" placeholder="CDP endpoint（cdp 模式）"><button>添加实例</button></form><section><table><thead><tr><th>名称 / ID</th><th>模式</th><th>引擎</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></section></main><script>const rows=document.querySelector('#rows');const form=document.querySelector('#add');const q=location.search;async function load(){const x=await fetch('/api/browsers'+q).then(r=>r.json());rows.replaceChildren(...x.items.map(i=>{const tr=document.createElement('tr');const first=document.createElement('td');first.append(document.createTextNode(i.name+' '));const code=document.createElement('code');code.textContent=i.id;first.append(code);tr.append(first);for(const k of ['mode','engine','state']){const td=document.createElement('td');td.textContent=i[k];if(k==='state')td.className='state';tr.append(td)}const td=document.createElement('td');const b=document.createElement('button');b.textContent=i.state==='READY'?'停止':'启动';b.onclick=async()=>{await fetch('/api/browsers/'+encodeURIComponent(i.id)+'/'+(i.state==='READY'?'stop':'start')+q,{method:'POST'});load()};td.append(b);if(i.mode==='bridge'){const copy=document.createElement('button');copy.textContent='复制 Bridge ID';copy.onclick=()=>navigator.clipboard.writeText(i.id);td.append(copy)}tr.append(td);return tr}))}form.onsubmit=async e=>{e.preventDefault();const data=Object.fromEntries(new FormData(form));if(!data.cdpEndpoint)delete data.cdpEndpoint;await fetch('/api/browsers'+q,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...data,start:true})});form.reset();load()};load();setInterval(load,5000)</script>`);
 }

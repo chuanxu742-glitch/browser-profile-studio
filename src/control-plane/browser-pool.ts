@@ -14,10 +14,19 @@ export interface BrowserInstance {
   engine: 'firefox' | 'chromium';
   mode: BrowserInstanceMode;
   state: BrowserInstanceState;
-  profileName?: string;
-  cdpEndpoint?: string;
-  noVncPort?: number;
-  sessionId?: string;
+  profileName?: string | undefined;
+  contextId?: string | undefined;
+  activeTab?: {
+    tabId?: number | undefined;
+    title?: string | undefined;
+    url?: string | undefined;
+  } | undefined;
+  cdpEndpoint?: string | undefined;
+  noVncPort?: number | undefined;
+  sessionId?: string | undefined;
+  bridgeConnectedAt?: string | undefined;
+  bridgeVersion?: string | undefined;
+  userAgent?: string | undefined;
   createdAt: string;
   updatedAt: string;
 }
@@ -42,14 +51,19 @@ interface BridgePending {
 
 export class BrowserPool {
   private readonly manager: SessionManager;
+  private readonly bridgeUrlPolicy: { assertAllowed(url: string, purpose?: 'navigation' | 'resource'): Promise<unknown> | unknown } | undefined;
   private readonly instances = new Map<string, BrowserInstance>();
   private readonly bindings = new Map<string, SiteBinding>();
   private readonly statePath: string | undefined;
   private readonly bridgeSockets = new Map<string, WebSocket>();
   private readonly bridgePending = new Map<string, BridgePending>();
 
-  public constructor(manager: SessionManager, options: { statePath?: string } = {}) {
+  public constructor(manager: SessionManager, options: {
+    statePath?: string;
+    bridgeUrlPolicy?: { assertAllowed(url: string, purpose?: 'navigation' | 'resource'): Promise<unknown> | unknown };
+  } = {}) {
     this.manager = manager;
+    this.bridgeUrlPolicy = options.bridgeUrlPolicy;
     this.statePath = options.statePath ? resolve(options.statePath) : undefined;
     this.load();
   }
@@ -60,6 +74,10 @@ export class BrowserPool {
 
   public bindingsList(): SiteBinding[] {
     return [...this.bindings.values()].map((item) => ({ ...item }));
+  }
+
+  public get(id: string): BrowserInstance {
+    return { ...this.require(id) };
   }
 
   public async add(input: {
@@ -179,28 +197,187 @@ export class BrowserPool {
     if (instance.mode !== 'bridge') throw new Error('BROWSER_NOT_IN_BRIDGE_MODE');
     this.bridgeSockets.get(id)?.close();
     this.bridgeSockets.set(id, socket);
-    this.update(instance, { state: 'READY' });
+    this.update(instance, { state: 'READY', bridgeConnectedAt: new Date().toISOString() });
     socket.on('message', (raw) => this.handleBridgeMessage(id, raw.toString()));
-    socket.on('close', () => {
-      if (this.bridgeSockets.get(id) !== socket) return;
-      this.bridgeSockets.delete(id);
-      const current = this.instances.get(id);
-      if (current) this.update(current, { state: 'AWAITING_BRIDGE' });
-      for (const [requestId, pending] of this.bridgePending) {
-        if (pending.browserId !== id) continue;
-        clearTimeout(pending.timer);
-        pending.reject(new Error('BRIDGE_DISCONNECTED'));
-        this.bridgePending.delete(requestId);
-      }
-    });
-    socket.send(JSON.stringify({ type: 'hello', protocol: 'opencli-bridge.v1', browserId: id }));
+    socket.on('close', () => this.handleBridgeClose(id, socket));
+    socket.send(JSON.stringify({ type: 'hello', protocol: 'antigravity-bridge.v1', browserId: id }));
   }
 
-  public bridgeCall(id: string, payload: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
-    try { validateBridgePayload(payload); }
-    catch (error) { return Promise.reject(error instanceof Error ? error : new Error('BRIDGE_OPERATION_DENIED')); }
+  /**
+   * 自动发现与注册 Bridge 扩展连接（零配置即插即用，参考 OpenCLI 设计）
+   * 如果提供了 specifiedId 且实例存在，直接挂载；否则等待首个 ready 握手消息自动识别或创建实例。
+   */
+  public attachOrAutoRegisterBridge(socket: WebSocket, specifiedId?: string): void {
+    if (specifiedId && this.instances.has(specifiedId)) {
+      this.attachBridge(specifiedId, socket);
+      return;
+    }
+
+    let resolvedId: string | null = specifiedId && this.instances.has(specifiedId) ? specifiedId : null;
+
+    const initialListener = (raw: unknown) => {
+      let message: Record<string, unknown>;
+      try {
+        message = JSON.parse(String(raw)) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (!message || typeof message !== 'object') return;
+
+      if (message.type === 'ready') {
+        socket.off('message', initialListener);
+        const contextId = typeof message.contextId === 'string' && message.contextId.trim() ? message.contextId.trim() : undefined;
+        const profileName = typeof message.profileName === 'string' && message.profileName.trim() ? message.profileName.trim() : undefined;
+        const version = typeof message.version === 'string' && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(message.version) ? message.version : undefined;
+        const userAgent = typeof message.userAgent === 'string' ? message.userAgent.slice(0, 500) : undefined;
+        const activeTab = message.activeTab && typeof message.activeTab === 'object' ? (message.activeTab as any) : undefined;
+
+        // 查找是否已存在相同 contextId 或 specifiedId 的 Bridge 实例
+        let instance: BrowserInstance | undefined;
+        if (specifiedId && this.instances.has(specifiedId)) {
+          instance = this.instances.get(specifiedId);
+        } else if (contextId) {
+          instance = [...this.instances.values()].find((it) => it.mode === 'bridge' && it.contextId === contextId);
+        }
+
+        const now = new Date().toISOString();
+        let targetInstance: BrowserInstance;
+        if (!instance) {
+          const rawId = specifiedId || (contextId ? `brw_${contextId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16)}` : `brw_${randomUUID().replace(/-/g, '').slice(0, 12)}`);
+          // 确保 ID 唯一
+          let finalId = rawId;
+          let counter = 1;
+          while (this.instances.has(finalId)) {
+            finalId = `${rawId}_${counter++}`;
+          }
+          const baseName = profileName || (contextId ? `Chrome (${contextId})` : `Chrome (${finalId.slice(-4)})`);
+          let finalName = safeName(baseName);
+          let nameCount = 1;
+          while ([...this.instances.values()].some((it) => it.name === finalName)) {
+            finalName = safeName(`${baseName}-${nameCount++}`);
+          }
+
+          targetInstance = {
+            id: finalId,
+            name: finalName,
+            engine: 'chromium',
+            mode: 'bridge',
+            state: 'READY',
+            contextId,
+            profileName: finalName,
+            bridgeConnectedAt: now,
+            bridgeVersion: version,
+            userAgent,
+            ...(activeTab ? { activeTab } : {}),
+            createdAt: now,
+            updatedAt: now,
+          };
+          this.instances.set(targetInstance.id, targetInstance);
+          this.persist();
+        } else {
+          this.update(instance, {
+            state: 'READY',
+            bridgeConnectedAt: now,
+            ...(version !== undefined ? { bridgeVersion: version } : {}),
+            ...(contextId !== undefined ? { contextId } : {}),
+            ...(userAgent !== undefined ? { userAgent } : {}),
+            ...(activeTab !== undefined ? { activeTab } : {}),
+          });
+          targetInstance = instance;
+        }
+
+        resolvedId = targetInstance.id;
+        this.bridgeSockets.get(resolvedId)?.close();
+        this.bridgeSockets.set(resolvedId, socket);
+
+        socket.on('message', (msgRaw) => this.handleBridgeMessage(targetInstance.id, msgRaw.toString()));
+        socket.on('close', () => this.handleBridgeClose(targetInstance.id, socket));
+
+        socket.send(JSON.stringify({ type: 'hello', protocol: 'antigravity-bridge.v1', browserId: targetInstance.id }));
+      }
+    };
+
+    socket.on('message', initialListener);
+  }
+
+  private handleBridgeClose(id: string, socket: WebSocket): void {
+    if (this.bridgeSockets.get(id) !== socket) return;
+    this.bridgeSockets.delete(id);
+    const current = this.instances.get(id);
+    if (current) {
+      delete current.bridgeConnectedAt;
+      delete current.bridgeVersion;
+      this.update(current, { state: 'AWAITING_BRIDGE' });
+    }
+    for (const [requestId, pending] of this.bridgePending) {
+      if (pending.browserId !== id) continue;
+      clearTimeout(pending.timer);
+      pending.reject(new Error('BRIDGE_DISCONNECTED'));
+      this.bridgePending.delete(requestId);
+    }
+  }
+
+  /** 拉取指定 Bridge 浏览器当前已打开的所有标签页（参考 OpenCLI browser tab list） */
+  public async pullTabs(id: string): Promise<Array<{ tabId: number; windowId?: number | undefined; active: boolean; title: string; url: string }>> {
+    const result = await this.bridgeCall(id, { op: 'tabs.list' });
+    if (!Array.isArray(result)) return [];
+    const tabs: Array<{ tabId: number; windowId?: number | undefined; active: boolean; title: string; url: string }> = result.map((item: any) => ({
+      tabId: Number(item.tabId ?? item.id),
+      windowId: item.windowId !== undefined ? Number(item.windowId) : undefined,
+      active: Boolean(item.active),
+      title: String(item.title ?? ''),
+      url: String(item.url ?? ''),
+    }));
+    const active = tabs.find((t) => t.active);
+    if (active) {
+      const instance = this.instances.get(id);
+      if (instance) {
+        this.update(instance, { activeTab: { tabId: active.tabId, title: active.title, url: active.url } });
+      }
+    }
+    return tabs;
+  }
+
+  /** 激活/绑定切换到特定标签页 */
+  public async switchTab(id: string, tabId: number): Promise<unknown> {
+    const result = await this.bridgeCall(id, { op: 'tabs.switch', tabId });
+    const instance = this.instances.get(id);
+    if (instance && result && typeof result === 'object') {
+      const res = result as any;
+      this.update(instance, { activeTab: { tabId: res.tabId ?? tabId, title: res.title ?? '', url: res.url ?? '' } });
+    }
+    return result;
+  }
+
+  /** 绑定当前活动标签页 */
+  public async bindCurrentTab(id: string): Promise<unknown> {
+    const result = await this.bridgeCall(id, { op: 'bind.current' });
+    const instance = this.instances.get(id);
+    if (instance && result && typeof result === 'object') {
+      const res = result as any;
+      this.update(instance, { activeTab: { tabId: res.tabId, title: res.title ?? '', url: res.url ?? '' } });
+    }
+    return result;
+  }
+
+  /** 创建新标签页 */
+  public async createTab(id: string, url?: string, active = true): Promise<unknown> {
+    return this.bridgeCall(id, { op: 'tabs.create', ...(url ? { url } : {}), active });
+  }
+
+  /** 关闭指定标签页 */
+  public async closeTab(id: string, tabId: number): Promise<unknown> {
+    return this.bridgeCall(id, { op: 'tabs.close', tabId });
+  }
+
+  public async bridgeCall(id: string, payload: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
+    validateBridgePayload(payload);
+    if (payload.op === 'navigate') {
+      if (typeof payload.url !== 'string') throw new Error('BRIDGE_URL_REQUIRED');
+      await this.bridgeUrlPolicy?.assertAllowed(payload.url, 'navigation');
+    }
     const socket = this.bridgeSockets.get(id);
-    if (!socket || socket.readyState !== 1) return Promise.reject(new Error('BRIDGE_NOT_CONNECTED'));
+    if (!socket || socket.readyState !== 1) throw new Error('BRIDGE_NOT_CONNECTED');
     const requestId = `bridge_${randomUUID().replace(/-/g, '')}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -248,10 +425,22 @@ export class BrowserPool {
   }
 
   private handleBridgeMessage(id: string, raw: string): void {
+    if (Buffer.byteLength(raw, 'utf8') > 9 * 1024 * 1024) {
+      this.bridgeSockets.get(id)?.close(1009, 'bridge message too large');
+      this.rejectBridgeCalls(id, 'BRIDGE_RESPONSE_TOO_LARGE');
+      return;
+    }
     let message: Record<string, unknown>;
     try { message = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
+    if (!message || Array.isArray(message) || typeof message !== 'object') return;
     const current = this.instances.get(id);
-    if (message.type === 'ready' && current) this.update(current, { state: 'READY' });
+    if (message.type === 'ready' && current) {
+      const version = typeof message.version === 'string' && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(message.version)
+        ? message.version
+        : undefined;
+      if (version) this.update(current, { state: 'READY', bridgeVersion: version });
+      else this.update(current, { state: 'READY' });
+    }
     const requestId = typeof message.requestId === 'string' ? message.requestId : undefined;
     if (!requestId) return;
     const pending = this.bridgePending.get(requestId);
@@ -278,6 +467,8 @@ export class BrowserPool {
       for (const instance of state.instances ?? []) {
         const restored: BrowserInstance = { ...instance, state: instance.mode === 'bridge' ? 'AWAITING_BRIDGE' : 'STOPPED' };
         delete restored.sessionId;
+        delete restored.bridgeConnectedAt;
+        delete restored.bridgeVersion;
         this.instances.set(instance.id, restored);
       }
       for (const binding of state.bindings ?? []) this.bindings.set(binding.host, binding);
@@ -316,7 +507,8 @@ function validateBridgePayload(payload: Record<string, unknown>): void {
 
 function safeName(value: string): string {
   const normalized = value.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(normalized)) throw new Error('INVALID_NAME');
+  if (!normalized || normalized.length > 64) throw new Error('INVALID_NAME');
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(normalized)) throw new Error('INVALID_NAME');
   return normalized;
 }
 

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Antigravity Browser Bridge</title>
+  <style>
+    body{font:13px/1.45 system-ui,sans-serif;width:360px;margin:0;padding:14px;color:#17202a;background:#f6f7f9}
+    h1{font-size:15px;margin:0 0 10px;display:flex;align-items:center;justify-content:space-between}
+    .badge-status{font-size:11px;padding:2px 8px;border-radius:12px;font-weight:normal}
+    .badge-on{background:#e6f4ea;color:#137333}
+    .badge-off{background:#fce8e6;color:#c5221f}
+    .status-card{padding:10px;border-radius:8px;background:#fff;border:1px solid #e2e8f0;margin-bottom:12px;font-size:12px}
+    .status-row{display:flex;justify-content:space-between;margin-bottom:4px}
+    .field{margin:8px 0}label{display:block;font-weight:600;margin-bottom:3px;font-size:12px}
+    input{box-sizing:border-box;width:100%;padding:6px 8px;border:1px solid #cbd5e0;border-radius:6px;background:#fff;font-size:12px}
+    .actions{display:flex;gap:6px;margin:10px 0}button{border:0;border-radius:6px;padding:6px 10px;cursor:pointer;background:#2457d6;color:#fff;font-size:12px;font-weight:500}
+    button.secondary{background:#4a5568}button.outline{background:transparent;border:1px solid #cbd5e0;color:#2d3748}
+    details{margin-top:10px;font-size:12px;color:#4a5568}summary{cursor:pointer;font-weight:600}
+    .tab-list{max-height:160px;overflow-y:auto;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin-top:6px;padding:4px}
+    .tab-item{padding:6px;border-bottom:1px solid #edf2f7;display:flex;align-items:center;justify-content:space-between;cursor:pointer}
+    .tab-item:last-child{border-bottom:0}
+    .tab-item:hover{background:#f7fafc}
+    .tab-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px;font-size:12px}
+    .tab-badge{font-size:10px;background:#e2e8f0;padding:2px 4px;border-radius:4px;color:#4a5568}
+    .tab-badge.active{background:#c6f6d5;color:#22543d}
+    .hint{color:#718096;font-size:11px;margin-top:8px}
+  </style>
+</head>
+<body>
+  <h1>
+    <span>🌐 浏览器桥接 (Bridge)</span>
+    <span class="badge-status badge-off" id="conn-badge">探测中</span>
+  </h1>
+
+  <div class="status-card">
+    <div class="status-row"><span>连接状态：</span><strong id="conn-text">探测本地控制面中…</strong></div>
+    <div class="status-row"><span>实例标识：</span><code id="browser-id-text">-</code></div>
+    <div class="status-row"><span>服务端口：</span><span id="endpoint-text">-</span></div>
+    <div class="status-row"><span>当前绑定：</span><span id="bound-tab-text">无</span></div>
+  </div>
+
+  <div class="field">
+    <label for="profileName">当前浏览器别名（用于 Studio 与 Agent 识别）</label>
+    <input id="profileName" placeholder="例如：我的常用Chrome主号">
+  </div>
+
+  <div class="actions">
+    <button id="save">💾 保存别名并重连</button>
+    <button class="secondary" id="bind">📌 绑定当前标签页</button>
+    <button class="outline" id="btn-pull-tabs">📋 拉取所有标签</button>
+  </div>
+
+  <div id="tabs-container" style="display:none;margin-top:10px;">
+    <label>当前浏览器打开的标签页（点击直接绑定）：</label>
+    <div class="tab-list" id="tabs-list"></div>
+  </div>
+
+  <details>
+    <summary>⚙️ 高级连接选项（默认自动探测）</summary>
+    <div class="field" style="margin-top:6px;">
+      <label for="endpoint">指定控制面 WebSocket 地址（留空则自动探测 8081 / 3000）</label>
+      <input id="endpoint" placeholder="ws://127.0.0.1:8081">
+    </div>
+    <div class="field">
+      <label for="browserId">指定 Browser ID（可选，留空则自动注册）</label>
+      <input id="browserId" placeholder="自动注册或指定 brw_...">
+    </div>
+    <div class="field">
+      <label for="token">控制面 Token（如已启用鉴权）</label>
+      <input id="token" type="password" autocomplete="off">
+    </div>
+  </details>
+
+  <p class="hint">已兼容 OpenCLI 架构：免关闭浏览器、免解密 DPAPI Cookie，即插即用。</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
