@@ -83,7 +83,7 @@ describe('Real Browser Stealth and Anti-Detect Benchmark Test', () => {
       expect(completedSnapshot.text).toContain('"hasChromeRuntime": false');
       expect(completedSnapshot.text).toContain('"toStringProtected": true');
       expect(completedSnapshot.text).toContain('hardwareConcurrency');
-      expect(completedSnapshot.text).toContain('deviceMemory');
+      expect(completedSnapshot.text).not.toContain('"deviceMemory"');
     } finally {
       await manager.stop(session.sessionId, 'test_finish');
       await manager.shutdown('test_cleanup');

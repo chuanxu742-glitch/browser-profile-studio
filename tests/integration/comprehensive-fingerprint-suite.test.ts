@@ -232,7 +232,7 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
 
       // 5. 硬件参数自洽
       expect(metrics.hardwareConcurrency).toBeGreaterThanOrEqual(4);
-      expect(metrics.deviceMemory).toBeGreaterThanOrEqual(4);
+      expect(metrics.deviceMemory).toBeUndefined();
       expect(metrics.screenWidth).toBeGreaterThanOrEqual(1024);
 
       // 6. GeoIP 时区与语言对齐 (US -> America/New_York / en-US)
