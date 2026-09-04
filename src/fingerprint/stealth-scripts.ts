@@ -1503,6 +1503,12 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
     if (typeof Worker !== 'undefined' && Worker.prototype) {
       hookOnMessage(Worker.prototype);
     }
+    if (typeof ServiceWorkerContainer !== 'undefined' && ServiceWorkerContainer.prototype) {
+      hookOnMessage(ServiceWorkerContainer.prototype);
+    }
+    if (typeof BroadcastChannel !== 'undefined' && BroadcastChannel.prototype) {
+      hookOnMessage(BroadcastChannel.prototype);
+    }
 
     if (typeof EventTarget !== 'undefined' && EventTarget.prototype && EventTarget.prototype.addEventListener) {
       const origEventTargetAdd = EventTarget.prototype.addEventListener;
@@ -1510,7 +1516,8 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
         if (type === 'message' && typeof listener === 'function') {
           const isMsgReceiver = (typeof Worker !== 'undefined' && this instanceof Worker)
             || (typeof MessagePort !== 'undefined' && this instanceof MessagePort)
-            || (typeof ServiceWorkerContainer !== 'undefined' && this instanceof ServiceWorkerContainer);
+            || (typeof ServiceWorkerContainer !== 'undefined' && this instanceof ServiceWorkerContainer)
+            || (typeof BroadcastChannel !== 'undefined' && this instanceof BroadcastChannel);
           if (isMsgReceiver) {
             const wrapped = markAsNative(function(event) {
               if (event && event.data) alignWorkerFingerprintData(event.data);

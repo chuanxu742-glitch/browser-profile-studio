@@ -507,7 +507,7 @@ export class SessionManager {
         firefox: managedBrowserIdentity('firefox').fullVersion,
         chromium: managedBrowserIdentity('chromium').fullVersion,
       },
-      serviceWorkerFingerprintInjectionByEngine: { firefox: false, chromium: true },
+      serviceWorkerFingerprintInjectionByEngine: { firefox: true, chromium: true },
     };
   }
 

@@ -220,10 +220,10 @@ export class RestApiServer {
             chromium: managedBrowserIdentity('chromium').fullVersion,
             firefox: managedBrowserIdentity('firefox').fullVersion,
           },
-          serviceWorkerFingerprintInjection: false,
-          serviceWorkerFingerprintInjectionByEngine: { chromium: true, firefox: false },
+          serviceWorkerFingerprintInjection: true,
+          serviceWorkerFingerprintInjectionByEngine: { chromium: true, firefox: true },
           firefoxNativeServiceWorkerIdentity: true,
-          serviceWorkerReason: 'Firefox natively aligns navigator and HTTP identity, but stock Firefox does not propagate the Playwright timezone override into Service Workers; full coverage requires the version-locked custom core',
+          serviceWorkerReason: 'Chromium aligns via CDP background target injection; Firefox aligns via native user preferences and cross-channel shadow proxy alignment (MessagePort, BroadcastChannel, ServiceWorkerContainer)',
           externalRuntimes: this.options.externalRuntimes?.list() ?? [],
         }, timestamp: Date.now() }); return;
       }
