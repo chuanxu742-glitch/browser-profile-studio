@@ -4,7 +4,7 @@ import type { RedisOptions } from 'ioredis';
 
 import type { TaskQueueAdapter } from './queue-adapter.js';
 import { TaskLeaseLostError } from './types.js';
-import type { DistributedTaskRecord, WorkerNodeInfo, TaskPriority } from './types.js';
+import type { DistributedTaskRecord, TaskListFilter, WorkerNodeInfo, TaskPriority } from './types.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from './tenant.js';
 
 const PRIORITY_SCORES: Record<TaskPriority, number> = {
@@ -324,19 +324,23 @@ export class RedisQueueAdapter implements TaskQueueAdapter {
     }
   }
 
-  public async listTasks(limit = 100, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord[]> {
+  public async listTasks(limit = 100, tenantId = DEFAULT_TENANT_ID, filter?: TaskListFilter): Promise<DistributedTaskRecord[]> {
     const normalizedTenantId = normalizeTenantId(tenantId);
     const boundedLimit = boundedInteger(limit, 1, 500, 100);
     const results: DistributedTaskRecord[] = [];
+    const scanLimit = filter ? 10_000 : boundedLimit;
     for (let shard = 0; shard < this.shardCount && results.length < boundedLimit; shard++) {
-      const keys = await this.scanKeys(this.taskPattern(normalizedTenantId, shard), boundedLimit - results.length);
+      const keys = await this.scanKeys(this.taskPattern(normalizedTenantId, shard), scanLimit);
       if (keys.length === 0) continue;
       const values = await this.redis.mget(keys);
       for (const value of values) {
         if (!value) continue;
         try {
           const task = JSON.parse(value) as DistributedTaskRecord;
-          if (task.tenantId === normalizedTenantId) results.push(task);
+          if (task.tenantId === normalizedTenantId && (!filter || matchesTaskFilter(task, filter))) {
+            results.push(task);
+            if (results.length >= boundedLimit) break;
+          }
         } catch {}
       }
     }
@@ -592,8 +596,18 @@ export class RedisQueueAdapter implements TaskQueueAdapter {
       } while (cursor !== '0' && keys.length < boundedLimit);
       if (keys.length >= boundedLimit) break;
     }
+
     return keys.slice(0, boundedLimit);
   }
+}
+function matchesTaskFilter(task: DistributedTaskRecord, filter: TaskListFilter): boolean {
+  return (filter.projectId === undefined || task.projectId === filter.projectId)
+    && (filter.runId === undefined || task.runId === filter.runId)
+    && (filter.state === undefined || task.state === filter.state)
+    && (filter.mode === undefined || task.mode === filter.mode)
+    && (filter.priority === undefined || task.priority === filter.priority)
+    && (filter.createdAfter === undefined || task.createdAt >= filter.createdAfter)
+    && (filter.createdBefore === undefined || task.createdAt <= filter.createdBefore);
 }
 
 function standaloneOptions(redisUrl?: string): RedisOptions {

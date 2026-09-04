@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { DistributedTaskRecord, WorkerNodeInfo } from './types.js';
+import type { DistributedTaskRecord, TaskListFilter, WorkerNodeInfo } from './types.js';
 import { TaskLeaseLostError } from './types.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from './tenant.js';
 
@@ -21,7 +21,7 @@ export interface TaskQueueAdapter {
   /** 获取单个任务状态 */
   getTask(taskId: string, tenantId?: string): Promise<DistributedTaskRecord | null>;
   /** 查询所有/过滤任务 */
-  listTasks(limit?: number, tenantId?: string): Promise<DistributedTaskRecord[]>;
+  listTasks(limit?: number, tenantId?: string, filter?: TaskListFilter): Promise<DistributedTaskRecord[]>;
   /** 注册/刷新 Worker 心跳 */
   updateWorkerHeartbeat(worker: WorkerNodeInfo): Promise<void>;
   /** 获取所有活跃 Worker 节点列表 */
@@ -129,9 +129,12 @@ export class MemoryQueueAdapter implements TaskQueueAdapter {
     return this.tasks.get(taskKey(normalizeTenantId(tenantId), taskId)) ?? null;
   }
 
-  public async listTasks(limit = 100, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord[]> {
+  public async listTasks(limit = 100, tenantId = DEFAULT_TENANT_ID, filter?: TaskListFilter): Promise<DistributedTaskRecord[]> {
     const normalizedTenantId = normalizeTenantId(tenantId);
-    return Array.from(this.tasks.values()).filter((task) => task.tenantId === normalizedTenantId).slice(0, limit);
+    return Array.from(this.tasks.values())
+      .filter((task) => task.tenantId === normalizedTenantId)
+      .filter((task) => !filter || matchesTaskFilter(task, filter))
+      .slice(0, limit);
   }
 
   public async updateWorkerHeartbeat(worker: WorkerNodeInfo): Promise<void> {
@@ -213,6 +216,16 @@ function assertLeaseOwnership(
   }
   // A task record written by an older version has no fencing token. Permit a
   // compatible migration/update until a new dequeue assigns one.
+}
+
+function matchesTaskFilter(task: DistributedTaskRecord, filter: TaskListFilter): boolean {
+  return (filter.projectId === undefined || task.projectId === filter.projectId)
+    && (filter.runId === undefined || task.runId === filter.runId)
+    && (filter.state === undefined || task.state === filter.state)
+    && (filter.mode === undefined || task.mode === filter.mode)
+    && (filter.priority === undefined || task.priority === filter.priority)
+    && (filter.createdAfter === undefined || task.createdAt >= filter.createdAfter)
+    && (filter.createdBefore === undefined || task.createdAt <= filter.createdBefore);
 }
 
 function taskKey(tenantId: string, value: string): string {

@@ -8,7 +8,7 @@ import type { SessionManager } from '../browser/session-manager.js';
 import { fetchPage } from '../fetcher/http-client.js';
 import type { FetchOptions, FetchResult, FetchUrlPolicy } from '../fetcher/types.js';
 import { isTaskLeaseLostError } from './types.js';
-import type { DistributedTaskRecord, WorkerNodeInfo } from './types.js';
+import type { DistributedTaskRecord, TaskEvent, WorkerNodeInfo } from './types.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from './tenant.js';
 
 const QUEUE_RECOVERY_DELAY_MS = 1_000;
@@ -268,6 +268,7 @@ export class WorkerDaemon {
     this.activeControllers.set(controllerKey, controller);
     const leaseTimer = this.startLeaseRenewal(task, controller);
 
+    appendTaskEvent(task, 'running', 'Worker 已领取任务');
     try {
       let resultData: unknown;
 
@@ -294,6 +295,8 @@ export class WorkerDaemon {
         const session = (await sm.start({
           headless: true,
         })) as { sessionId: string };
+        task.sessionId = session.sessionId;
+        appendTaskEvent(task, 'running', '已创建浏览器会话');
 
         try {
           await sm.open(session.sessionId, task.url, { timeoutMs: task.timeoutMs });
@@ -308,11 +311,11 @@ export class WorkerDaemon {
         }
       }
 
+      appendTaskEvent(task, 'completed', '任务执行完成');
       task.state = 'COMPLETED';
       task.completedAt = Date.now();
       task.durationMs = Date.now() - start;
       task.result = resultData;
-
       // 写入完成状态
       try {
         await this.persistCompletedTask(task);
@@ -326,10 +329,12 @@ export class WorkerDaemon {
       }
     } catch (err: unknown) {
       const errorMsg = safeTaskError(err);
+      task.errorCode = taskErrorCode(err);
       if (task.retries < task.maxRetries) {
         task.retries += 1;
         task.state = 'RETRYING';
         task.error = errorMsg;
+        appendTaskEvent(task, 'retrying', `任务将重试（第 ${task.retries} 次）`);
         // If this write fails, the existing Redis lease (or the recovery
         // enqueue below) remains the source of eventual delivery. Do not
         // discard the task merely because its status write was unavailable.
@@ -360,6 +365,7 @@ export class WorkerDaemon {
         task.completedAt = Date.now();
         task.durationMs = Date.now() - start;
         task.error = errorMsg;
+        appendTaskEvent(task, 'failed', '任务执行失败');
         try {
           await this.persistTask(task);
         } catch (error: unknown) {
@@ -553,4 +559,21 @@ function safeTaskError(error: unknown): string {
     return error.message.slice(0, 64);
   }
   return 'Task execution failed.';
+}
+
+function appendTaskEvent(task: DistributedTaskRecord, phase: TaskEvent['phase'], message: string): void {
+  const state: TaskEvent['state'] = phase === 'queued' ? 'PENDING' : phase === 'running' ? 'RUNNING' : phase === 'retrying' ? 'RETRYING' : phase === 'completed' ? 'COMPLETED' : phase === 'failed' ? 'FAILED' : 'CANCELLED';
+  task.events = [...(task.events ?? []), {
+    at: Date.now(),
+    state,
+    phase,
+    message,
+    ...(task.workerId ? { workerId: task.workerId } : {}),
+  }].slice(-50);
+}
+
+function taskErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_-]{1,63}$/.test(code) ? code : undefined;
 }

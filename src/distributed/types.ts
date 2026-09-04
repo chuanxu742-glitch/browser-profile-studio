@@ -4,6 +4,14 @@ export type TaskPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'CRITICAL';
 export type TaskExecutionMode = 'fetch' | 'browser';
 export type TaskState = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'RETRYING' | 'CANCELLED';
 
+export interface TaskEvent {
+  at: number;
+  state: TaskState;
+  phase: 'queued' | 'running' | 'retrying' | 'completed' | 'failed' | 'cancelled';
+  message: string;
+  workerId?: string | undefined;
+}
+
 /**
  * Raised when a worker tries to mutate a task after its lease has been taken
  * over by another worker. Callers must stop retrying that local task: the
@@ -28,6 +36,9 @@ export function isTaskLeaseLostError(error: unknown): error is TaskLeaseLostErro
 
 export interface DistributedTaskDefinition {
   taskId?: string | undefined;
+  /** Stable project/run labels for crawl observability and result correlation. */
+  projectId?: string | undefined;
+  runId?: string | undefined;
   url: string;
   mode?: TaskExecutionMode | undefined; // 'fetch' 毫秒级轻量抓取 | 'browser' 浏览器渲染抓取
   priority?: TaskPriority | undefined;
@@ -39,6 +50,8 @@ export interface DistributedTaskDefinition {
 export interface DistributedTaskRecord {
   id: string;
   tenantId: string;
+  projectId?: string | undefined;
+  runId?: string | undefined;
   url: string;
   mode: TaskExecutionMode;
   priority: TaskPriority;
@@ -48,6 +61,7 @@ export interface DistributedTaskRecord {
   workerId?: string | undefined;
   /** Fencing token assigned atomically when a worker claims the task. */
   leaseId?: string | undefined;
+  sessionId?: string | undefined;
   extractionSchema?: ExtractionSchema | undefined;
   timeoutMs: number;
   createdAt: number;
@@ -55,8 +69,27 @@ export interface DistributedTaskRecord {
   completedAt?: number | undefined;
   result?: unknown | undefined;
   error?: string | undefined;
+  errorCode?: string | undefined;
   durationMs?: number | undefined;
+  events?: TaskEvent[] | undefined;
 }
+
+export interface TaskListFilter {
+  projectId?: string | undefined;
+  runId?: string | undefined;
+  state?: TaskState | undefined;
+  mode?: TaskExecutionMode | undefined;
+  priority?: TaskPriority | undefined;
+  createdAfter?: number | undefined;
+  createdBefore?: number | undefined;
+}
+export interface TaskUrlPreflight {
+  allowed: boolean;
+  origin?: string | undefined;
+  policy: 'allow' | 'deny' | 'unavailable';
+  reason: string;
+}
+
 
 export interface WorkerNodeInfo {
   workerId: string;

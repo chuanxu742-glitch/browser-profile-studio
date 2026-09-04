@@ -109,6 +109,37 @@ describe('分布式队列与主调度器 (Master Scheduler & Queue)', () => {
     await adapter.close();
   });
 
+  it('按项目和运行批次筛选任务，并保持租户隔离', async () => {
+    const scheduler = new DistributedMasterScheduler({
+      adapter: new MemoryQueueAdapter(),
+      startLocalWorker: false,
+      urlPolicy: new UrlPolicy({
+        allowedHosts: ['example.com'],
+        resourceHosts: ['example.com'],
+        resolver: () => ['93.184.216.34'],
+      }),
+    });
+
+    try {
+      await scheduler.submitBatch([
+        { taskId: 'crawl-a', projectId: 'catalog', runId: 'run-1', url: 'https://example.com/catalog/a' },
+        { taskId: 'crawl-b', projectId: 'catalog', runId: 'run-2', url: 'https://example.com/catalog/b' },
+      ], 'tenant-a');
+      await scheduler.submitTask({
+        taskId: 'crawl-c',
+        projectId: 'other',
+        runId: 'run-1',
+        url: 'https://example.com/other',
+      }, 'tenant-b');
+
+      await expect(scheduler.listTasks({ projectId: 'catalog', runId: 'run-1' }, 10, 'tenant-a'))
+        .resolves.toMatchObject([{ id: 'crawl-a', projectId: 'catalog', runId: 'run-1' }]);
+      await expect(scheduler.listTasks({ projectId: 'catalog' }, 10, 'tenant-b')).resolves.toEqual([]);
+    } finally {
+      await scheduler.shutdown();
+    }
+  });
+
   it('批量 URL 声明失败时不应留下半批次占坑', async () => {
     const adapter = new MemoryQueueAdapter();
 

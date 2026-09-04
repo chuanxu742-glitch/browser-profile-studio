@@ -11,6 +11,9 @@ import type {
   ClusterStatus,
   DistributedTaskDefinition,
   DistributedTaskRecord,
+  TaskEvent,
+  TaskListFilter,
+  TaskUrlPreflight,
   WorkerNodeInfo,
 } from './types.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from './tenant.js';
@@ -78,6 +81,8 @@ export class DistributedMasterScheduler {
   public async submitTask(def: DistributedTaskDefinition, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord> {
     const normalizedTenantId = normalizeTenantId(tenantId);
     const id = this.taskId(def.taskId);
+    const projectId = this.taskLabel(def.projectId, 'projectId');
+    const runId = this.taskLabel(def.runId, 'runId');
     const mode = this.taskMode(def.mode);
     const priority = this.taskPriority(def.priority);
     const maxRetries = this.maxRetries(def.maxRetries);
@@ -87,6 +92,8 @@ export class DistributedMasterScheduler {
     const record: DistributedTaskRecord = {
       id,
       tenantId: normalizedTenantId,
+      ...(projectId ? { projectId } : {}),
+      ...(runId ? { runId } : {}),
       url,
       mode,
       priority,
@@ -96,6 +103,7 @@ export class DistributedMasterScheduler {
       extractionSchema: def.extractionSchema,
       timeoutMs,
       createdAt: Date.now(),
+      events: [{ at: Date.now(), state: 'PENDING', phase: 'queued', message: '任务已排队' }],
     };
 
     try {
@@ -119,6 +127,8 @@ export class DistributedMasterScheduler {
     }
     const normalized = defs.map((def) => ({
       id: this.taskId(def.taskId),
+      projectId: this.taskLabel(def.projectId, 'projectId'),
+      runId: this.taskLabel(def.runId, 'runId'),
       mode: this.taskMode(def.mode),
       priority: this.taskPriority(def.priority),
       maxRetries: this.maxRetries(def.maxRetries),
@@ -151,6 +161,8 @@ export class DistributedMasterScheduler {
       return {
         id: normalizedTask?.id ?? this.taskId(def.taskId),
         tenantId: normalizedTenantId,
+        ...(normalizedTask?.projectId ? { projectId: normalizedTask.projectId } : {}),
+        ...(normalizedTask?.runId ? { runId: normalizedTask.runId } : {}),
         url: approvedUrls[index] ?? def.url,
         mode: normalizedTask?.mode ?? 'fetch',
         priority: normalizedTask?.priority ?? 'NORMAL',
@@ -160,6 +172,7 @@ export class DistributedMasterScheduler {
         extractionSchema: def.extractionSchema,
         timeoutMs: normalizedTask?.timeoutMs ?? 30_000,
         createdAt: Date.now(),
+        events: [{ at: Date.now(), state: 'PENDING', phase: 'queued', message: '任务已排队' }],
       };
     });
 
@@ -173,6 +186,82 @@ export class DistributedMasterScheduler {
 
   public async getTask(taskId: string, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord | null> {
     return this.adapter.getTask(taskId, normalizeTenantId(tenantId));
+  }
+
+  public async listTasks(
+    filter: TaskListFilter = {},
+    limit = 100,
+    tenantId = DEFAULT_TENANT_ID,
+  ): Promise<DistributedTaskRecord[]> {
+    const normalizedFilter: TaskListFilter = {
+      ...(filter.projectId !== undefined ? { projectId: this.taskLabel(filter.projectId, 'projectId') } : {}),
+      ...(filter.runId !== undefined ? { runId: this.taskLabel(filter.runId, 'runId') } : {}),
+      ...(filter.state !== undefined ? { state: filter.state } : {}),
+      ...(filter.mode !== undefined ? { mode: filter.mode } : {}),
+      ...(filter.priority !== undefined ? { priority: filter.priority } : {}),
+      ...(filter.createdAfter !== undefined ? { createdAfter: filter.createdAfter } : {}),
+      ...(filter.createdBefore !== undefined ? { createdBefore: filter.createdBefore } : {}),
+    };
+    return this.adapter.listTasks(limit, normalizeTenantId(tenantId), normalizedFilter);
+  }
+
+  public async preflightTaskUrl(url: string, tenantId = DEFAULT_TENANT_ID): Promise<TaskUrlPreflight> {
+    let origin: string | undefined;
+    try {
+      origin = new URL(url).origin;
+    } catch {
+      return { allowed: false, policy: 'deny', reason: 'invalid-url' };
+    }
+    if (!this.urlPolicy?.assertAllowed) {
+      return { allowed: false, origin, policy: 'unavailable', reason: 'missing-url-policy' };
+    }
+    try {
+      const decision = await this.urlPolicy.assertAllowed(url, 'navigation');
+      const allowed = decision instanceof URL
+        || (typeof decision === 'object' && decision !== null && 'allowed' in decision
+          ? Boolean((decision as { allowed?: unknown }).allowed)
+          : decision !== false);
+      return { allowed, origin, policy: allowed ? 'allow' : 'deny', reason: allowed ? 'approved' : 'url-not-allowed' };
+    } catch (error: unknown) {
+      return {
+        allowed: false,
+        origin,
+        policy: 'deny',
+        reason: error instanceof Error ? error.message.slice(0, 120) : 'policy-denied',
+      };
+    }
+  }
+
+  public async cancelTask(taskId: string, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord> {
+    const task = await this.getTask(taskId, tenantId);
+    if (!task) throw new Error('TASK_NOT_FOUND');
+    if (task.state === 'RUNNING') throw new Error('TASK_RUNNING');
+    if (task.state === 'CANCELLED') return task;
+    const updated: DistributedTaskRecord = {
+      ...task,
+      state: 'CANCELLED',
+      completedAt: Date.now(),
+      events: appendTaskEvent(task, 'cancelled', '任务已由操作员取消'),
+    };
+    await this.adapter.updateTask(updated);
+    return updated;
+  }
+
+  public async retryTask(taskId: string, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord> {
+    const task = await this.getTask(taskId, tenantId);
+    if (!task) throw new Error('TASK_NOT_FOUND');
+    if (task.state !== 'FAILED' && task.state !== 'CANCELLED') throw new Error('TASK_NOT_RETRYABLE');
+    const updated: DistributedTaskRecord = {
+      ...task,
+      state: 'RETRYING',
+      retries: 0,
+      completedAt: undefined,
+      error: undefined,
+      errorCode: undefined,
+      events: appendTaskEvent(task, 'retrying', '任务已重新排队'),
+    };
+    await this.adapter.enqueueTask(updated);
+    return updated;
   }
 
   public async getClusterStatus(tenantId = DEFAULT_TENANT_ID): Promise<ClusterStatus> {
@@ -245,6 +334,7 @@ export class DistributedMasterScheduler {
     try {
       await this.adapter.releaseUrls(urls, tenantId);
     } catch (releaseError: unknown) {
+
       throw new AggregateError(
         [enqueueError, releaseError],
         'Task enqueue failed and URL claim compensation also failed.',
@@ -258,6 +348,16 @@ export class DistributedMasterScheduler {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
       throw new BrowserToolError('INVALID_ARGUMENT', 'taskId contains invalid characters.', {
         details: { reason: 'invalid-task-id' },
+        retryable: false,
+      });
+    }
+    return value;
+  }
+  private taskLabel(value: string | undefined, name: string): string | undefined {
+    if (value === undefined) return undefined;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)) {
+      throw new BrowserToolError('INVALID_ARGUMENT', `${name} contains invalid characters.`, {
+        details: { reason: `invalid-${name}` },
         retryable: false,
       });
     }
@@ -285,4 +385,19 @@ export class DistributedMasterScheduler {
     if (value !== undefined && !Number.isFinite(value)) throw new BrowserToolError('INVALID_ARGUMENT', 'timeoutMs is invalid.');
     return Math.max(1_000, Math.min(120_000, Math.floor(value ?? 30_000)));
   }
+}
+
+function appendTaskEvent(
+  task: DistributedTaskRecord,
+  phase: 'queued' | 'running' | 'retrying' | 'completed' | 'failed' | 'cancelled',
+  message: string,
+): NonNullable<DistributedTaskRecord['events']> {
+  const state: TaskEvent['state'] = phase === 'queued' ? 'PENDING' : phase === 'running' ? 'RUNNING' : phase === 'retrying' ? 'RETRYING' : phase === 'completed' ? 'COMPLETED' : phase === 'failed' ? 'FAILED' : 'CANCELLED';
+  return [...(task.events ?? []), {
+    at: Date.now(),
+    state,
+    phase,
+    message,
+    ...(task.workerId ? { workerId: task.workerId } : {}),
+  }].slice(-50);
 }
