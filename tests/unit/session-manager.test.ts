@@ -229,6 +229,33 @@ describe('browser-only SessionManager', () => {
     }
   });
 
+  it('requires an explicit proxy-exit timezone for fingerprinted sessions', async () => {
+    const fixture = fakeSession('ses_proxy_geo_0001');
+    const manager = new SessionManager({
+      cluster: false,
+      sessionFactory: () => fixture.session,
+    });
+
+    try {
+      await expect(manager.start({
+        fingerprint: true,
+        proxy: 'http://127.0.0.1:8080',
+        countryCode: 'US',
+      })).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        message: expect.stringContaining('explicit IANA timezone'),
+      });
+      await expect(manager.start({
+        fingerprint: true,
+        proxy: 'http://127.0.0.1:8080',
+        countryCode: 'US',
+        timezone: 'America/Los_Angeles',
+      })).resolves.toBe(fixture.session);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
   it('cluster:false 下所有集群方法都稳定拒绝为 INVALID_STATE', async () => {
     const manager = new SessionManager({ cluster: false });
 

@@ -167,12 +167,20 @@ async function runBenchmarks() {
   });
 
   console.log('🚀 正在启动带有指纹伪装和拟人交互环境的浏览器会话...');
+  const benchmarkTimezone = process.env.BENCHMARK_TIMEZONE?.trim();
+  const benchmarkLatitude = Number(process.env.BENCHMARK_LATITUDE);
+  const benchmarkLongitude = Number(process.env.BENCHMARK_LONGITUDE);
+  const hasBenchmarkCoordinates = Number.isFinite(benchmarkLatitude) && Number.isFinite(benchmarkLongitude);
   const session = await manager.start({
-    headless: true,
+    headless: process.env.BENCHMARK_HEADLESS !== 'false',
     inputProfile: 'paced',
     fingerprint: true,
     fingerprintSeed: 987654,
-    countryCode: 'US',
+    countryCode: process.env.BENCHMARK_COUNTRY?.trim() || 'US',
+    ...(benchmarkTimezone ? { timezone: benchmarkTimezone } : {}),
+    ...(hasBenchmarkCoordinates
+      ? { geolocation: { latitude: benchmarkLatitude, longitude: benchmarkLongitude, accuracy: 25 } }
+      : {}),
   });
 
   const results: Array<{
@@ -180,7 +188,7 @@ async function runBenchmarks() {
     url: string;
     category: string;
     focus: string;
-    status: 'SUCCESS' | 'TIMEOUT' | 'NETWORK_ERROR';
+    status: 'LOADED' | 'TIMEOUT' | 'NETWORK_ERROR';
     details: string;
     screenshotPath?: string;
   }> = [];
@@ -205,7 +213,7 @@ async function runBenchmarks() {
         ? snapshot.text.slice(0, 300).replace(/\s+/g, ' ').trim()
         : 'Page loaded successfully';
 
-      console.log(`   ✅ 页面加载并检测成功! 截图已保存至: artifacts/benchmarks/${imgFileName}`);
+      console.log(`   ✅ 页面加载并已采集证据。截图已保存至: artifacts/benchmarks/${imgFileName}`);
       console.log(`   📝 页面内容摘要: ${snippet}`);
 
       results.push({
@@ -213,12 +221,12 @@ async function runBenchmarks() {
         url: site.url,
         category: site.category,
         focus: site.focus,
-        status: 'SUCCESS',
+        status: 'LOADED',
         details: snippet,
         screenshotPath: imgFilePath,
       });
-    } catch (error: any) {
-      const msg = error?.message || String(error);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
       console.log(`   ⚠️ 测试访问跳过/网络超时: ${msg}`);
       results.push({
         name: site.name,

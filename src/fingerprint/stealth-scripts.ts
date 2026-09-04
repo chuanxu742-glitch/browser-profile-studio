@@ -389,15 +389,16 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
       const hw = config.hardware;
       const navProto = (typeof Navigator !== 'undefined' && Navigator.prototype) || navigatorPrototype;
       if (navProto) {
-        defineNativeGetter(navProto, 'hardwareConcurrency', () => hw.hardwareConcurrency);
-        // Firefox 原生不提供 navigator.deviceMemory，严格杜绝跨引擎污染
+        // Firefox launcher preferences cover properties shared with workers.
+        // Keep JavaScript hooks only for Chromium and document-only touch state.
         if (config.engine !== 'firefox') {
+          defineNativeGetter(navProto, 'hardwareConcurrency', () => hw.hardwareConcurrency);
           defineNativeGetter(navProto, 'deviceMemory', () => hw.deviceMemory);
+          defineNativeGetter(navProto, 'platform', () => hw.platform || config.platform);
         } else {
           try { delete navProto.deviceMemory; } catch (_) {}
         }
         defineNativeGetter(navProto, 'maxTouchPoints', () => hw.maxTouchPoints);
-        defineNativeGetter(navProto, 'platform', () => hw.platform || config.platform);
       }
 
     if (typeof screen !== 'undefined' && screen && hw.screenWidth && hw.screenHeight) {
@@ -434,7 +435,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
 } catch (_) {}
 
   // 4. Navigator and Intl values follow the generated profile in every context.
-  if (navigatorObject) {
+  if (navigatorObject && config.engine !== 'firefox') {
     const navProto = (typeof Navigator !== 'undefined' && Navigator.prototype) || navigatorPrototype;
     if (navProto) {
       defineNativeGetter(navProto, 'userAgent', () => config.userAgent);
@@ -486,7 +487,8 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
     } catch (_) {}
   }
 
-  try {
+  if (config.engine !== 'firefox') {
+    try {
     const OriginalDateTimeFormat = Intl.DateTimeFormat;
     const PatchedDateTimeFormat = markAsNative(function(locales, options) {
       const localeValue = locales === undefined ? config.geo.locale : locales;
@@ -499,7 +501,8 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
     PatchedDateTimeFormat.prototype = OriginalDateTimeFormat.prototype;
     Object.setPrototypeOf(PatchedDateTimeFormat, OriginalDateTimeFormat);
     Intl.DateTimeFormat = PatchedDateTimeFormat;
-  } catch (e) {}
+    } catch (_) {}
+  }
 
   // 5. Native Browser Engine Specific Identifiers (Firefox vs Chromium)
   const isFirefoxEngine = config.engine === 'firefox';
@@ -777,6 +780,124 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
   if (config.canvas && config.canvas.enabled) {
     const salt = Number.isFinite(config.canvas.seed) ? config.canvas.seed : 42;
 
+    function nextMarkerWord(state) {
+      let value = state >>> 0;
+      value ^= value << 13;
+      value ^= value >>> 17;
+      value ^= value << 5;
+      return value >>> 0;
+    }
+
+    const firstMarkerWord = nextMarkerWord((salt ^ 0xa5a5a5a5) >>> 0);
+    const secondMarkerWord = nextMarkerWord(firstMarkerWord);
+    const stableCanvasMarker = (
+      firstMarkerWord.toString(16).padStart(8, '0') +
+      secondMarkerWord.toString(16).padStart(8, '0')
+    ).toUpperCase();
+
+    function readUint32(bytes, offset) {
+      return (
+        bytes[offset] * 0x1000000 +
+        bytes[offset + 1] * 0x10000 +
+        bytes[offset + 2] * 0x100 +
+        bytes[offset + 3]
+      ) >>> 0;
+    }
+
+    function writeUint32(bytes, offset, value) {
+      bytes[offset] = (value >>> 24) & 0xff;
+      bytes[offset + 1] = (value >>> 16) & 0xff;
+      bytes[offset + 2] = (value >>> 8) & 0xff;
+      bytes[offset + 3] = value & 0xff;
+    }
+
+    function pngCrc32(bytes, start, end) {
+      let crc = 0xffffffff;
+      for (let index = start; index < end; index++) {
+        crc ^= bytes[index];
+        for (let bit = 0; bit < 8; bit++) {
+          crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+        }
+      }
+      return (crc ^ 0xffffffff) >>> 0;
+    }
+
+    function stabilizePngMarker(bytes) {
+      if (!bytes || bytes.length < 20 ||
+          bytes[0] !== 137 || bytes[1] !== 80 || bytes[2] !== 78 || bytes[3] !== 71) {
+        return bytes;
+      }
+      let offset = 8;
+      while (offset + 12 <= bytes.length) {
+        const length = readUint32(bytes, offset);
+        const typeOffset = offset + 4;
+        const dataOffset = typeOffset + 4;
+        const crcOffset = dataOffset + length;
+        if (crcOffset + 4 > bytes.length) return bytes;
+        const isMarker = bytes[typeOffset] === 100 && bytes[typeOffset + 1] === 101 &&
+          bytes[typeOffset + 2] === 66 && bytes[typeOffset + 3] === 71;
+        if (isMarker && length === 16) {
+          for (let index = 0; index < stableCanvasMarker.length; index++) {
+            bytes[dataOffset + index] = stableCanvasMarker.charCodeAt(index);
+          }
+          writeUint32(bytes, crcOffset, pngCrc32(bytes, typeOffset, crcOffset));
+          return bytes;
+        }
+        offset = crcOffset + 4;
+      }
+      return bytes;
+    }
+
+    function stabilizePngDataUrl(url) {
+      if (typeof url !== 'string' || !url.startsWith('data:image/png;base64,')) return url;
+      try {
+        const prefix = 'data:image/png;base64,';
+        const binary = atob(url.slice(prefix.length));
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+        stabilizePngMarker(bytes);
+        let encoded = '';
+        const stride = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += stride) {
+          encoded += String.fromCharCode.apply(null, bytes.subarray(offset, offset + stride));
+        }
+        return prefix + btoa(encoded);
+      } catch {
+        return url;
+      }
+    }
+
+    async function stabilizePngBlob(blob) {
+      if (!blob || blob.type !== 'image/png' || typeof blob.arrayBuffer !== 'function') return blob;
+      try {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        stabilizePngMarker(bytes);
+        return new Blob([bytes], { type: blob.type });
+      } catch {
+        return blob;
+      }
+    }
+
+    if (config.engine === 'firefox') {
+      try {
+        if (typeof HTMLCanvasElement !== 'undefined' && HTMLCanvasElement.prototype) {
+          const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+          HTMLCanvasElement.prototype.toDataURL = markAsNative(function(...args) {
+            return stabilizePngDataUrl(originalToDataURL.apply(this, args));
+          }, 'toDataURL');
+
+          const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+          HTMLCanvasElement.prototype.toBlob = markAsNative(function(callback, ...args) {
+            const wrappedCallback = markAsNative(function(blob) {
+              void stabilizePngBlob(blob).then((stableBlob) => {
+                if (typeof callback === 'function') callback(stableBlob);
+              });
+            }, 'callback');
+            return originalToBlob.call(this, wrappedCallback, ...args);
+          }, 'toBlob');
+        }
+      } catch (_) {}
+    } else {
     function getSpatialOffset(x, y, seed) {
       let h = (x * 374761393 + y * 668265263) ^ seed;
       h = (h ^ (h >> 13)) * 1274126177;
@@ -871,13 +992,13 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
         const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
         const patchedToDataURL = markAsNative(function(...args) {
           if (poisonedCanvasSet.has(this)) {
-            const res = origToDataURL.apply(this, args);
+            const res = stabilizePngDataUrl(origToDataURL.apply(this, args));
             if (typeof res === 'string') recordPoisonedUrl(res);
             return res;
           }
           const poisoned = createPoisonedCanvas(this);
           const target = poisoned || this;
-          const res = origToDataURL.apply(target, args);
+          const res = stabilizePngDataUrl(origToDataURL.apply(target, args));
           if (typeof res === 'string') recordPoisonedUrl(res);
           return res;
         }, 'toDataURL');
@@ -888,8 +1009,10 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
         const patchedToBlob = markAsNative(function(callback, ...args) {
           const target = (!poisonedCanvasSet.has(this) && createPoisonedCanvas(this)) || this;
           const wrappedCallback = markAsNative(function(blob) {
-            if (blob) poisonedSources.add(blob);
-            if (typeof callback === 'function') callback(blob);
+            void stabilizePngBlob(blob).then((stableBlob) => {
+              if (stableBlob) poisonedSources.add(stableBlob);
+              if (typeof callback === 'function') callback(stableBlob);
+            });
           }, 'callback');
           return origToBlob.call(target, wrappedCallback, ...args);
         }, 'toBlob');
@@ -952,20 +1075,21 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
               if (imgData && imgData.data) {
                 injectNoise(imgData.data, temp.width, temp.height, 0, 0);
                 ctx.putImageData(imgData, 0, 0);
-                const blob = await origConvertToBlob.apply(temp, args);
+                const blob = await stabilizePngBlob(await origConvertToBlob.apply(temp, args));
                 if (blob) poisonedSources.add(blob);
                 return blob;
               }
             }
           } catch (_) {}
-          return origConvertToBlob.apply(this, args);
+          return stabilizePngBlob(await origConvertToBlob.apply(this, args));
         }, 'convertToBlob');
       }
     } catch (e) {}
+    }
   }
 
   // 9. WebGL / WebGPU values come from the same profile in every context.
-  if (config.webgl) {
+  if (config.webgl && config.engine !== 'firefox') {
     const UNMASKED_VENDOR_WEBGL = 37445;
     const UNMASKED_RENDERER_WEBGL = 37446;
     const vendorVal = config.webgl.unmaskedVendor || config.webgl.vendor;
@@ -1263,138 +1387,10 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
     }
   }
 
-  // 14. 全方位 Iframe 隐身防护与指纹同步（覆盖静态与动态 iframe，彻底移除 webdriver）
-  try {
-    let isProtectingIframe = false;
-    const origWinDesc = typeof HTMLIFrameElement !== 'undefined' && HTMLIFrameElement.prototype ? Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow') : null;
-    const origWinGet = origWinDesc && origWinDesc.get ? origWinDesc.get : null;
-
-    function protectIframeNode(child) {
-      if (isProtectingIframe) return;
-      if (!child || (child.tagName !== 'IFRAME' && child.nodeName !== 'IFRAME')) return;
-      isProtectingIframe = true;
-      try {
-        const iframeWin = origWinGet ? origWinGet.call(child) : child.contentWindow;
-        if (iframeWin && iframeWin.navigator) {
-          if (config.stealth.removeWebdriver) {
-            if (iframeWin.Navigator && iframeWin.Navigator.prototype) {
-              try { delete iframeWin.Navigator.prototype.webdriver; } catch (_) {}
-              if ('webdriver' in iframeWin.Navigator.prototype) {
-                try {
-                  Object.defineProperty(iframeWin.Navigator.prototype, 'webdriver', {
-                    get: undefined,
-                    set: undefined,
-                    configurable: true,
-                    enumerable: false,
-                  });
-                  delete iframeWin.Navigator.prototype.webdriver;
-                } catch (_) {}
-              }
-            }
-            try { delete iframeWin.navigator.webdriver; } catch (_) {}
-          }
-
-          const ifrNav = iframeWin.navigator;
-          const ifrNavProto = (iframeWin.Navigator && iframeWin.Navigator.prototype) || Object.getPrototypeOf(ifrNav);
-          const ifrLanguages = Object.freeze([...((config.geo && config.geo.languages) || (config.locale && config.locale.languages) || [])]);
-
-          if (ifrNavProto) {
-            defineNativeGetter(ifrNavProto, 'userAgent', () => config.userAgent);
-            defineNativeGetter(ifrNavProto, 'appVersion', () => config.appVersion);
-            defineNativeGetter(ifrNavProto, 'platform', () => (config.hardware && config.hardware.platform) || config.platform);
-            defineNativeGetter(ifrNavProto, 'vendor', () => config.vendor);
-            defineNativeGetter(ifrNavProto, 'language', () => (ifrLanguages && ifrLanguages[0]) || (config.geo && config.geo.locale) || 'en-US');
-            defineNativeGetter(ifrNavProto, 'languages', () => ifrLanguages);
-            if (config.hardware) {
-              defineNativeGetter(ifrNavProto, 'hardwareConcurrency', () => config.hardware.hardwareConcurrency);
-              if (config.engine !== 'firefox') {
-                defineNativeGetter(ifrNavProto, 'deviceMemory', () => config.hardware.deviceMemory);
-              } else {
-                try { delete ifrNavProto.deviceMemory; } catch (_) {}
-              }
-              defineNativeGetter(ifrNavProto, 'maxTouchPoints', () => config.hardware.maxTouchPoints);
-            }
-            if (mockPlugins) {
-              defineNativeGetter(ifrNavProto, 'plugins', () => mockPlugins);
-              defineNativeGetter(ifrNavProto, 'mimeTypes', () => mockMimeTypes);
-            }
-          }
-
-          try {
-            delete ifrNav.userAgent;
-            delete ifrNav.appVersion;
-            delete ifrNav.platform;
-            delete ifrNav.vendor;
-            delete ifrNav.language;
-            delete ifrNav.languages;
-            delete ifrNav.hardwareConcurrency;
-            delete ifrNav.deviceMemory;
-            delete ifrNav.maxTouchPoints;
-            delete ifrNav.plugins;
-            delete ifrNav.mimeTypes;
-            delete iframeWin.navigator;
-          } catch (_) {}
-        }
-      } catch (_) {} finally {
-        isProtectingIframe = false;
-      }
-    }
-
-    if (origWinGet && HTMLIFrameElement.prototype) {
-      Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
-        get: markAsNative(function() {
-          const win = origWinGet.call(this);
-          if (!isProtectingIframe) {
-            protectIframeNode(this);
-          }
-          return win;
-        }, 'get contentWindow'),
-        configurable: true,
-        enumerable: true,
-      });
-    }
-
-    // 初始化时保护 DOM 中现存的所有 iframe
-    if (typeof document !== 'undefined') {
-      try {
-        const existingIframes = document.querySelectorAll('iframe');
-        existingIframes.forEach(protectIframeNode);
-      } catch (_) {}
-      // 使用 MutationObserver 监听动态插入的 iframe
-      try {
-        const observer = new MutationObserver((mutations) => {
-          for (const mutation of mutations) {
-            for (const node of mutation.addedNodes) {
-              protectIframeNode(node);
-              if (node && node.querySelectorAll) {
-                try {
-                  node.querySelectorAll('iframe').forEach(protectIframeNode);
-                } catch (_) {}
-              }
-            }
-          }
-        });
-        observer.observe(document.documentElement || document, { childList: true, subtree: true });
-      } catch (_) {}
-    }
-
-    const origAppendChild = Element.prototype.appendChild;
-    Element.prototype.appendChild = markAsNative(function(child) {
-      const res = origAppendChild.apply(this, arguments);
-      protectIframeNode(child);
-      return res;
-    }, 'appendChild');
-
-    const origInsertBefore = Element.prototype.insertBefore;
-    Element.prototype.insertBefore = markAsNative(function(newNode, referenceNode) {
-      const res = origInsertBefore.apply(this, arguments);
-      protectIframeNode(newNode);
-      return res;
-    }, 'insertBefore');
-  } catch (e) {}
 
   // 15. Worker & SharedWorker Isolation & Fingerprint Alignment
-  try {
+  if (config.engine !== 'firefox') {
+    try {
     const workerBootstrapCode = ${JSON.stringify(buildWorkerBootstrap(config))};
     const origCreateObjectURL = typeof URL !== 'undefined' ? URL.createObjectURL : undefined;
     const origRevokeObjectURL = typeof URL !== 'undefined' ? URL.revokeObjectURL : undefined;
@@ -1574,7 +1570,8 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
         } catch (_) {}
       }
     }
-  } catch (e) {}
+    } catch (_) {}
+  }
   } catch (_) {}
 })();
 `;

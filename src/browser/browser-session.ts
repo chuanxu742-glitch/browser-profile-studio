@@ -1437,7 +1437,23 @@ export class BrowserSession {
     if (this.engine === 'chromium' && this.options.cdpEndpoint && this.options.managedExtensions?.length) {
       throw new BrowserSessionError('INVALID_STATE', 'Managed extensions cannot be injected into an already-running CDP browser');
     }
-    const fpConfig = this.resolveFingerprintProfile();
+    const resolvedFingerprint = this.resolveFingerprintProfile();
+    const hostTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const mustBlockUnalignedServiceWorkers = Boolean(
+      resolvedFingerprint
+      && this.engine === 'firefox'
+      && resolvedFingerprint.geo.timezoneId !== hostTimezone
+      && !process.env.ABS_FIREFOX_EXECUTABLE_PATH,
+    );
+    const fpConfig = resolvedFingerprint && mustBlockUnalignedServiceWorkers
+      ? {
+          ...resolvedFingerprint,
+          stealth: {
+            ...resolvedFingerprint.stealth,
+            blockServiceWorkers: true,
+          },
+        }
+      : resolvedFingerprint;
     if (this.options.userAgent && !fpConfig) {
       throw new BrowserSessionError(
         'INVALID_STATE',
@@ -1490,16 +1506,6 @@ export class BrowserSession {
     if (!mainPage) throw new BrowserSessionError('BROWSER_LAUNCH_FAILED', 'Firefox did not provide a page');
     if (!headless && typeof mainPage.bringToFront === 'function') {
       await mainPage.bringToFront().catch(() => undefined);
-    }
-    if (initScript) {
-      if (typeof this.context.addInitScript === 'function') {
-        await this.context.addInitScript(initScript).catch(() => undefined);
-      }
-      for (const p of retainedPages) {
-        if (typeof (p as any).addInitScript === 'function') {
-          await (p as any).addInitScript(initScript).catch(() => undefined);
-        }
-      }
     }
 
     this.tabs.clear();
