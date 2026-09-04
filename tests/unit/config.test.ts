@@ -18,6 +18,7 @@ describe('loadConfig', () => {
     expect(config.resourceHosts).toEqual(config.allowedHosts);
     expect(config.allowHttp).toBe(false);
     expect(config.allowPrivateNetwork).toBe(false);
+    expect(config.allowSyntheticTunnel).toBe(false);
     expect(config.maxSessions).toBe(CONFIG_LIMITS.maxSessions.default);
     expect(config.timeoutMs).toBe(CONFIG_LIMITS.timeoutMs.default);
     expect(config.automationPolicy).toBe('standard');
@@ -48,6 +49,7 @@ describe('loadConfig', () => {
       baseEnv({
         BROWSER_ALLOW_HTTP: 'TRUE',
         BROWSER_ALLOW_PRIVATE_NETWORK: 'true',
+        BROWSER_ALLOW_SYNTHETIC_TUNNEL: 'true',
         BROWSER_MAX_SESSIONS: '8',
         BROWSER_TIMEOUT_MS: '60000',
         BROWSER_SESSION_TTL_MS: '60000',
@@ -58,6 +60,7 @@ describe('loadConfig', () => {
       }),
     );
     expect(config.allowHttp).toBe(true);
+    expect(config.allowSyntheticTunnel).toBe(true);
     expect(config.allowPrivateNetwork).toBe(true);
     expect(config.maxSessions).toBe(8);
     expect(config.timeoutMs).toBe(60_000);
@@ -67,6 +70,7 @@ describe('loadConfig', () => {
     expect(config.resourceHosts).toEqual(['static.example.com']);
     expect(config.persistentProfiles).toBe(true);
 
+    expect(() => loadConfig(baseEnv({ BROWSER_ALLOW_SYNTHETIC_TUNNEL: '1' }))).toThrow(BrowserToolError);
     expect(() => loadConfig(baseEnv({ BROWSER_ALLOW_HTTP: 'yes' }))).toThrow(BrowserToolError);
     expect(() => loadConfig(baseEnv({ BROWSER_ALLOW_PRIVATE_NETWORK: '1' }))).toThrow(BrowserToolError);
     expect(() => loadConfig(baseEnv({ BROWSER_PERSIST_PROFILES: '1' }))).toThrow(BrowserToolError);

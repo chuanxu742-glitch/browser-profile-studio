@@ -30,6 +30,8 @@ export interface AppConfig {
   readonly resourceHosts: readonly string[];
   readonly allowHttp: boolean;
   readonly allowPrivateNetwork: boolean;
+  /** Permit only the reserved 198.18.0.0/15 synthetic tunnel range. */
+  readonly allowSyntheticTunnel: boolean;
   readonly maxSessions: number;
   readonly timeoutMs: number;
   /** Administrator-selected resource policy profile. */
@@ -141,6 +143,10 @@ export function loadConfig(env: ConfigEnvironment = process.env): AppConfig {
     env.BROWSER_ALLOW_PRIVATE_NETWORK,
     'BROWSER_ALLOW_PRIVATE_NETWORK',
   );
+  const allowSyntheticTunnel = parseBoolean(
+    env.BROWSER_ALLOW_SYNTHETIC_TUNNEL,
+    'BROWSER_ALLOW_SYNTHETIC_TUNNEL',
+  );
   let automationPolicy: AutomationPolicyName;
   try {
     automationPolicy = parseAutomationPolicy(env.BROWSER_AUTOMATION_POLICY);
@@ -210,6 +216,7 @@ export function loadConfig(env: ConfigEnvironment = process.env): AppConfig {
     resourceHosts,
     allowHttp,
     allowPrivateNetwork,
+    allowSyntheticTunnel,
     maxSessions,
     timeoutMs,
     automationPolicy,

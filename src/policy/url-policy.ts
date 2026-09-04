@@ -34,15 +34,17 @@ export type DnsResolver =
     };
 
 export interface UrlPolicyOptions {
-  allowedHosts: readonly string[];
-  resourceHosts?: readonly string[];
-  allowHttp?: boolean;
-  allowPrivateNetwork?: boolean;
-  resolver?: DnsResolver;
+  readonly allowedHosts: readonly string[];
+  readonly resourceHosts?: readonly string[];
+  readonly allowHttp?: boolean;
+  readonly allowPrivateNetwork?: boolean;
+  /** Permit only the 198.18.0.0/15 synthetic tunnel range. */
+  readonly allowSyntheticTunnel?: boolean;
+  readonly resolver?: DnsResolver;
   /** Alias accepted for integrations that name the dependency explicitly. */
-  dnsResolver?: DnsResolver;
+  readonly dnsResolver?: DnsResolver;
   /** Additional descriptive alias for dependency injection. */
-  resolveHostname?: DnsResolver;
+  readonly resolveHostname?: DnsResolver;
 }
 
 export interface AddressClassification {
@@ -92,11 +94,17 @@ export class UrlPolicy {
   readonly resourceHosts: readonly string[];
   readonly allowHttp: boolean;
   readonly allowPrivateNetwork: boolean;
+  readonly allowSyntheticTunnel: boolean;
 
   private readonly resolver?: DnsResolver;
+  private readonly safeDnsCache = new Map<string, { addresses: readonly string[]; expiresAt: number }>();
+
+  public clearDnsCache(): void {
+    this.safeDnsCache.clear();
+  }
 
   constructor(
-    options: UrlPolicyOptions | Pick<AppConfig, 'allowedHosts' | 'resourceHosts' | 'allowHttp' | 'allowPrivateNetwork'>,
+    options: UrlPolicyOptions | Pick<AppConfig, 'allowedHosts' | 'resourceHosts' | 'allowHttp' | 'allowPrivateNetwork' | 'allowSyntheticTunnel'>,
     resolver?: DnsResolver,
   ) {
     this.allowedHosts = Object.freeze(options.allowedHosts.map((host) => normalizeHostPattern(host)));
@@ -111,6 +119,7 @@ export class UrlPolicy {
     if (resolver !== undefined) this.resolver = resolver;
     if ('resolver' in options && options.resolver !== undefined) this.resolver = options.resolver;
     if ('dnsResolver' in options && options.dnsResolver !== undefined) this.resolver = options.dnsResolver;
+    this.allowSyntheticTunnel = options.allowSyntheticTunnel ?? false;
     if ('resolveHostname' in options && options.resolveHostname !== undefined) this.resolver = options.resolveHostname;
   }
 
@@ -193,6 +202,14 @@ export class UrlPolicy {
       throw privateNetworkError(hostReason, effectivePurpose, host);
     }
 
+    const now = Date.now();
+    if (this.resolver === undefined) {
+      const cached = this.safeDnsCache.get(host);
+      if (cached && cached.expiresAt > now) {
+        return { url, addresses: cached.addresses };
+      }
+    }
+
     let addresses: readonly (string | ResolvedAddress)[];
     try {
       addresses = await this.resolve(host);
@@ -234,11 +251,24 @@ export class UrlPolicy {
       approvedAddresses.push(canonicalAddress(unbracket(address)));
     }
 
-    return { url, addresses: Object.freeze(approvedAddresses) };
+    const frozenAddresses = Object.freeze(approvedAddresses);
+    if (this.resolver === undefined) {
+      if (this.safeDnsCache.size >= 500) {
+        const oldestKey = this.safeDnsCache.keys().next().value;
+        if (oldestKey !== undefined) this.safeDnsCache.delete(oldestKey);
+      }
+      this.safeDnsCache.set(host, { addresses: frozenAddresses, expiresAt: now + 30_000 });
+    }
+
+    return { url, addresses: frozenAddresses };
   }
 
   private isPrivateException(classification: AddressClassification): boolean {
-    // Cloud metadata is always denied. The explicit test switch can permit
+    // Synthetic tunnel DNS is opt-in and only covers RFC 2544's 198.18/15.
+    if (this.allowSyntheticTunnel && isSyntheticTunnelAddress(classification.address)) {
+      return classification.reason === 'reserved';
+    }
+    // Cloud metadata is always denied. The broader test switch can permit
     // loopback/RFC1918/link-local/etc. for a local fixture, but never metadata.
     return this.allowPrivateNetwork && classification.reason !== 'metadata';
   }
@@ -264,24 +294,49 @@ export class UrlPolicy {
   }
 }
 
+interface CompiledHostPattern {
+  exact: Set<string>;
+  wildcards: Array<{ suffix: string; suffixLabelCount: number }>;
+}
+
+const compiledPatternsCache = new WeakMap<readonly string[], CompiledHostPattern>();
+
+function getCompiledHostPatterns(patterns: readonly string[]): CompiledHostPattern {
+  let compiled = compiledPatternsCache.get(patterns);
+  if (!compiled) {
+    const exact = new Set<string>();
+    const wildcards: Array<{ suffix: string; suffixLabelCount: number }> = [];
+    for (const pattern of patterns) {
+      const normalized = normalizeHostPattern(pattern);
+      if (normalized.startsWith('*.')) {
+        const suffix = normalized.slice(2);
+        wildcards.push({ suffix, suffixLabelCount: suffix.split('.').length });
+      } else {
+        exact.add(normalized);
+      }
+    }
+    compiled = { exact, wildcards };
+    compiledPatternsCache.set(patterns, compiled);
+  }
+  return compiled;
+}
+
 export function matchesHost(host: string, patterns: readonly string[]): boolean {
   const candidate = canonicalUrlHost(host);
   if (!candidate) return false;
-  return patterns.some((pattern) => {
-    const normalized = normalizeHostPattern(pattern);
-    if (normalized.startsWith('*.')) {
-      const suffix = normalized.slice(2);
-      const suffixLabelCount = suffix.split('.').length;
-      // `*.example.com` is intentionally a one-label wildcard. A nested
-      // host such as `a.b.example.com` needs its own explicit rule.
-      return (
-        candidate !== suffix &&
-        candidate.endsWith(`.${suffix}`) &&
-        candidate.split('.').length === suffixLabelCount + 1
-      );
+  const { exact, wildcards } = getCompiledHostPatterns(patterns);
+  if (exact.has(candidate)) return true;
+  const candidateLabels = candidate.split('.').length;
+  for (const { suffix, suffixLabelCount } of wildcards) {
+    if (
+      candidate !== suffix &&
+      candidate.endsWith(`.${suffix}`) &&
+      candidateLabels === suffixLabelCount + 1
+    ) {
+      return true;
     }
-    return candidate === normalized;
-  });
+  }
+  return false;
 }
 
 /** Classify an IP literal without making a network call. */
@@ -341,6 +396,14 @@ function classifyIpv4(address: string): AddressClassification {
   else if (value === 0xffffffff) reason = 'reserved';
 
   return { blocked: reason !== undefined, reason, version: 4, address };
+}
+function isSyntheticTunnelAddress(address: string): boolean {
+  const value = unbracket(address);
+  if (isIP(value) !== 4) return false;
+  const parts = value.split('.');
+  const first = Number(parts[0]);
+  const second = Number(parts[1]);
+  return first === 198 && second >= 18 && second <= 19;
 }
 
 function canonicalUrlHost(rawHost: string): string {

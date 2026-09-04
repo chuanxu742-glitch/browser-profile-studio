@@ -83,6 +83,31 @@ describe('UrlPolicy', () => {
       });
     }
   });
+  it('allows only the explicit synthetic tunnel range without enabling private networking', async () => {
+    const blocked = new UrlPolicy({
+      allowedHosts: ['tunnel.test'],
+      resolver: async () => ['198.18.2.22'],
+    });
+    await expect(blocked.assertAllowed('https://tunnel.test/', 'navigation')).rejects.toMatchObject({
+      code: 'PRIVATE_NETWORK_DENIED',
+    });
+
+    const allowed = new UrlPolicy({
+      allowedHosts: ['tunnel.test'],
+      allowSyntheticTunnel: true,
+      resolver: async () => ['198.18.2.22'],
+    });
+    await expect(allowed.assertAllowed('https://tunnel.test/', 'navigation')).resolves.toBeInstanceOf(URL);
+
+    const privateNetwork = new UrlPolicy({
+      allowedHosts: ['tunnel.test'],
+      allowSyntheticTunnel: true,
+      resolver: async () => ['192.168.1.2'],
+    });
+    await expect(privateNetwork.assertAllowed('https://tunnel.test/', 'navigation')).rejects.toMatchObject({
+      code: 'PRIVATE_NETWORK_DENIED',
+    });
+  });
 
   it('supports explicit private-network test mode but never metadata', async () => {
     const policy = new UrlPolicy({ allowedHosts: ['127.0.0.1', 'example.test'], allowHttp: true, allowPrivateNetwork: true, resolver: async (host) => host === 'example.test' ? ['192.168.1.2'] : [] });
