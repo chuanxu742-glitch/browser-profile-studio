@@ -21,3 +21,5 @@ browser-core/**/build-provenance.json
 # Local credential-migration diagnostics are intentionally not published.
 scripts/extract-chrome-cookies.py
 scripts/test-decrypt-p2.py
+scripts/check-local-cookies.py
+scripts/read-edge-cookies.ps1
