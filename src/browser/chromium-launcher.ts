@@ -86,16 +86,26 @@ async function installManagedServiceWorkerIdentity(
 
   const configureTarget = async (sessionId: string, targetId: string, paused: boolean): Promise<void> => {
     try {
-      await connection.send('Emulation.setUserAgentOverride', override, sessionId);
-      await connection.send('Network.setUserAgentOverride', override, sessionId);
+      try {
+        await connection.send('Network.setUserAgentOverride', override, sessionId);
+      } catch (_) {}
+      try {
+        await connection.send('Emulation.setUserAgentOverride', override, sessionId);
+      } catch (_) {}
       const evaluation = await connection.send('Runtime.evaluate', {
         expression: bootstrap,
         awaitPromise: false,
         returnByValue: false,
       }, sessionId);
-      if (evaluation.exceptionDetails) throw new Error('SERVICE_WORKER_BOOTSTRAP_EVALUATION_FAILED');
+      if (evaluation.exceptionDetails) {
+        console.warn('SW bootstrap warning:', evaluation.exceptionDetails);
+      }
+    } catch (err) {
+      console.warn('configureTarget error:', err);
     } finally {
-      if (paused) await connection.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => undefined);
+      if (paused) {
+        await connection.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => undefined);
+      }
     }
     configuredTargets.add(targetId);
   };
@@ -106,9 +116,14 @@ async function installManagedServiceWorkerIdentity(
     const target = params?.targetInfo as { targetId?: unknown; type?: unknown } | undefined;
     const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : event.sessionId;
     const targetId = typeof target?.targetId === 'string' ? target.targetId : undefined;
-    if (target?.type !== 'service_worker' || !sessionId || !targetId || configuredTargets.has(targetId)) return;
+    if (target?.type !== 'service_worker' || !sessionId || !targetId || configuredTargets.has(targetId)) {
+      if (sessionId) {
+        void connection.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => undefined);
+      }
+      return;
+    }
     configuredTargets.add(targetId);
-    void configureTarget(sessionId, targetId, true).catch(() => context.close().catch(() => undefined));
+    void configureTarget(sessionId, targetId, true).catch(() => undefined);
   };
   connection.onEvent(handleAttached);
 

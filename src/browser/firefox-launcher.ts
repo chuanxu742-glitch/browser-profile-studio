@@ -97,8 +97,8 @@ export function firefoxFingerprintUserPrefs(profile?: UnifiedFingerprintProfile)
     'dom.maxHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintTimezone': profile.geo.timezoneId,
-    'webgl.vendor-string-override': profile.webgl.unmaskedVendor || profile.webgl.vendor,
-    'webgl.renderer-string-override': profile.webgl.unmaskedRenderer || profile.webgl.renderer,
+    'webgl.vendor-string-override': profile.webgl.vendor || 'Mozilla',
+    'webgl.renderer-string-override': profile.webgl.renderer || 'Mozilla',
   };
 }
 
@@ -125,6 +125,10 @@ export async function launchPersistentFirefox(
     ...(options.extraHTTPHeaders ? { extraHTTPHeaders: options.extraHTTPHeaders } : {}),
     ...(options.userAgent ? { userAgent: options.userAgent } : {}),
     ...(customCore ? { executablePath: customCore.executablePath } : {}),
+    env: {
+      ...process.env,
+      ...(options.timezoneId ? { TZ: options.timezoneId } : {}),
+    },
     args: [
       '--window-size=1280,800',
       '--window-position=100,100',

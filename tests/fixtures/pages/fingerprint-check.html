@@ -21,8 +21,10 @@
     (async function runBenchmark() {
       const results = {};
 
-      // 1. Webdriver detection
-      results.webdriverRemoved = (navigator.webdriver === undefined || navigator.webdriver === false);
+      // 1. Webdriver detection (严格判定：必须严格为 undefined 且 'webdriver' in navigator 必须为 false)
+      results.webdriverRemoved = (navigator.webdriver === undefined && !('webdriver' in navigator));
+      results.webdriverValue = navigator.webdriver;
+      results.webdriverPresent = ('webdriver' in navigator);
 
       // 2. Chrome object & Runtime
       results.hasChromeRuntime = (typeof window.chrome !== 'undefined' && typeof window.chrome.runtime !== 'undefined');

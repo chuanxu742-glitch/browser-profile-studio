@@ -10,7 +10,7 @@ import type {
   PluginItemConfig,
   GeoFingerprintConfig,
 } from './types.js';
-import { findGeoByCountryCode } from '../geoip/database.js';
+import { findGeoByCountryCode, findCoordinatesByTimezone } from '../geoip/database.js';
 import { managedBrowserIdentity } from './runtime-identity.js';
 
 export const COMMON_GPUS: readonly {
@@ -19,11 +19,18 @@ export const COMMON_GPUS: readonly {
   unmaskedVendor: string;
   unmaskedRenderer: string;
 }[] = [
+  // NVIDIA Desktop & Laptop
   {
     vendor: 'WebKit',
     renderer: 'WebKit WebGL',
     unmaskedVendor: 'Google Inc. (NVIDIA)',
     unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  {
+    vendor: 'WebKit',
+    renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (NVIDIA)',
+    unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
   },
   {
     vendor: 'WebKit',
@@ -35,7 +42,26 @@ export const COMMON_GPUS: readonly {
     vendor: 'WebKit',
     renderer: 'WebKit WebGL',
     unmaskedVendor: 'Google Inc. (NVIDIA)',
+    unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  {
+    vendor: 'WebKit',
+    renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (NVIDIA)',
     unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  {
+    vendor: 'WebKit',
+    renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (NVIDIA)',
+    unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  // AMD Radeon
+  {
+    vendor: 'WebKit',
+    renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (AMD)',
+    unmaskedRenderer: 'ANGLE (AMD, AMD Radeon RX 7800 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
   },
   {
     vendor: 'WebKit',
@@ -46,8 +72,40 @@ export const COMMON_GPUS: readonly {
   {
     vendor: 'WebKit',
     renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (AMD)',
+    unmaskedRenderer: 'ANGLE (AMD, AMD Radeon RX 6600 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  // Intel Integrated & Arc
+  {
+    vendor: 'WebKit',
+    renderer: 'WebKit WebGL',
     unmaskedVendor: 'Google Inc. (Intel)',
     unmaskedRenderer: 'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  {
+    vendor: 'WebKit',
+    renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (Intel)',
+    unmaskedRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  {
+    vendor: 'WebKit',
+    renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (Intel)',
+    unmaskedRenderer: 'ANGLE (Intel, Intel(R) Arc(TM) A770 Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  },
+  // Apple Silicon
+  {
+    vendor: 'Apple Inc.',
+    renderer: 'Apple GPU',
+    unmaskedVendor: 'Apple Inc.',
+    unmaskedRenderer: 'Apple M1',
+  },
+  {
+    vendor: 'Apple Inc.',
+    renderer: 'Apple GPU',
+    unmaskedVendor: 'Apple Inc.',
+    unmaskedRenderer: 'Apple M2',
   },
   {
     vendor: 'Apple Inc.',
@@ -98,7 +156,43 @@ export const COMMON_RESOLUTIONS: readonly ScreenDimension[] = [
     availHeight: 875,
     colorDepth: 24,
     pixelDepth: 24,
+    devicePixelRatio: 1,
+  },
+  {
+    width: 1680,
+    height: 1050,
+    availWidth: 1680,
+    availHeight: 1010,
+    colorDepth: 24,
+    pixelDepth: 24,
+    devicePixelRatio: 1,
+  },
+  {
+    width: 1366,
+    height: 768,
+    availWidth: 1366,
+    availHeight: 728,
+    colorDepth: 24,
+    pixelDepth: 24,
+    devicePixelRatio: 1,
+  },
+  {
+    width: 2560,
+    height: 1600,
+    availWidth: 2560,
+    availHeight: 1560,
+    colorDepth: 24,
+    pixelDepth: 24,
     devicePixelRatio: 2,
+  },
+  {
+    width: 3840,
+    height: 2160,
+    availWidth: 3840,
+    availHeight: 2120,
+    colorDepth: 24,
+    pixelDepth: 24,
+    devicePixelRatio: 1.5,
   },
 ];
 
@@ -117,6 +211,11 @@ export interface GenerateFingerprintOptions {
   os?: OSPlatform | undefined;
   countryCode?: string | undefined;
   browserVersion?: string | undefined;
+  timezone?: string | undefined;
+  locale?: string | undefined;
+  languages?: string[] | undefined;
+  latitude?: number | undefined;
+  longitude?: number | undefined;
 }
 
 export function generateFingerprint(
@@ -128,6 +227,11 @@ export function generateFingerprint(
   let os: OSPlatform = legacyOs || 'windows';
   let countryCode = 'US';
   let requestedBrowserVersion: string | undefined;
+  let explicitTimezone: string | undefined;
+  let explicitLocale: string | undefined;
+  let explicitLanguages: string[] | undefined;
+  let explicitLatitude: number | undefined;
+  let explicitLongitude: number | undefined;
 
   if (typeof seedOrOptions === 'number') {
     seed = seedOrOptions;
@@ -137,6 +241,11 @@ export function generateFingerprint(
     os = seedOrOptions.os ?? 'windows';
     countryCode = seedOrOptions.countryCode ?? 'US';
     requestedBrowserVersion = seedOrOptions.browserVersion;
+    explicitTimezone = seedOrOptions.timezone;
+    explicitLocale = seedOrOptions.locale;
+    explicitLanguages = seedOrOptions.languages;
+    explicitLatitude = seedOrOptions.latitude;
+    explicitLongitude = seedOrOptions.longitude;
   }
 
   const browserIdentity = managedBrowserIdentity(engine);
@@ -152,9 +261,14 @@ export function generateFingerprint(
     : COMMON_GPUS.filter((g) => !g.unmaskedVendor.includes('Apple'));
   const chosenGpu = gpuPool[Math.floor(rng() * gpuPool.length)] ?? COMMON_GPUS[0]!;
 
+  // WebGL 基础供应商与渲染器必须与浏览器内核真实行为严格一致：
+  // 在 Windows/Linux 下 Firefox 为 Mozilla，Chromium 为 WebKit；macOS 下保持 Apple 硬件特征
+  const defaultVendor = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : chosenGpu.vendor;
+  const defaultRenderer = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : chosenGpu.renderer;
+
   const webgl: WebGLFingerprint = {
-    vendor: chosenGpu.vendor,
-    renderer: chosenGpu.renderer,
+    vendor: defaultVendor,
+    renderer: defaultRenderer,
     unmaskedVendor: chosenGpu.unmaskedVendor,
     unmaskedRenderer: chosenGpu.unmaskedRenderer,
     maxTextureSize: 16384,
@@ -188,9 +302,8 @@ export function generateFingerprint(
   };
 
   // 3. Hardware concurrency & memory
-
-  const concurrencyChoices = [4, 8, 12, 16, 24];
-  const memoryChoices = [8, 16, 32];
+  const concurrencyChoices = [4, 6, 8, 12, 16, 20, 24, 32];
+  const memoryChoices = [4, 8, 16, 24, 32, 64];
   const hardwareConcurrency = concurrencyChoices[Math.floor(rng() * concurrencyChoices.length)] ?? 8;
   const deviceMemory = memoryChoices[Math.floor(rng() * memoryChoices.length)] ?? 16;
 
@@ -236,13 +349,15 @@ export function generateFingerprint(
 
   // 4. Geo Alignment
   const geoDefaults = findGeoByCountryCode(countryCode);
+  const targetTz = explicitTimezone || geoDefaults.timezone;
+  const tzCoords = findCoordinatesByTimezone(targetTz);
   const geo: GeoFingerprintConfig = {
-    timezoneId: geoDefaults.timezone,
-    locale: geoDefaults.locale,
-    languages: geoDefaults.languages,
+    timezoneId: targetTz,
+    locale: explicitLocale || geoDefaults.locale,
+    languages: explicitLanguages && explicitLanguages.length > 0 ? explicitLanguages : geoDefaults.languages,
     geolocation: {
-      latitude: geoDefaults.latitude,
-      longitude: geoDefaults.longitude,
+      latitude: explicitLatitude !== undefined ? explicitLatitude : (tzCoords ? tzCoords.latitude : geoDefaults.latitude),
+      longitude: explicitLongitude !== undefined ? explicitLongitude : (tzCoords ? tzCoords.longitude : geoDefaults.longitude),
       accuracy: 50,
     },
   };
