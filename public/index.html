@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Antigravity Browser Studio - 本地隔离浏览器控制台</title>
   <link rel="stylesheet" href="/style.css" />
-  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"></noscript>
 </head>
 <body class="dark-theme">
   <div class="app-layout">
@@ -39,8 +40,8 @@
         </button>
         <button class="nav-item" data-tab="tasks">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-          <span>投研与数据采集</span>
-          <span class="tag-hot">A股预设</span>
+          <span>爬虫与自动化</span>
+          <span class="tag-hot">授权站点</span>
         </button>
         <button class="nav-item" data-tab="geo">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path><path d="M2 12h20"></path></svg>
@@ -80,12 +81,12 @@
       <header class="top-header">
         <div class="header-left">
           <h1 id="page-title">环境管理中心</h1>
-          <p id="page-subtitle">管理所有独立隔离指纹浏览器沙箱，支持多开、代理与指纹伪装</p>
+          <p id="page-subtitle">管理独立 Profile、持久存储、代理绑定与一致性配置</p>
         </div>
         <div class="header-actions" id="header-actions">
           <div class="quick-launch-box" style="display: flex; gap: 8px; align-items: center; background: rgba(15, 23, 42, 0.6); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <input type="text" id="quick-url-input" placeholder="输入任意网址如: https://chat.deepseek.com" value="https://chat.deepseek.com/" style="background: transparent; border: none; color: #fff; font-size: 12px; width: 260px; outline: none;" />
-            <button class="btn btn-sm btn-primary" id="btn-quick-launch-url">🚀 立即弹出指纹窗口</button>
+            <input type="text" id="quick-url-input" placeholder="输入已授权网址，如 https://example.com" value="https://example.com/" style="background: transparent; border: none; color: #fff; font-size: 12px; width: 260px; outline: none;" />
+            <button class="btn btn-sm btn-primary" id="btn-quick-launch-url">立即启动隔离窗口</button>
           </div>
           <button class="btn btn-secondary" id="btn-refresh">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
@@ -196,6 +197,14 @@
               </tbody>
             </table>
           </div>
+          <div class="pagination-bar" id="profiles-pagination" aria-live="polite">
+            <span id="profiles-page-summary">0-0 / 0</span>
+            <div class="pagination-controls">
+              <button class="btn btn-xs btn-outline" id="profiles-page-prev" type="button" disabled>上一页</button>
+              <span id="profiles-page-info">第 1 / 1 页</span>
+              <button class="btn btn-xs btn-outline" id="profiles-page-next" type="button" disabled>下一页</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -233,10 +242,108 @@
         </div>
       </section>
 
-      <!-- 选项卡 3：投研与数据采集自动化 (Tasks) -->
+      <!-- 选项卡 3：爬虫与自动化 (Tasks) -->
       <section class="tab-content" id="tab-tasks">
+        <div class="panel crawler-workbench">
+          <div class="panel-header">
+            <div class="panel-title">
+              <h3>分布式爬虫任务工作台</h3>
+              <p>创建受 URL allowlist 约束的任务，并按项目、运行批次和状态查看执行结果</p>
+            </div>
+            <button class="btn btn-sm btn-outline" id="btn-refresh-cluster-tasks" type="button">刷新任务</button>
+          </div>
+          <div class="crawler-task-form">
+            <div class="form-group flex-2">
+              <label for="cluster-task-url">目标 URL</label>
+              <input id="cluster-task-url" type="url" placeholder="https://example.com/list" />
+            </div>
+            <div class="form-group flex-1">
+              <label for="cluster-task-project">项目 ID</label>
+              <input id="cluster-task-project" placeholder="catalog" maxlength="64" />
+            </div>
+            <div class="form-group flex-1">
+              <label for="cluster-task-run">运行批次</label>
+              <input id="cluster-task-run" placeholder="run-001" maxlength="64" />
+            </div>
+            <div class="form-group">
+              <label for="cluster-task-mode">执行模式</label>
+              <select id="cluster-task-mode">
+                <option value="fetch">HTTP Fetch</option>
+                <option value="browser">Firefox Browser</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="cluster-task-priority">优先级</label>
+              <select id="cluster-task-priority">
+                <option value="NORMAL">普通</option>
+                <option value="LOW">低</option>
+                <option value="HIGH">高</option>
+                <option value="CRITICAL">紧急</option>
+              </select>
+            </div>
+            <button class="btn btn-primary crawler-task-submit" id="btn-submit-cluster-task" type="button">提交任务</button>
+          </div>
+          <div class="crawler-task-safety" id="cluster-task-safety" role="status" aria-live="polite">
+            <div class="safety-summary"><strong>提交前安全预检</strong><span id="cluster-preflight-status">输入 URL 后自动检查</span></div>
+            <div class="safety-grid">
+              <label class="safety-check"><input id="cluster-task-authorized" type="checkbox" /> 我确认目标站点和数据采集已获授权</label>
+              <span id="cluster-preflight-origin">目标 Origin：-</span>
+              <span id="cluster-preflight-policy">URL 策略：未检查</span>
+              <span>robots.txt：未检查（仅治理提示，不替代权限控制）</span>
+            </div>
+          </div>
+          <div class="crawler-task-filters">
+            <input id="cluster-filter-project" placeholder="按项目筛选" maxlength="64" />
+            <input id="cluster-filter-run" placeholder="按运行批次筛选" maxlength="64" />
+            <select id="cluster-filter-state">
+              <option value="">全部状态</option>
+              <option value="PENDING">排队中</option>
+              <option value="RUNNING">执行中</option>
+              <option value="COMPLETED">已完成</option>
+              <option value="FAILED">失败</option>
+              <option value="RETRYING">重试中</option>
+              <option value="CANCELLED">已取消</option>
+            </select>
+            <select id="cluster-filter-mode">
+              <option value="">全部模式</option>
+              <option value="fetch">HTTP Fetch</option>
+              <option value="browser">Firefox Browser</option>
+            </select>
+            <select id="cluster-filter-priority">
+              <option value="">全部优先级</option>
+              <option value="CRITICAL">紧急</option>
+              <option value="HIGH">高</option>
+              <option value="NORMAL">普通</option>
+              <option value="LOW">低</option>
+            </select>
+            <input id="cluster-filter-after" type="date" aria-label="开始日期" />
+            <input id="cluster-filter-before" type="date" aria-label="结束日期" />
+            <button class="btn btn-sm btn-outline" id="btn-clear-cluster-filters" type="button">清除筛选</button>
+            <label class="task-refresh-toggle"><input id="cluster-task-auto-refresh" type="checkbox" checked /> 自动刷新</label>
+            <span class="task-list-summary" id="cluster-task-summary">暂无任务</span>
+          </div>
+          <div class="crawler-task-batchbar" id="cluster-task-batchbar" hidden>
+            <span><strong id="cluster-task-selected-count">0</strong> 个任务已选</span>
+            <button class="btn btn-sm btn-outline" id="btn-batch-cancel-cluster-tasks" type="button">批量取消</button>
+            <button class="btn btn-sm btn-outline" id="btn-batch-retry-cluster-tasks" type="button">批量重试</button>
+            <button class="btn btn-sm btn-outline" id="btn-batch-export-cluster-tasks" type="button">导出 JSON</button>
+          </div>
+          <div id="cluster-task-list" class="cluster-task-list" aria-live="polite"></div>
+          <div class="crawler-task-pager" id="cluster-task-pager" hidden>
+            <button class="btn btn-sm btn-outline" id="btn-cluster-task-prev" type="button">上一页</button>
+            <span id="cluster-task-page-label">第 1 页</span>
+            <button class="btn btn-sm btn-outline" id="btn-cluster-task-next" type="button">下一页</button>
+          </div>
+          <aside class="crawler-task-detail" id="cluster-task-detail" hidden aria-labelledby="cluster-task-detail-title">
+            <div class="panel-header">
+              <div class="panel-title"><h4 id="cluster-task-detail-title">任务详情</h4><p id="cluster-task-detail-subtitle"></p></div>
+              <button class="btn btn-sm btn-outline" id="btn-close-cluster-task-detail" type="button">关闭</button>
+            </div>
+            <div id="cluster-task-detail-body"></div>
+          </aside>
+        </div>
         <div class="panel">
-          <div class="panel-header"><div class="panel-title"><h3>声明式 RPA 工作流</h3><p>支持变量插值、条件、循环、重试、错误策略、截图产物、定时/周期执行和持久日志</p></div></div>
+          <div class="panel-header"><div class="panel-title"><h3>授权采集与 RPA 工作流</h3><p>只在已授权站点执行有界任务；支持变量、条件、循环、重试、截图和持久日志</p></div></div>
           <div class="form-row">
             <div class="form-group flex-1"><label>工作流名称</label><input id="rpa-name" placeholder="后台数据检查"></div>
             <div class="form-group flex-1"><label>运行环境</label><select id="rpa-profile-select"><option value="">请选择 Profile</option></select></div>
@@ -647,10 +754,41 @@
         <div class="panel">
           <div class="panel-header">
             <div class="panel-title">
-              <h3>全生态数据导入与迁移中心</h3>
-              <p>一键导入本地常用浏览器（Chrome / Edge）或商业指纹浏览器（AdsPower / 比特 / Hubstudio）数据</p>
+          <!-- 🌟 实时已连接浏览器看板（OpenCLI 桥接模式 / 免关浏览器 / 免解密） -->
+          <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+              <div>
+                <h4 style="margin: 0 0 6px 0; font-size: 15px; color: #a5b4fc; display: flex; align-items: center; gap: 8px;">
+                  <span>⚡ 实时已连接浏览器（Bridge / OpenCLI 模式）</span>
+                  <span id="bridge-browser-count-badge" style="font-size: 11px; background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 2px 8px; border-radius: 12px;">0 个浏览器在线</span>
+                </h4>
+                <p style="margin: 0; font-size: 12px; color: var(--text-dim);">
+                  基于 OpenCLI 架构：直接接管正在运行的宿主 Chrome/Edge 浏览器，<strong>免关闭浏览器</strong>、<strong>免解密 DPAPI/App-Bound Cookie</strong>，支持一键拉取所有打开的标签页并在已登录网站上执行自动化。
+                </p>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <button class="btn btn-sm btn-secondary" id="btn-refresh-bridge-browsers">🔄 刷新已连接列表</button>
+                <button class="btn btn-sm btn-outline" id="btn-show-bridge-guide">📖 查看扩展安装指引</button>
+              </div>
+            </div>
+
+            <!-- 扩展安装说明折叠框 -->
+            <div id="bridge-install-guide" style="display: none; margin-top: 12px; padding: 10px 14px; background: rgba(15, 23, 42, 0.8); border-radius: 6px; font-size: 12px; color: #cbd5e1;">
+              <ol style="margin: 4px 0 0 18px; padding: 0; line-height: 1.6;">
+                <li>打开您的常用 Chrome / Edge 浏览器，访问 <code>chrome://extensions</code> 并开启右上角【开发者模式】；</li>
+                <li>点击【加载已解压的扩展程序】，选择本项目根目录下的 <code>browser-bridge-extension</code> 文件夹；</li>
+                <li>扩展将<strong>自动静默探测并连接本机服务</strong>，无需手动输入 ID，连接后即可在下方直接拉取并接管标签页！</li>
+              </ol>
+            </div>
+
+            <!-- 动态卡片容器 -->
+            <div id="bridge-browsers-container" style="margin-top: 14px; display: flex; flex-direction: column; gap: 12px;">
+              <div style="color: var(--text-dim); font-size: 12px; padding: 12px; text-align: center; background: rgba(15, 23, 42, 0.4); border-radius: 6px;">
+                暂无已连接的宿主浏览器。请先在 Chrome / Edge 中加载 <code>browser-bridge-extension</code> 扩展。
+              </div>
             </div>
           </div>
+
           <div class="migration-grid">
             <div class="migration-card">
               <div class="mig-icon">🖥️</div>
@@ -1072,6 +1210,62 @@ TikTok营销-02,社媒矩阵/东南亚,chromium,http,user:pass@1.2.3.4:8080,,,,"
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" id="btn-cancel-sync-modal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Studio 实时反向接管与过盾控制台 (Web-VNC / CDP 画面回传与交互) -->
+  <div class="modal-overlay" id="takeover-modal">
+    <div class="modal-dialog" style="max-width: 1080px; width: 95vw;">
+      <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span class="status-dot" id="takeover-status-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #34d399; display: inline-block;"></span>
+          <h3 style="margin: 0;">🎮 实时反向接管控制台 (Live Takeover)</h3>
+          <span class="tag-badge" id="takeover-state-badge" style="background: rgba(56, 189, 248, 0.2); color: #38bdf8;">READY</span>
+        </div>
+        <button class="btn-close" id="btn-close-takeover-modal">&times;</button>
+      </div>
+      <div class="modal-body" style="padding: 16px;">
+        <!-- 顶部信息栏与控制按钮 -->
+        <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(15, 23, 42, 0.7); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; gap: 12px; flex-wrap: wrap;">
+          <div style="flex: 1; min-width: 260px; font-size: 13px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            <span>🌐 地址：</span>
+            <strong id="takeover-url-text" style="color: #fff; font-family: var(--font-mono); font-size: 12px;">about:blank</strong>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button class="btn btn-sm btn-outline" id="btn-takeover-refresh-frame" title="获取最新一帧画面">🔄 刷新画面</button>
+            <button class="btn btn-sm btn-outline" id="btn-takeover-toggle-stream" title="开启/关闭连续推流">📹 连续推流中</button>
+            <button class="btn btn-sm btn-success" id="btn-takeover-resume" style="font-weight: 700; box-shadow: 0 0 12px rgba(52, 211, 153, 0.4);" title="完成 Turnstile 验证码勾选或人机挑战后一键恢复自动化流程">🛡️ 过盾完成 (Resume)</button>
+          </div>
+        </div>
+
+        <!-- 键盘与快捷输入工具栏 -->
+        <div style="display: flex; gap: 8px; margin-bottom: 10px; align-items: center;">
+          <input type="text" id="takeover-type-input" placeholder="输入要发送给网页聚焦输入框的文本..." style="flex: 1; padding: 6px 10px; font-size: 12px; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border-color); border-radius: 6px; color: #fff;" />
+          <button class="btn btn-sm btn-primary" id="btn-takeover-send-text">⌨️ 发送文字</button>
+          <button class="btn btn-sm btn-secondary" id="btn-takeover-send-enter">↵ 回车</button>
+          <button class="btn btn-sm btn-secondary" id="btn-takeover-scroll-down">⬇️ 下滚</button>
+          <button class="btn btn-sm btn-secondary" id="btn-takeover-scroll-up">⬆️ 上滚</button>
+        </div>
+
+        <!-- 实时视口画面展示画布 -->
+        <div id="takeover-canvas-wrapper" style="position: relative; width: 100%; height: 580px; background: #000; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; cursor: crosshair; user-select: none; border: 1px solid var(--border-color);">
+          <img id="takeover-screen-img" src="" alt="Live View" style="max-width: 100%; max-height: 100%; object-fit: contain; display: none; pointer-events: none;" />
+          <div id="takeover-placeholder" style="color: var(--text-dim); font-size: 14px; text-align: center;">
+            <div style="font-size: 32px; margin-bottom: 8px;">🖥️</div>
+            正在建立实时画面回传通道...
+          </div>
+          <!-- 鼠标点击波纹光圈 -->
+          <div id="takeover-click-ripple" style="position: absolute; width: 24px; height: 24px; border: 2px solid #38bdf8; border-radius: 50%; transform: translate(-50%, -50%) scale(0); opacity: 0; pointer-events: none; transition: transform 0.3s ease-out, opacity 0.3s ease-out;"></div>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: var(--text-dim);">
+          <span>💡 提示：在画面内直接用鼠标左键点击，事件将以亚像素精度直接转发至浏览器内核（可直接点击 Turnstile 勾选框）。</span>
+          <span id="takeover-coords-display">X: 0, Y: 0</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-takeover-modal">退出接管</button>
       </div>
     </div>
   </div>

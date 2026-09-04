@@ -9,9 +9,13 @@ const API_BASE = window.location.origin.startsWith('http')
 // 当前状态
 let state = {
   profiles: [],
+  profilePage: 0,
+  profilesPerPage: 50,
+  profileFilter: '',
   proxies: [],
   workflows: [],
   rpaTasks: [],
+  clusterTasks: [],
   workspaces: [],
   members: [],
   extensions: [],
@@ -27,6 +31,18 @@ window.addEventListener('error', (e) => {
     showToast(`系统提示: ${e.message}`, 'info');
   }
 });
+
+// 通用防抖函数，防止高频输入卡顿
+function debounce(fn, delayMs = 150) {
+  let timer = null;
+  return function(...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn.apply(this, args);
+    }, delayMs);
+  };
+}
 
 // 指纹偏好库；User-Agent 由后端根据受管浏览器版本生成。
 const FINGERPRINT_PRESETS = {
@@ -47,10 +63,11 @@ document.addEventListener('DOMContentLoaded', () => {
   try {
     initTabs();
     initModals();
-    initFormInteractions();
     initQuickCrawler();
+    initClusterTaskWorkspace();
     initGeoInteractions();
     initLocalBrowserMigration();
+    initBridgeBrowserSection();
     initQuickUrlLauncher();
     initCsvModal();
     init2faModal();
@@ -60,7 +77,9 @@ document.addEventListener('DOMContentLoaded', () => {
     initTileWindows();
     initTeamAdmin();
     initManagedExtensions();
+    initLiveTakeoverModal();
     loadProfiles();
+    loadBridgeBrowsers();
     loadProxyPool();
     loadRpaStudio();
     loadTeamAdmin();
@@ -73,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 定时刷新状态
   setInterval(() => {
     loadSessions();
+    if (document.getElementById('tab-tasks')?.classList.contains('active') && document.getElementById('cluster-task-auto-refresh')?.checked) void loadClusterTasks();
   }, 3000);
 });
 
@@ -127,7 +147,7 @@ function initQuickUrlLauncher() {
     } catch (err) {
       showToast(`操作失败: ${err.message}`, 'error');
     } finally {
-      btn.textContent = '🚀 立即弹出指纹窗口';
+      btn.textContent = '立即启动隔离窗口';
       btn.disabled = false;
     }
   };
@@ -150,7 +170,7 @@ function initTabs() {
       const titles = {
         profiles: { title: '环境管理中心', sub: '管理独立 Profile、持久存储、代理绑定与一致性配置' },
         proxies: { title: '代理网络中心', sub: '检测与绑定 SOCKS5 / HTTP 代理，对齐真实出口 IP 与地理特征' },
-        tasks: { title: '投研与数据采集自动化', sub: '仅在已获授权的网站执行有界采集，遇到挑战自动暂停' },
+        tasks: { title: '爬虫与自动化中心', sub: '管理已授权站点的采集任务与 RPA 工作流，遇到挑战自动暂停' },
         geo: { title: 'GEO (AI搜索优化) 矩阵中心', sub: '针对 DeepSeek、豆包、通义千问网页端进行多地域指纹多开与关键词占位监测' },
         migration: { title: '数据迁移与互通', sub: '一键导入日常浏览器 Cookie 或 AdsPower / 比特指纹浏览器配置' },
         team: { title: '团队与资源权限', sub: '管理工作区、成员、角色、Profile grants 与可撤销 API Key' },
@@ -160,6 +180,10 @@ function initTabs() {
       if (titles[tabName]) {
         document.getElementById('page-title').textContent = titles[tabName].title;
         document.getElementById('page-subtitle').textContent = titles[tabName].sub;
+      }
+
+      if (tabName === 'migration') {
+        loadBridgeBrowsers();
       }
     });
   });
@@ -229,28 +253,24 @@ function initFormInteractions() {
     await createFinanceSampleProfiles();
   });
 
-  // 批量多开所有环境
+  // 批量操作走单一受控端点，避免为每个 Profile 建立一次 HTTP 往返。
   const btnBatchStart = document.getElementById('btn-batch-start-all');
   if (btnBatchStart) {
     btnBatchStart.addEventListener('click', async () => {
-      if (state.profiles.length === 0) {
-        showToast('暂无可用环境，请先新建环境或一键生成模板环境', 'info');
+      const profileIds = state.profiles
+        .filter((profile) => !state.activeSessions.has(profile.profileId))
+        .map((profile) => profile.profileId);
+      if (profileIds.length === 0) {
+        showToast('没有待启动的浏览器环境', 'info');
         return;
       }
-      showToast(`正在批量拉起 ${state.profiles.length} 个独立 Profile 窗口...`, 'info');
+      showToast(`正在批量拉起 ${profileIds.length} 个独立 Profile 窗口...`, 'info');
       btnBatchStart.disabled = true;
       btnBatchStart.textContent = '🚀 批量多开中...';
       try {
-        for (const p of state.profiles) {
-          if (!state.activeSessions.has(p.profileId)) {
-            await fetch(`${API_BASE}/profiles/${p.profileId}/start`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ headless: false }),
-            });
-          }
-        }
-        showToast('全部独立指纹浏览器窗口已在桌面成功弹出！', 'success');
+        const results = await runProfileBatch('start', profileIds);
+        const failed = results.filter((result) => !result.success);
+        showToast(`批量启动完成：成功 ${results.length - failed.length} 个，失败 ${failed.length} 个`, failed.length ? 'error' : 'success');
         loadSessions();
       } catch (err) {
         showToast(`批量多开异常: ${err.message}`, 'error');
@@ -265,17 +285,17 @@ function initFormInteractions() {
   const btnBatchStop = document.getElementById('btn-batch-stop-all');
   if (btnBatchStop) {
     btnBatchStop.addEventListener('click', async () => {
-      if (state.activeSessions.size === 0) {
+      const profileIds = [...state.activeSessions.keys()];
+      if (profileIds.length === 0) {
         showToast('当前没有运行中的浏览器窗口', 'info');
         return;
       }
       btnBatchStop.disabled = true;
       btnBatchStop.textContent = '⏹ 停止中...';
       try {
-        for (const [profileId] of state.activeSessions.entries()) {
-          await fetch(`${API_BASE}/profiles/${profileId}/stop`, { method: 'POST' });
-        }
-        showToast('所有浏览器窗口已安全关闭', 'info');
+        const results = await runProfileBatch('stop', profileIds);
+        const failed = results.filter((result) => !result.success);
+        showToast(`批量停止完成：成功 ${results.length - failed.length} 个，失败 ${failed.length} 个`, failed.length ? 'error' : 'info');
         loadSessions();
       } catch (err) {
         showToast(`停止异常: ${err.message}`, 'error');
@@ -286,16 +306,45 @@ function initFormInteractions() {
     });
   }
 
-  // 搜索过滤
-  document.getElementById('filter-profiles-input').addEventListener('input', (e) => {
-    const q = e.target.value.toLowerCase().trim();
-    renderProfilesTable(state.profiles.filter(p => 
-      p.name.toLowerCase().includes(q) || 
-      p.profileId.toLowerCase().includes(q) ||
-      (p.tags && p.tags.some(t => t.toLowerCase().includes(q)))
-    ));
+  // 搜索和分页只影响表格，不影响 RPA/扩展中心使用的完整 Profile 目录。
+  const filterInput = document.getElementById('filter-profiles-input');
+  if (filterInput) {
+    const handleProfileFilter = debounce((val) => {
+      state.profileFilter = val.toLowerCase().trim();
+      state.profilePage = 0;
+      renderProfilePage();
+    }, 150);
+    filterInput.addEventListener('input', (event) => {
+      handleProfileFilter(event.target.value);
+    });
+  }
+  document.getElementById('profiles-page-prev').addEventListener('click', () => {
+    if (state.profilePage > 0) {
+      state.profilePage -= 1;
+      renderProfilePage();
+    }
+  });
+  document.getElementById('profiles-page-next').addEventListener('click', () => {
+    state.profilePage += 1;
+    renderProfilePage();
   });
 }
+
+async function runProfileBatch(action, profileIds) {
+  const results = [];
+  for (let offset = 0; offset < profileIds.length; offset += 100) {
+    const response = await fetch(`${API_BASE}/profiles/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileIds: profileIds.slice(offset, offset + 100), action, headless: false }),
+    });
+    const json = await response.json();
+    if (!response.ok || !json.success) throw new Error(json.message || '批量操作失败');
+    if (Array.isArray(json.data)) results.push(...json.data);
+  }
+  return results;
+}
+
 
 // 随机生成指纹
 function randomizeFingerprintForm() {
@@ -402,11 +451,9 @@ async function loadProfiles() {
       state.profiles = json.data || [];
       document.getElementById('profiles-count').textContent = state.profiles.length;
       document.getElementById('stat-total-profiles').textContent = state.profiles.length;
-      
       const proxyCount = state.profiles.filter(p => p.proxyServer).length;
       document.getElementById('stat-proxy-count').textContent = proxyCount;
-
-      renderProfilesTable(state.profiles);
+      renderProfilePage();
       refreshRpaProfileOptions();
       renderExtensionAssignments();
       loadSessions();
@@ -414,6 +461,30 @@ async function loadProfiles() {
   } catch (err) {
     console.error('Failed to load profiles', err);
   }
+}
+
+function getFilteredProfiles() {
+  const query = state.profileFilter;
+  if (!query) return state.profiles;
+  return state.profiles.filter((profile) =>
+    profile.name.toLowerCase().includes(query)
+    || profile.profileId.toLowerCase().includes(query)
+    || profile.tags?.some((tag) => tag.toLowerCase().includes(query))
+  );
+}
+
+function renderProfilePage() {
+  const filtered = getFilteredProfiles();
+  const pageCount = Math.max(1, Math.ceil(filtered.length / state.profilesPerPage));
+  state.profilePage = Math.min(state.profilePage, pageCount - 1);
+  const start = state.profilePage * state.profilesPerPage;
+  renderProfilesTable(filtered.slice(start, start + state.profilesPerPage), start);
+  const first = filtered.length ? start + 1 : 0;
+  const last = Math.min(start + state.profilesPerPage, filtered.length);
+  document.getElementById('profiles-page-summary').textContent = `${first}-${last} / ${filtered.length}`;
+  document.getElementById('profiles-page-info').textContent = `第 ${state.profilePage + 1} / ${pageCount} 页`;
+  document.getElementById('profiles-page-prev').disabled = state.profilePage === 0;
+  document.getElementById('profiles-page-next').disabled = state.profilePage >= pageCount - 1;
 }
 
 // 加载活跃会话状态
@@ -437,12 +508,15 @@ async function loadSessions() {
 }
 
 // 渲染表格
-function renderProfilesTable(list) {
+function renderProfilesTable(list, offset = 0) {
   const tbody = document.getElementById('profiles-tbody');
   tbody.innerHTML = '';
 
   if (list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-dim);">暂无浏览器环境，请点击右上角【新建浏览器环境】或【一键生成A股投研模板环境】</td></tr>`;
+    const emptyMessage = state.profiles.length
+      ? '没有匹配的浏览器环境，请修改搜索条件'
+      : '暂无浏览器环境，请点击右上角【新建浏览器环境】或【一键生成A股投研模板环境】';
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-dim);">${emptyMessage}</td></tr>`;
     return;
   }
 
@@ -451,17 +525,17 @@ function renderProfilesTable(list) {
     const isRunning = state.activeSessions.has(p.profileId);
 
     tr.innerHTML = `
-      <td style="color: var(--text-dim); font-family: var(--font-mono);">${idx + 1}</td>
+      <td style="color: var(--text-dim); font-family: var(--font-mono);">${offset + idx + 1}</td>
       <td>
         <div style="font-weight: 600; color: var(--text-main);">${escapeHtml(p.name)}</div>
-        <div class="profile-id-cell">${p.profileId}</div>
+        <div class="profile-id-cell">${escapeHtml(p.profileId)}</div>
       </td>
       <td>
-        <span class="tag-badge" style="text-transform: capitalize;">${p.engine || 'firefox'}</span>
+        <span class="tag-badge" style="text-transform: capitalize;">${escapeHtml(p.engine || 'firefox')}</span>
       </td>
       <td>
-        <div>${p.proxyServer ? `🌐 ${p.proxyServer}` : '⚪ 本地直连'}</div>
-        <div style="font-size: 11px; color: var(--text-dim);">${p.country ? `🇨🇳 ${p.country}` : 'CN'}</div>
+        <div>${p.proxyServer ? `🌐 ${escapeHtml(p.proxyServer)}` : '⚪ 本地直连'}</div>
+        <div style="font-size: 11px; color: var(--text-dim);">${p.country ? `🌐 ${escapeHtml(p.country)}` : '未验证出口'}</div>
       </td>
       <td>
         <span class="tag-badge" style="color: #34d399;">Canvas微扰</span>
@@ -469,8 +543,8 @@ function renderProfilesTable(list) {
       </td>
       <td>
         <div style="display: flex; gap: 4px;">
-          <button class="btn btn-xs btn-secondary btn-manage-cookie" data-id="${p.profileId}">🍪 Cookie</button>
-          <button class="btn btn-xs btn-outline btn-open-2fa" data-id="${p.profileId}" data-name="${escapeHtml(p.name)}">🔑 2FA</button>
+          <button class="btn btn-xs btn-secondary btn-manage-cookie" data-id="${escapeHtml(p.profileId)}">🍪 Cookie</button>
+          <button class="btn btn-xs btn-outline btn-open-2fa" data-id="${escapeHtml(p.profileId)}" data-name="${escapeHtml(p.name)}">🔑 2FA</button>
         </div>
       </td>
       <td style="font-size: 12px; color: var(--text-dim);">
@@ -479,15 +553,16 @@ function renderProfilesTable(list) {
       <td style="text-align: right;">
         <div class="row-actions">
           ${isRunning ? `
-            <button class="btn btn-sm btn-info btn-nav-window" data-id="${p.profileId}" data-sid="${state.activeSessions.get(p.profileId)}" title="控制此窗口打开指定网页">🌐 网址导航</button>
-            <button class="btn btn-sm btn-danger btn-stop-window" data-id="${p.profileId}">⏹ 停止窗口</button>
+            <button class="btn btn-sm btn-warning btn-live-takeover" data-id="${escapeHtml(p.profileId)}" data-sid="${escapeHtml(state.activeSessions.get(p.profileId))}" title="实时画面回传与反向接管操作">🎮 实时接管</button>
+            <button class="btn btn-sm btn-info btn-nav-window" data-id="${escapeHtml(p.profileId)}" data-sid="${escapeHtml(state.activeSessions.get(p.profileId))}" title="控制此窗口打开指定网页">🌐 网址导航</button>
+            <button class="btn btn-sm btn-danger btn-stop-window" data-id="${escapeHtml(p.profileId)}">⏹ 停止窗口</button>
           ` : `
-            <button class="btn btn-sm btn-success btn-open-window" data-id="${p.profileId}">▶ 打开窗口</button>
+            <button class="btn btn-sm btn-success btn-open-window" data-id="${escapeHtml(p.profileId)}">▶ 打开窗口</button>
           `}
-          <button class="btn btn-sm btn-outline btn-edit-profile" data-id="${p.profileId}" title="修改名称和标签">✏️</button>
-          <button class="btn btn-sm btn-outline btn-clone-profile" data-id="${p.profileId}" title="克隆环境">📋</button>
-          <button class="btn btn-sm btn-outline btn-rotate-proxy" data-id="${p.profileId}" title="从健康代理池轮换">🔄</button>
-          <button class="btn btn-sm btn-secondary btn-delete-profile" data-id="${p.profileId}" title="删除环境">🗑️</button>
+          <button class="btn btn-sm btn-outline btn-edit-profile" data-id="${escapeHtml(p.profileId)}" title="修改名称和标签">✏️</button>
+          <button class="btn btn-sm btn-outline btn-clone-profile" data-id="${escapeHtml(p.profileId)}" title="克隆环境">📋</button>
+          <button class="btn btn-sm btn-outline btn-rotate-proxy" data-id="${escapeHtml(p.profileId)}" title="从健康代理池轮换">🔄</button>
+          <button class="btn btn-sm btn-secondary btn-delete-profile" data-id="${escapeHtml(p.profileId)}" title="删除环境">🗑️</button>
         </div>
       </td>
     `;
@@ -498,7 +573,7 @@ function renderProfilesTable(list) {
 }
 
 function updateTableStatusButtons() {
-  renderProfilesTable(state.profiles);
+  renderProfilePage();
 }
 
 // 绑定表格操作事件
@@ -529,6 +604,19 @@ function attachTableEvents() {
         btn.disabled = false;
         btn.textContent = '▶ 打开窗口';
       }
+    };
+  });
+
+  // 实时反向接管控制台
+  document.querySelectorAll('.btn-live-takeover').forEach(btn => {
+    btn.onclick = () => {
+      const sessionId = btn.getAttribute('data-sid');
+      const profileId = btn.getAttribute('data-id');
+      if (!sessionId) {
+        showToast('会话未就绪', 'error');
+        return;
+      }
+      openLiveTakeoverModal(sessionId, profileId);
     };
   });
 
@@ -768,6 +856,280 @@ async function testSingleProxy() {
     btn.disabled = false;
   }
 }
+const CLUSTER_TASK_STATE_LABELS = {
+  PENDING: '排队中',
+  RUNNING: '执行中',
+  COMPLETED: '已完成',
+  FAILED: '失败',
+  RETRYING: '重试中',
+  CANCELLED: '已取消',
+};
+
+const CLUSTER_TASK_PAGE_SIZE = 50;
+let clusterTaskRefreshInFlight = false;
+let clusterTaskPage = 0;
+let clusterTaskHasMore = false;
+let clusterTaskPreflightTimer;
+
+function initClusterTaskWorkspace() {
+  const submitButton = document.getElementById('btn-submit-cluster-task');
+  const refreshButton = document.getElementById('btn-refresh-cluster-tasks');
+  const list = document.getElementById('cluster-task-list');
+  if (!submitButton || !refreshButton || !list) return;
+
+  submitButton.addEventListener('click', submitClusterTask);
+  refreshButton.addEventListener('click', () => { void loadClusterTasks(); });
+  document.getElementById('cluster-task-url')?.addEventListener('input', () => {
+    window.clearTimeout(clusterTaskPreflightTimer);
+    clusterTaskPreflightTimer = window.setTimeout(() => { void preflightClusterTaskUrl(); }, 300);
+  });
+  ['cluster-filter-project', 'cluster-filter-run', 'cluster-filter-state', 'cluster-filter-mode', 'cluster-filter-priority', 'cluster-filter-after', 'cluster-filter-before']
+    .forEach((id) => {
+      const element = document.getElementById(id);
+      element?.addEventListener(element.tagName === 'INPUT' && !['cluster-filter-after', 'cluster-filter-before'].includes(id) ? 'input' : 'change', () => {
+        clusterTaskPage = 0;
+        void loadClusterTasks();
+      });
+    });
+  document.getElementById('btn-clear-cluster-filters')?.addEventListener('click', () => {
+    ['cluster-filter-project', 'cluster-filter-run', 'cluster-filter-after', 'cluster-filter-before'].forEach((id) => {
+      const element = document.getElementById(id);
+      if (element) element.value = '';
+    });
+    ['cluster-filter-state', 'cluster-filter-mode', 'cluster-filter-priority'].forEach((id) => {
+      const element = document.getElementById(id);
+      if (element) element.value = '';
+    });
+    clusterTaskPage = 0;
+    void loadClusterTasks();
+  });
+  document.getElementById('btn-cluster-task-prev')?.addEventListener('click', () => {
+    if (clusterTaskPage > 0) { clusterTaskPage -= 1; void loadClusterTasks(); }
+  });
+  document.getElementById('btn-cluster-task-next')?.addEventListener('click', () => {
+    if (clusterTaskHasMore) { clusterTaskPage += 1; void loadClusterTasks(); }
+  });
+  document.getElementById('btn-close-cluster-task-detail')?.addEventListener('click', closeClusterTaskDetail);
+  document.getElementById('btn-batch-cancel-cluster-tasks')?.addEventListener('click', () => { void runClusterTaskAction('cancel', selectedClusterTaskIds()); });
+  document.getElementById('btn-batch-retry-cluster-tasks')?.addEventListener('click', () => { void runClusterTaskAction('retry', selectedClusterTaskIds()); });
+  document.getElementById('btn-batch-export-cluster-tasks')?.addEventListener('click', exportClusterTasks);
+  list.addEventListener('change', (event) => {
+    if (event.target instanceof HTMLInputElement && event.target.matches('[data-task-select]')) updateClusterTaskBatchbar();
+  });
+  list.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target.closest('[data-task-action]') : null;
+    if (!(target instanceof HTMLElement)) return;
+    const taskId = target.dataset.taskId;
+    const action = target.dataset.taskAction;
+    if (!taskId) return;
+    if (action === 'detail') void openClusterTaskDetail(taskId);
+    if (action === 'cancel' || action === 'retry') void runClusterTaskAction(action, [taskId]);
+    if (action === 'copy-url') void navigator.clipboard?.writeText(target.dataset.url || '');
+  });
+  void loadClusterTasks();
+}
+
+async function submitClusterTask() {
+  const submitButton = document.getElementById('btn-submit-cluster-task');
+  const url = document.getElementById('cluster-task-url')?.value.trim();
+  if (!submitButton || !url) { showToast('请输入目标 URL', 'error'); return; }
+  const authorization = document.getElementById('cluster-task-authorized');
+  if (!(authorization instanceof HTMLInputElement) || !authorization.checked) {
+    showToast('请确认目标站点和数据采集已获授权', 'error');
+    return;
+  }
+  const preflight = await preflightClusterTaskUrl();
+  if (!preflight?.allowed) { showToast('URL 未通过安全预检，任务未提交', 'error'); return; }
+  const payload = {
+    url,
+    projectId: document.getElementById('cluster-task-project')?.value.trim(),
+    runId: document.getElementById('cluster-task-run')?.value.trim(),
+    mode: document.getElementById('cluster-task-mode')?.value,
+    priority: document.getElementById('cluster-task-priority')?.value,
+  };
+  submitButton.disabled = true;
+  submitButton.textContent = '提交中...';
+  try {
+    const response = await fetch(`${API_BASE}/cluster/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(Object.entries(payload).filter(([, value]) => value))) });
+    const json = await response.json();
+    if (!response.ok || !json.success) throw new Error(json.message || '任务提交失败');
+    document.getElementById('cluster-task-url').value = '';
+    document.getElementById('cluster-task-authorized').checked = false;
+    showToast(`任务已提交：${json.data.id}`, 'success');
+    await loadClusterTasks();
+  } catch (error) {
+    showToast(`任务提交失败: ${error.message}`, 'error');
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = '提交任务';
+  }
+}
+
+async function preflightClusterTaskUrl() {
+  const url = document.getElementById('cluster-task-url')?.value.trim();
+  const status = document.getElementById('cluster-preflight-status');
+  const origin = document.getElementById('cluster-preflight-origin');
+  const policy = document.getElementById('cluster-preflight-policy');
+  if (!status || !origin || !policy || !url) {
+    if (status) status.textContent = '输入 URL 后自动检查';
+    return null;
+  }
+  status.textContent = '检查中...';
+  try {
+    const response = await fetch(`${API_BASE}/cluster/tasks/preflight`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+    const json = await response.json();
+    if (!response.ok || !json.success) throw new Error(json.message || '预检失败');
+    const result = json.data || {};
+    origin.textContent = `目标 Origin：${result.origin || '-'}`;
+    policy.textContent = `URL 策略：${result.allowed ? '已通过' : '拒绝'}（${result.reason || '未知原因'}）`;
+    status.textContent = result.allowed ? '可以提交' : '不可提交';
+    document.getElementById('cluster-task-safety')?.classList.toggle('is-denied', !result.allowed);
+    return result;
+  } catch (error) {
+    status.textContent = `预检失败：${error.message}`;
+    document.getElementById('cluster-task-safety')?.classList.add('is-denied');
+    return null;
+  }
+}
+
+async function loadClusterTasks() {
+  const list = document.getElementById('cluster-task-list');
+  if (!list || clusterTaskRefreshInFlight) return;
+  clusterTaskRefreshInFlight = true;
+  const params = new URLSearchParams({ limit: String(CLUSTER_TASK_PAGE_SIZE), offset: String(clusterTaskPage * CLUSTER_TASK_PAGE_SIZE) });
+  const queryMap = {
+    projectId: 'cluster-filter-project', runId: 'cluster-filter-run', state: 'cluster-filter-state',
+    mode: 'cluster-filter-mode', priority: 'cluster-filter-priority',
+  };
+  Object.entries(queryMap).forEach(([key, id]) => {
+    const value = document.getElementById(id)?.value.trim();
+    if (value) params.set(key, value);
+  });
+  const after = document.getElementById('cluster-filter-after')?.value;
+  const before = document.getElementById('cluster-filter-before')?.value;
+  if (after) params.set('createdAfter', String(new Date(`${after}T00:00:00`).getTime()));
+  if (before) params.set('createdBefore', String(new Date(`${before}T23:59:59.999`).getTime()));
+  try {
+    const response = await fetch(`${API_BASE}/cluster/tasks?${params.toString()}`);
+    const json = await response.json();
+    if (!response.ok || !json.success) throw new Error(json.message || '任务加载失败');
+    state.clusterTasks = Array.isArray(json.data) ? json.data : [];
+    clusterTaskHasMore = response.headers.get('X-Has-More') === 'true';
+    renderClusterTaskList();
+  } catch (error) {
+    list.innerHTML = `<div class="task-list-empty task-list-error"><strong>加载失败</strong><span>${escapeHtml(error.message)}</span><button class="btn btn-sm btn-outline" data-task-action="reload">重试</button></div>`;
+    list.querySelector('[data-task-action="reload"]')?.addEventListener('click', () => { void loadClusterTasks(); });
+    document.getElementById('cluster-task-summary').textContent = '加载失败';
+  } finally {
+    clusterTaskRefreshInFlight = false;
+  }
+}
+
+function renderClusterTaskList() {
+  const list = document.getElementById('cluster-task-list');
+  const summary = document.getElementById('cluster-task-summary');
+  if (!list || !summary) return;
+  summary.textContent = state.clusterTasks.length ? `显示 ${state.clusterTasks.length} 个任务 · 第 ${clusterTaskPage + 1} 页` : '暂无匹配任务';
+  document.getElementById('cluster-task-pager').hidden = clusterTaskPage === 0 && !clusterTaskHasMore;
+  document.getElementById('cluster-task-page-label').textContent = `第 ${clusterTaskPage + 1} 页`;
+  document.getElementById('btn-cluster-task-prev').disabled = clusterTaskPage === 0;
+  document.getElementById('btn-cluster-task-next').disabled = !clusterTaskHasMore;
+  if (!state.clusterTasks.length) {
+    const hasFilters = ['cluster-filter-project', 'cluster-filter-run', 'cluster-filter-state', 'cluster-filter-mode', 'cluster-filter-priority', 'cluster-filter-after', 'cluster-filter-before'].some((id) => document.getElementById(id)?.value);
+    list.innerHTML = `<div class="task-list-empty">${hasFilters ? '没有匹配任务。' : '还没有任务。填写 URL、项目和运行批次后提交。'}${hasFilters ? '<button class="btn btn-sm btn-outline" data-task-action="clear-filters">清除筛选</button>' : ''}</div>`;
+    list.querySelector('[data-task-action="clear-filters"]')?.addEventListener('click', () => document.getElementById('btn-clear-cluster-filters')?.click());
+    updateClusterTaskBatchbar();
+    return;
+  }
+  list.innerHTML = state.clusterTasks.map((task) => {
+    const taskState = CLUSTER_TASK_STATE_LABELS[task.state] || task.state || '未知';
+    const canCancel = task.state === 'PENDING' || task.state === 'RETRYING';
+    const canRetry = task.state === 'FAILED' || task.state === 'CANCELLED';
+    return `<article class="cluster-task-row">
+      <div class="cluster-task-select"><input type="checkbox" data-task-select value="${escapeHtml(task.id)}" aria-label="选择任务 ${escapeHtml(task.id)}" /></div>
+      <div class="cluster-task-main">
+        <div class="cluster-task-title"><strong>${escapeHtml(task.projectId || '未分组')} / ${escapeHtml(task.runId || '未命名运行')}</strong><span class="status-pill ${String(task.state || '').toLowerCase()}">${escapeHtml(taskState)}</span></div>
+        <div class="cluster-task-url" title="${escapeHtml(task.url)}">${escapeHtml(task.url)}</div>
+        <div class="cluster-task-meta"><span>${escapeHtml(task.id)}</span><span>${task.mode === 'browser' ? 'Firefox Browser' : 'HTTP Fetch'}</span><span>${formatClusterTaskDate(task.createdAt)}</span><span>重试 ${task.retries}/${task.maxRetries}</span></div>
+        ${task.error ? `<div class="task-error"><strong>${escapeHtml(task.errorCode || '执行错误')}</strong> ${escapeHtml(task.error)}</div>` : ''}
+      </div>
+      <div class="cluster-task-side"><span class="tag-badge">${escapeHtml(task.priority || 'NORMAL')}</span><div class="cluster-task-actions"><button class="btn btn-sm btn-outline" data-task-action="detail" data-task-id="${escapeHtml(task.id)}">详情</button><button class="btn btn-sm btn-outline" data-task-action="copy-url" data-task-url="${escapeHtml(task.url)}">复制 URL</button>${canCancel ? `<button class="btn btn-sm btn-outline" data-task-action="cancel" data-task-id="${escapeHtml(task.id)}">取消</button>` : ''}${canRetry ? `<button class="btn btn-sm btn-primary" data-task-action="retry" data-task-id="${escapeHtml(task.id)}">重试</button>` : ''}</div></div>
+      ${task.result !== undefined ? `<details class="cluster-task-result"><summary>查看结构化结果</summary>${renderClusterTaskResult(task.result)}</details>` : ''}
+    </article>`;
+  }).join('');
+  updateClusterTaskBatchbar();
+}
+
+function renderClusterTaskResult(result) {
+  const json = JSON.stringify(result, null, 2);
+  if (!Array.isArray(result) || !result.length || typeof result[0] !== 'object') return `<pre>${escapeHtml(json)}</pre>`;
+  const keys = Object.keys(result[0]).slice(0, 8);
+  return `<div class="cluster-result-table-wrap"><table class="cluster-result-table"><thead><tr>${keys.map((key) => `<th>${escapeHtml(key)}</th>`).join('')}</tr></thead><tbody>${result.slice(0, 20).map((row) => `<tr>${keys.map((key) => `<td>${escapeHtml(typeof row[key] === 'string' ? row[key] : JSON.stringify(row[key]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div><details><summary>JSON</summary><pre>${escapeHtml(json)}</pre></details>`;
+}
+
+function formatClusterTaskDate(value) {
+  return Number.isFinite(value) ? new Date(value).toLocaleString() : '-';
+}
+
+function selectedClusterTaskIds() {
+  return [...document.querySelectorAll('#cluster-task-list [data-task-select]:checked')].map((input) => input.value);
+}
+
+function updateClusterTaskBatchbar() {
+  const ids = selectedClusterTaskIds();
+  document.getElementById('cluster-task-batchbar').hidden = !ids.length;
+  document.getElementById('cluster-task-selected-count').textContent = String(ids.length);
+}
+
+async function runClusterTaskAction(action, ids) {
+  if (!ids.length) { showToast('请先选择任务', 'info'); return; }
+  try {
+    const response = await fetch(`${API_BASE}/cluster/tasks/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ids }) });
+    const json = await response.json();
+    if (!response.ok || !json.success) throw new Error(json.message || '任务操作失败');
+    const failed = (json.data || []).filter((item) => !item.success);
+    showToast(failed.length ? `${action === 'cancel' ? '取消' : '重试'}完成，${failed.length} 个任务未处理` : `${action === 'cancel' ? '取消' : '重试'}完成`, failed.length ? 'info' : 'success');
+    await loadClusterTasks();
+  } catch (error) {
+    showToast(`任务操作失败: ${error.message}`, 'error');
+  }
+}
+
+async function openClusterTaskDetail(taskId) {
+  const panel = document.getElementById('cluster-task-detail');
+  const body = document.getElementById('cluster-task-detail-body');
+  if (!panel || !body) return;
+  panel.hidden = false;
+  body.innerHTML = '<div class="task-detail-loading">加载详情...</div>';
+  try {
+    const response = await fetch(`${API_BASE}/cluster/tasks/${encodeURIComponent(taskId)}`);
+    const json = await response.json();
+    if (!response.ok || !json.success) throw new Error(json.message || '详情加载失败');
+    const task = json.data;
+    document.getElementById('cluster-task-detail-title').textContent = `任务详情 · ${task.id}`;
+    document.getElementById('cluster-task-detail-subtitle').textContent = `${task.projectId || '未分组'} / ${task.runId || '未命名运行'} · ${task.mode === 'browser' ? 'Firefox Browser' : 'HTTP Fetch'}`;
+    const events = Array.isArray(task.events) ? task.events : [];
+    body.innerHTML = `<div class="task-detail-grid"><span>状态：${escapeHtml(CLUSTER_TASK_STATE_LABELS[task.state] || task.state)}</span><span>优先级：${escapeHtml(task.priority)}</span><span>租户：${escapeHtml(task.tenantId || '-')}</span><span>Worker：${escapeHtml(task.workerId || '-')}</span><span>Session：${escapeHtml(task.sessionId || '-')}</span><span>Trace：任务 ID 关联审计</span></div><div class="task-detail-section"><h5>执行时间线</h5>${events.length ? `<ol class="task-timeline">${events.map((event) => `<li><time>${formatClusterTaskDate(event.at)}</time><strong>${escapeHtml(event.phase)}</strong><span>${escapeHtml(event.message)}</span></li>`).join('')}</ol>` : '<div class="task-detail-muted">暂无持久化事件</div>'}</div><div class="task-detail-section"><h5>结果</h5>${task.result === undefined ? '<div class="task-detail-muted">暂无结果</div>' : renderClusterTaskResult(task.result)}</div>${task.error ? `<div class="task-detail-section task-detail-error"><h5>错误</h5><code>${escapeHtml(task.errorCode || 'EXECUTION_ERROR')}</code><p>${escapeHtml(task.error)}</p></div>` : ''}`;
+  } catch (error) {
+    body.innerHTML = `<div class="task-detail-error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function closeClusterTaskDetail() {
+  document.getElementById('cluster-task-detail').hidden = true;
+}
+
+function exportClusterTasks() {
+  const tasks = selectedClusterTaskIds().map((id) => state.clusterTasks.find((task) => task.id === id)).filter(Boolean);
+  if (!tasks.length) { showToast('请先选择任务', 'info'); return; }
+  const blob = new Blob([JSON.stringify(tasks, null, 2)], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `cluster-tasks-${Date.now()}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
 
 // 8. 自动化快速爬取
 function initQuickCrawler() {
@@ -1123,6 +1485,249 @@ function initLocalBrowserMigration() {
     };
   }
 }
+
+// 11.5 实时已连接 Bridge 浏览器与标签页拉取管理 (OpenCLI 架构)
+function initBridgeBrowserSection() {
+  const btnRefresh = document.getElementById('btn-refresh-bridge-browsers');
+  const btnGuide = document.getElementById('btn-show-bridge-guide');
+  const guideBox = document.getElementById('bridge-install-guide');
+
+  if (btnRefresh) {
+    btnRefresh.onclick = () => {
+      loadBridgeBrowsers(true);
+    };
+  }
+
+  if (btnGuide && guideBox) {
+    btnGuide.onclick = () => {
+      guideBox.style.display = guideBox.style.display === 'none' ? 'block' : 'none';
+    };
+  }
+}
+
+async function loadBridgeBrowsers(showNotice = false) {
+  const container = document.getElementById('bridge-browsers-container');
+  const badge = document.getElementById('bridge-browser-count-badge');
+  if (!container) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/bridge/browsers`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message || '获取失败');
+
+    const browsers = json.data?.items || [];
+    if (badge) {
+      badge.textContent = `${browsers.length} 个浏览器在线`;
+      badge.style.background = browsers.length > 0 ? 'rgba(34, 197, 94, 0.2)' : 'rgba(148, 163, 184, 0.2)';
+      badge.style.color = browsers.length > 0 ? '#4ade80' : '#94a3b8';
+    }
+
+    if (browsers.length === 0) {
+      container.innerHTML = `
+        <div style="color: var(--text-dim); font-size: 12px; padding: 16px; text-align: center; background: rgba(15, 23, 42, 0.4); border-radius: 6px; border: 1px dashed rgba(148, 163, 184, 0.2);">
+          暂无已连接的宿主浏览器。<br>
+          <span style="font-size: 11px; margin-top: 4px; display: inline-block;">
+            请在常用的 Google Chrome 或 Microsoft Edge 浏览器加载 <code>browser-bridge-extension</code> 扩展，扩展将自动探测并建立免密码有界连接。
+          </span>
+        </div>
+      `;
+      if (showNotice) showToast('当前无在线 Bridge 浏览器，请先启动扩展', 'info');
+      return;
+    }
+
+    container.innerHTML = '';
+    browsers.forEach((b) => {
+      const card = document.createElement('div');
+      card.style.background = 'var(--bg-surface)';
+      card.style.border = '1px solid rgba(99, 102, 241, 0.3)';
+      card.style.borderRadius = '8px';
+      card.style.padding = '14px';
+
+      const activeTabInfo = b.activeTab ? `
+        <div style="font-size: 12px; color: #a5b4fc; background: rgba(99, 102, 241, 0.1); padding: 4px 8px; border-radius: 4px; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          <strong>当前活动页面：</strong>${escapeHtml(b.activeTab.title || b.activeTab.url || '未知页面')}
+        </div>
+      ` : '';
+
+      card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <div style="font-weight: 600; color: #fff; font-size: 14px; display: flex; align-items: center; gap: 8px;">
+              <span>🌐 ${escapeHtml(b.name || b.id)}</span>
+              <span style="font-size: 10px; background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 2px 6px; border-radius: 4px;">🟢 ${b.state}</span>
+              ${b.contextId ? `<span style="font-size: 10px; background: rgba(148, 163, 184, 0.2); color: #cbd5e1; padding: 2px 6px; border-radius: 4px;">ID: ${escapeHtml(b.contextId)}</span>` : ''}
+            </div>
+            <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">
+              浏览器内核: ${b.engine} · 连接时间: ${new Date(b.bridgeConnectedAt || b.updatedAt).toLocaleTimeString()}
+            </div>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button class="btn btn-sm btn-primary btn-pull-tabs" data-id="${b.id}">📋 拉取所有标签页</button>
+            <button class="btn btn-sm btn-secondary btn-snap-page" data-id="${b.id}">👁️ 提取快照</button>
+            <button class="btn btn-sm btn-outline btn-open-url" data-id="${b.id}">➕ 打开网页</button>
+          </div>
+        </div>
+        ${activeTabInfo}
+        <div class="tabs-display-area" id="tabs-area-${b.id}" style="display: none; margin-top: 12px; padding: 10px; background: rgba(15, 23, 42, 0.6); border-radius: 6px;">
+          <div style="font-size: 12px; font-weight: 600; margin-bottom: 8px; color: #cbd5e1; display: flex; justify-content: space-between;">
+            <span>已打开的标签页列表（实时拉取自 Chrome 宿主）：</span>
+            <span class="tabs-count" style="color: #94a3b8; font-weight: normal;"></span>
+          </div>
+          <div class="tabs-list-container" style="display: flex; flex-direction: column; gap: 6px;"></div>
+        </div>
+      `;
+
+      // 绑定拉取标签页按钮
+      const btnPull = card.querySelector('.btn-pull-tabs');
+      const tabsArea = card.querySelector(`#tabs-area-${b.id}`);
+      const tabsList = tabsArea.querySelector('.tabs-list-container');
+      const tabsCount = tabsArea.querySelector('.tabs-count');
+
+      btnPull.onclick = async () => {
+        btnPull.textContent = '⏳ 正在拉取…';
+        btnPull.disabled = true;
+        try {
+          const tRes = await fetch(`${API_BASE}/bridge/browsers/${encodeURIComponent(b.id)}/tabs`);
+          const tJson = await tRes.json();
+          if (!tJson.success) throw new Error(tJson.message || '拉取标签页失败');
+
+          const tabs = tJson.data?.tabs || [];
+          tabsArea.style.display = 'block';
+          tabsCount.textContent = `共 ${tabs.length} 个标签`;
+          tabsList.innerHTML = '';
+
+          if (tabs.length === 0) {
+            tabsList.innerHTML = '<div style="font-size: 12px; color: #94a3b8;">未拉取到任何标签页</div>';
+          } else {
+            tabs.forEach((t) => {
+              const tabItem = document.createElement('div');
+              tabItem.style.display = 'flex';
+              tabItem.style.justifyContent = 'space-between';
+              tabItem.style.alignItems = 'center';
+              tabItem.style.padding = '8px 10px';
+              tabItem.style.background = t.active ? 'rgba(99, 102, 241, 0.15)' : 'rgba(30, 41, 59, 0.8)';
+              tabItem.style.border = t.active ? '1px solid rgba(99, 102, 241, 0.4)' : '1px solid rgba(148, 163, 184, 0.1)';
+              tabItem.style.borderRadius = '4px';
+
+              tabItem.innerHTML = `
+                <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%;">
+                  <div style="font-size: 12px; font-weight: ${t.active ? '600' : 'normal'}; color: #fff;">
+                    ${t.active ? '🟢 ' : ''}${escapeHtml(t.title || '无标题网页')}
+                  </div>
+                  <div style="font-size: 11px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    ${escapeHtml(t.url)}
+                  </div>
+                </div>
+                <div style="display: flex; gap: 6px; align-items: center;">
+                  ${t.active ? '<span style="font-size: 10px; color: #818cf8; background: rgba(99, 102, 241, 0.2); padding: 2px 6px; border-radius: 4px;">当前活动</span>' : ''}
+                  <button class="btn btn-xs btn-primary btn-bind-tab" data-tab-id="${t.tabId}">📌 绑定此页面</button>
+                  <button class="btn btn-xs btn-secondary btn-close-tab" data-tab-id="${t.tabId}">✕ 关闭</button>
+                </div>
+              `;
+
+              // 绑定此页面
+              tabItem.querySelector('.btn-bind-tab').onclick = async (e) => {
+                const targetBtn = e.target;
+                targetBtn.disabled = true;
+                targetBtn.textContent = '…';
+                try {
+                  const bRes = await fetch(`${API_BASE}/bridge/browsers/${encodeURIComponent(b.id)}/tabs/bind`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tabId: t.tabId }),
+                  });
+                  const bJson = await bRes.json();
+                  if (bJson.success) {
+                    showToast(`已成功将控制权绑定到页面：${t.title || t.url}`, 'success');
+                    await loadBridgeBrowsers();
+                  } else {
+                    showToast(`绑定失败: ${bJson.message}`, 'error');
+                  }
+                } catch (err) {
+                  showToast(`请求异常: ${err.message}`, 'error');
+                }
+              };
+
+              // 关闭标签
+              tabItem.querySelector('.btn-close-tab').onclick = async () => {
+                if (!window.confirm(`确定要关闭标签页【${t.title || t.url}】吗？`)) return;
+                try {
+                  const cRes = await fetch(`${API_BASE}/bridge/browsers/${encodeURIComponent(b.id)}/tabs/close`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tabId: t.tabId }),
+                  });
+                  const cJson = await cRes.json();
+                  if (cJson.success) {
+                    showToast('标签页已关闭', 'success');
+                    tabItem.remove();
+                  }
+                } catch (err) {
+                  showToast(`关闭失败: ${err.message}`, 'error');
+                }
+              };
+
+              tabsList.appendChild(tabItem);
+            });
+          }
+        } catch (err) {
+          showToast(`拉取标签页失败: ${err.message}`, 'error');
+        } finally {
+          btnPull.textContent = '📋 拉取所有标签页';
+          btnPull.disabled = false;
+        }
+      };
+
+      // 提取快照按钮
+      card.querySelector('.btn-snap-page').onclick = async () => {
+        showToast('正在从宿主浏览器拉取当前页面快照…', 'info');
+        try {
+          const sRes = await fetch(`${API_BASE}/bridge/browsers/${encodeURIComponent(b.id)}/snapshot`);
+          const sJson = await sRes.json();
+          if (sJson.success) {
+            const data = sJson.data || {};
+            const targetsCount = (data.targets || []).length;
+            const previewText = (data.text || '').slice(0, 200);
+            window.alert(`✅ 页面快照提取成功！\n\n网址: ${data.url}\n标题: ${data.title}\n可交互元素: ${targetsCount} 个\n\n正文片段预览:\n${previewText}...`);
+          } else {
+            showToast(`快照提取失败: ${sJson.message}`, 'error');
+          }
+        } catch (err) {
+          showToast(`提取快照异常: ${err.message}`, 'error');
+        }
+      };
+
+      // 打开新网页
+      card.querySelector('.btn-open-url').onclick = async () => {
+        const url = window.prompt('请输入要在该宿主浏览器中打开的完整网址（如 https://www.taobao.com）：');
+        if (!url || !url.trim()) return;
+        try {
+          const oRes = await fetch(`${API_BASE}/bridge/browsers/${encodeURIComponent(b.id)}/tabs/open`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url.trim(), active: true }),
+          });
+          const oJson = await oRes.json();
+          if (oJson.success) {
+            showToast('已成功在宿主浏览器打开新标签页！', 'success');
+            await loadBridgeBrowsers();
+          } else {
+            showToast(`打开失败: ${oJson.message}`, 'error');
+          }
+        } catch (err) {
+          showToast(`请求异常: ${err.message}`, 'error');
+        }
+      };
+
+      container.appendChild(card);
+    });
+
+    if (showNotice) showToast(`已刷新，当前 ${browsers.length} 个宿主浏览器在线`, 'success');
+  } catch (err) {
+    if (showNotice) showToast(`刷新 Bridge 浏览器失败: ${err.message}`, 'error');
+  }
+}
+
 // 12. CSV 批量导入与导出
 function initCsvModal() {
   const modal = document.getElementById('csv-modal');
@@ -1650,4 +2255,272 @@ function escapeHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ==============================================================================
+// 实时反向接管控制台 (Live Takeover / Web-VNC / 过盾交互)
+// ==============================================================================
+let activeTakeoverSession = null;
+let takeoverStreamTimer = null;
+let isStreamingActive = true;
+
+function initLiveTakeoverModal() {
+  const modal = document.getElementById('takeover-modal');
+  const btnClose = document.getElementById('btn-close-takeover-modal');
+  const btnCancel = document.getElementById('btn-cancel-takeover-modal');
+  const btnRefresh = document.getElementById('btn-takeover-refresh-frame');
+  const btnToggleStream = document.getElementById('btn-takeover-toggle-stream');
+  const btnResume = document.getElementById('btn-takeover-resume');
+  const btnSendText = document.getElementById('btn-takeover-send-text');
+  const btnSendEnter = document.getElementById('btn-takeover-send-enter');
+  const btnScrollDown = document.getElementById('btn-takeover-scroll-down');
+  const btnScrollUp = document.getElementById('btn-takeover-scroll-up');
+  const input = document.getElementById('takeover-type-input');
+  const canvasWrapper = document.getElementById('takeover-canvas-wrapper');
+  const screenImg = document.getElementById('takeover-screen-img');
+  const coordsDisplay = document.getElementById('takeover-coords-display');
+
+  if (!modal) return;
+
+  const closeTakeover = () => {
+    modal.classList.remove('active');
+    stopTakeoverStream();
+    activeTakeoverSession = null;
+  };
+
+  btnClose.onclick = closeTakeover;
+  btnCancel.onclick = closeTakeover;
+
+  btnRefresh.onclick = () => {
+    if (activeTakeoverSession) fetchSingleTakeoverFrame(activeTakeoverSession);
+  };
+
+  btnToggleStream.onclick = () => {
+    isStreamingActive = !isStreamingActive;
+    if (isStreamingActive) {
+      btnToggleStream.textContent = '📹 连续推流中';
+      btnToggleStream.classList.remove('btn-secondary');
+      btnToggleStream.classList.add('btn-outline');
+      startTakeoverStream();
+    } else {
+      btnToggleStream.textContent = '⏸️ 已暂停推流';
+      btnToggleStream.classList.remove('btn-outline');
+      btnToggleStream.classList.add('btn-secondary');
+      stopTakeoverStream();
+    }
+  };
+
+  // 一键 Resume 恢复自动化
+  btnResume.onclick = async () => {
+    if (!activeTakeoverSession) return;
+    btnResume.disabled = true;
+    btnResume.textContent = '⏳ 正在检测挑战并恢复...';
+    try {
+      const res = await fetch(`${API_BASE}/sessions/${activeTakeoverSession}/resume`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ humanConfirmed: true }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        showToast('🎉 人机验证/挑战已成功通过，会话已恢复为 READY 状态！', 'success');
+        updateTakeoverStateBadge(json.data.state || 'READY');
+      } else {
+        showToast(`恢复提示: ${json.message || '检测到挑战仍未完成，请在画面中完成验证后再点击'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`恢复失败: ${err.message}`, 'error');
+    } finally {
+      btnResume.disabled = false;
+      btnResume.textContent = '🛡️ 过盾完成 (Resume)';
+      fetchSingleTakeoverFrame(activeTakeoverSession);
+    }
+  };
+
+  // 发送文本
+  const sendTextAction = async () => {
+    const text = input.value;
+    if (!text || !activeTakeoverSession) return;
+    try {
+      await fetch(`${API_BASE}/sessions/${activeTakeoverSession}/interact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'keyboard', action: 'type', text }),
+      });
+      input.value = '';
+      setTimeout(() => fetchSingleTakeoverFrame(activeTakeoverSession), 150);
+    } catch (err) {
+      showToast(`发送按键失败: ${err.message}`, 'error');
+    }
+  };
+  btnSendText.onclick = sendTextAction;
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendTextAction();
+    }
+  };
+
+  // 发送回车
+  btnSendEnter.onclick = async () => {
+    if (!activeTakeoverSession) return;
+    await fetch(`${API_BASE}/sessions/${activeTakeoverSession}/interact`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'keyboard', action: 'press', key: 'Enter' }),
+    }).catch(() => {});
+    setTimeout(() => fetchSingleTakeoverFrame(activeTakeoverSession), 150);
+  };
+
+  // 滚轮控制
+  btnScrollDown.onclick = async () => {
+    if (!activeTakeoverSession) return;
+    await fetch(`${API_BASE}/sessions/${activeTakeoverSession}/interact`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'scroll', deltaY: 300 }),
+    }).catch(() => {});
+    setTimeout(() => fetchSingleTakeoverFrame(activeTakeoverSession), 100);
+  };
+  btnScrollUp.onclick = async () => {
+    if (!activeTakeoverSession) return;
+    await fetch(`${API_BASE}/sessions/${activeTakeoverSession}/interact`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'scroll', deltaY: -300 }),
+    }).catch(() => {});
+    setTimeout(() => fetchSingleTakeoverFrame(activeTakeoverSession), 100);
+  };
+
+  // 视口鼠标点击与移动映射
+  canvasWrapper.onmousemove = (e) => {
+    if (!screenImg.naturalWidth) return;
+    const rect = screenImg.getBoundingClientRect();
+    if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+      return;
+    }
+    const scaleX = screenImg.naturalWidth / rect.width;
+    const scaleY = screenImg.naturalHeight / rect.height;
+    const pageX = Math.round((e.clientX - rect.left) * scaleX);
+    const pageY = Math.round((e.clientY - rect.top) * scaleY);
+    coordsDisplay.textContent = `X: ${pageX}, Y: ${pageY}`;
+  };
+
+  canvasWrapper.onclick = async (e) => {
+    if (!activeTakeoverSession || !screenImg.naturalWidth) return;
+    const rect = screenImg.getBoundingClientRect();
+    if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+      return;
+    }
+    const scaleX = screenImg.naturalWidth / rect.width;
+    const scaleY = screenImg.naturalHeight / rect.height;
+    const pageX = Math.round((e.clientX - rect.left) * scaleX);
+    const pageY = Math.round((e.clientY - rect.top) * scaleY);
+
+    // 显示点击波纹
+    const ripple = document.getElementById('takeover-click-ripple');
+    if (ripple) {
+      const wrapperRect = canvasWrapper.getBoundingClientRect();
+      ripple.style.left = `${e.clientX - wrapperRect.left}px`;
+      ripple.style.top = `${e.clientY - wrapperRect.top}px`;
+      ripple.style.transform = 'translate(-50%, -50%) scale(1.8)';
+      ripple.style.opacity = '1';
+      setTimeout(() => {
+        ripple.style.transform = 'translate(-50%, -50%) scale(0)';
+        ripple.style.opacity = '0';
+      }, 300);
+    }
+
+    try {
+      await fetch(`${API_BASE}/sessions/${activeTakeoverSession}/interact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'mouse', action: 'click', x: pageX, y: pageY, button: 'left' }),
+      });
+      // 延迟后获取最新画面
+      setTimeout(() => {
+        if (activeTakeoverSession) fetchSingleTakeoverFrame(activeTakeoverSession);
+      }, 150);
+    } catch (err) {
+      console.error('Click forward error:', err);
+    }
+  };
+
+  // 支持在画面上直接滚轮滚动
+  canvasWrapper.onwheel = (e) => {
+    e.preventDefault();
+    if (!activeTakeoverSession) return;
+    const delta = Math.max(-400, Math.min(400, e.deltaY));
+    fetch(`${API_BASE}/sessions/${activeTakeoverSession}/interact`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'scroll', deltaY: delta }),
+    }).catch(() => {});
+  };
+}
+
+function openLiveTakeoverModal(sessionId, profileId) {
+  activeTakeoverSession = sessionId;
+  const modal = document.getElementById('takeover-modal');
+  modal.classList.add('active');
+  document.getElementById('takeover-placeholder').style.display = 'block';
+  document.getElementById('takeover-screen-img').style.display = 'none';
+  fetchSingleTakeoverFrame(sessionId);
+  if (isStreamingActive) startTakeoverStream();
+}
+
+function updateTakeoverStateBadge(stateName) {
+  const badge = document.getElementById('takeover-state-badge');
+  const dot = document.getElementById('takeover-status-dot');
+  if (!badge || !dot) return;
+  badge.textContent = stateName;
+  if (stateName === 'PAUSED_CHALLENGE') {
+    badge.style.background = 'rgba(239, 68, 68, 0.2)';
+    badge.style.color = '#ef4444';
+    dot.style.background = '#ef4444';
+  } else if (stateName === 'HUMAN_TAKEOVER' || stateName === 'USER_CONTROLLED') {
+    badge.style.background = 'rgba(245, 158, 11, 0.2)';
+    badge.style.color = '#f59e0b';
+    dot.style.background = '#f59e0b';
+  } else {
+    badge.style.background = 'rgba(56, 189, 248, 0.2)';
+    badge.style.color = '#38bdf8';
+    dot.style.background = '#34d399';
+  }
+}
+
+async function fetchSingleTakeoverFrame(sessionId) {
+  if (!sessionId) return;
+  try {
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}/live-view`);
+    const json = await res.json();
+    if (json.success && json.data?.image) {
+      const img = document.getElementById('takeover-screen-img');
+      const placeholder = document.getElementById('takeover-placeholder');
+      const urlText = document.getElementById('takeover-url-text');
+      img.src = `data:image/png;base64,${json.data.image}`;
+      img.style.display = 'block';
+      placeholder.style.display = 'none';
+      if (json.data.url) urlText.textContent = json.data.url;
+      if (json.data.state) updateTakeoverStateBadge(json.data.state);
+    }
+  } catch (err) {
+    console.warn('Takeover frame fetch error:', err);
+  }
+}
+
+function startTakeoverStream() {
+  stopTakeoverStream();
+  takeoverStreamTimer = setInterval(() => {
+    if (activeTakeoverSession && isStreamingActive) {
+      fetchSingleTakeoverFrame(activeTakeoverSession);
+    }
+  }, 250);
+}
+
+function stopTakeoverStream() {
+  if (takeoverStreamTimer) {
+    clearInterval(takeoverStreamTimer);
+    takeoverStreamTimer = null;
+  }
 }
