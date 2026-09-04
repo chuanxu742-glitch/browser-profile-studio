@@ -172,6 +172,10 @@ export const BrowserStatusSchema = z
   .object({ sessionId: SessionId, ...TenantAuthFields })
   .strict();
 
+export const BrowserEnvironmentDiagnosticsSchema = z
+  .object({ sessionId: SessionId, ...TenantAuthFields })
+  .strict();
+
 export const BrowserStopSchema = z
   .object({ sessionId: SessionId, ...TenantAuthFields })
   .strict();
@@ -512,9 +516,13 @@ export const PageExtractSchema = z
   })
   .strict();
 
+const CrawlLabel = z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+
 const ClusterTaskSchema = z
   .object({
     url: HttpUrl,
+    projectId: CrawlLabel.optional(),
+    runId: CrawlLabel.optional(),
     mode: z.enum(['fetch', 'browser']).default('fetch'),
     priority: z.enum(['LOW', 'NORMAL', 'HIGH', 'CRITICAL']).default('NORMAL'),
     extractionSchema: PageExtractSchema.omit({ sessionId: true }).optional(),
@@ -541,9 +549,20 @@ export const ClusterGetTaskSchema = z
   })
   .strict();
 
+export const ClusterListTasksSchema = z
+  .object({
+    projectId: CrawlLabel.optional(),
+    runId: CrawlLabel.optional(),
+    state: z.enum(['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'RETRYING', 'CANCELLED']).optional(),
+    limit: z.number().int().min(1).max(500).default(100),
+    ...TenantAuthFields,
+  })
+  .strict();
+
 export const TOOL_SCHEMAS = {
   browser_start: BrowserStartSchema,
   browser_status: BrowserStatusSchema,
+  browser_environment_diagnostics: BrowserEnvironmentDiagnosticsSchema,
   browser_stop: BrowserStopSchema,
   browser_reopen_headed: BrowserReopenHeadedSchema,
   browser_resume: BrowserResumeSchema,
@@ -573,6 +592,7 @@ export const TOOL_SCHEMAS = {
   cluster_batch_submit: ClusterBatchSubmitSchema,
   cluster_status: ClusterStatusSchema,
   cluster_get_task: ClusterGetTaskSchema,
+  cluster_list_tasks: ClusterListTasksSchema,
   profile_create: ProfileCreateSchema,
   profile_list: ProfileListSchema,
   profile_get: ProfileGetSchema,
@@ -651,6 +671,12 @@ export const TOOL_INPUT_SCHEMAS: Record<string, Record<string, unknown>> & Recor
     },
   },
   browser_status: {
+    type: "object",
+    additionalProperties: false,
+    properties: { sessionId: { type: "string", minLength: 8, maxLength: 128 } },
+    required: ["sessionId"],
+  },
+  browser_environment_diagnostics: {
     type: "object",
     additionalProperties: false,
     properties: { sessionId: { type: "string", minLength: 8, maxLength: 128 } },
@@ -1093,6 +1119,8 @@ export const TOOL_INPUT_SCHEMAS: Record<string, Record<string, unknown>> & Recor
     additionalProperties: false,
     properties: {
       url: { type: "string", format: "uri", maxLength: 2048 },
+      projectId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+      runId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
       mode: { type: "string", enum: ["fetch", "browser"], default: "fetch" },
       priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "CRITICAL"], default: "NORMAL" },
       extractionSchema: {
@@ -1143,6 +1171,8 @@ export const TOOL_INPUT_SCHEMAS: Record<string, Record<string, unknown>> & Recor
           additionalProperties: false,
           properties: {
             url: { type: "string", format: "uri", maxLength: 2048 },
+            projectId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+            runId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
             mode: { type: "string", enum: ["fetch", "browser"], default: "fetch" },
             priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "CRITICAL"], default: "NORMAL" },
             extractionSchema: {
@@ -1197,6 +1227,18 @@ export const TOOL_INPUT_SCHEMAS: Record<string, Record<string, unknown>> & Recor
       tenantToken: { type: "string", minLength: 32, maxLength: 4096 },
     },
     required: ["taskId"],
+  },
+  cluster_list_tasks: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      projectId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+      runId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+      state: { type: "string", enum: ["PENDING", "RUNNING", "COMPLETED", "FAILED", "RETRYING", "CANCELLED"] },
+      limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+      tenantId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+      tenantToken: { type: "string", minLength: 32, maxLength: 4096 },
+    },
   },
   profile_create: {
     type: "object",
@@ -1369,6 +1411,7 @@ const TENANT_AUTH_JSON_PROPERTIES = {
 const TENANT_SCOPED_TOOL_NAMES: readonly ToolName[] = [
   'browser_start',
   'browser_status',
+  'browser_environment_diagnostics',
   'browser_stop',
   'browser_reopen_headed',
   'browser_resume',

@@ -13,6 +13,7 @@ import {
   BrowserStartSchema,
   BrowserStatusSchema,
   BrowserStopSchema,
+  BrowserEnvironmentDiagnosticsSchema,
   BrowserCapabilitiesSchema,
   WorkspaceListSchema,
   WorkspaceGetSchema,
@@ -20,6 +21,7 @@ import {
   WorkspaceResumeSchema,
   ClusterBatchSubmitSchema,
   ClusterGetTaskSchema,
+  ClusterListTasksSchema,
   ClusterStatusSchema,
   ClusterSubmitTaskSchema,
   PageClickSchema,
@@ -63,6 +65,7 @@ export const MCP_SERVER_VERSION = SERVER_VERSION;
 export const TOOL_NAMES = [
   "browser_start",
   "browser_status",
+  "browser_environment_diagnostics",
   "browser_stop",
   "browser_reopen_headed",
   "browser_resume",
@@ -92,6 +95,7 @@ export const TOOL_NAMES = [
   "cluster_batch_submit",
   "cluster_status",
   "cluster_get_task",
+  "cluster_list_tasks",
   "profile_create",
   "profile_list",
   "profile_get",
@@ -246,6 +250,7 @@ type TenantOperationRole = "read" | "submit";
 const TENANT_SCOPED_METHODS: ReadonlySet<keyof SessionManagerLike> = new Set([
   "start",
   "status",
+  "environmentDiagnostics",
   "stop",
   "reopenHeaded",
   "resume",
@@ -273,6 +278,7 @@ const TENANT_SCOPED_METHODS: ReadonlySet<keyof SessionManagerLike> = new Set([
 const TENANT_SCOPED_TOOLS: ReadonlySet<string> = new Set([
   "browser_start",
   "browser_status",
+  "browser_environment_diagnostics",
   "browser_stop",
   "browser_reopen_headed",
   "browser_resume",
@@ -362,7 +368,7 @@ type ClusterOperationRole = "read" | "submit";
 
 function clusterRole(method: keyof SessionManagerLike): ClusterOperationRole | undefined {
   if (method === "submitClusterTask" || method === "submitClusterBatch") return "submit";
-  if (method === "getClusterStatus" || method === "getClusterTask") return "read";
+  if (method === "getClusterStatus" || method === "getClusterTask" || method === "listClusterTasks") return "read";
   return undefined;
 }
 
@@ -477,6 +483,7 @@ const call = async (
     case "checkProxy":
       return await (fn as (...args: unknown[]) => Promise<unknown> | unknown).call(manager, input.proxy);
     case "status":
+    case "environmentDiagnostics":
     case "stop":
     case "reopenHeaded": {
       const args = method === "stop" ? [requireSessionId(), "mcp_request"] : [requireSessionId()];
@@ -544,6 +551,15 @@ const call = async (
       return await (fn as (tenantId?: string) => Promise<unknown> | unknown).call(manager, clusterTenantId);
     case "getClusterTask":
       return await (fn as (id: string, tenantId?: string) => Promise<unknown> | unknown).call(manager, input.taskId, clusterTenantId);
+    case "listClusterTasks": {
+      const { limit, ...filter } = clusterInputWithoutCredentials(input);
+      return await (fn as (taskFilter: Record<string, unknown>, taskLimit?: number, tenantId?: string) => Promise<unknown> | unknown).call(
+        manager,
+        filter,
+        limit as number | undefined,
+        clusterTenantId,
+      );
+    }
     case "extract":
       return await (fn as (...args: unknown[]) => Promise<unknown> | unknown).call(manager, ...withTenant(requireSessionId(), {
         containerSelector: input.containerSelector,
@@ -660,6 +676,13 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     BrowserStatusSchema,
     "status",
     { title: "Browser status", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  ),
+  define(
+    "browser_environment_diagnostics",
+    "Read token-free browser surface consistency diagnostics without page content or credentials.",
+    BrowserEnvironmentDiagnosticsSchema,
+    "environmentDiagnostics",
+    { title: "Browser environment diagnostics", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   ),
   define(
     "browser_stop",
@@ -864,6 +887,13 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     ClusterGetTaskSchema,
     "getClusterTask",
     { title: "Get task result", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  ),
+  define(
+    "cluster_list_tasks",
+    "List distributed crawl tasks with optional project, run, and state filters.",
+    ClusterListTasksSchema,
+    "listClusterTasks",
+    { title: "List cluster tasks", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   ),
   define(
     "profile_create",

@@ -17,6 +17,7 @@ function stubManager(): SessionManagerLike {
   return {
     start: vi.fn(result),
     status: vi.fn(result),
+    environmentDiagnostics: vi.fn(result),
     stop: vi.fn(result),
     reopenHeaded: vi.fn(result),
     resume: vi.fn(result),
@@ -45,6 +46,7 @@ function stubManager(): SessionManagerLike {
     submitClusterBatch: vi.fn(result),
     getClusterStatus: vi.fn(async () => ({ totalWorkers: 1, healthyWorkers: 1 })),
     getClusterTask: vi.fn(async (taskId: string) => ({ id: taskId, state: 'COMPLETED' })),
+    listClusterTasks: vi.fn(async (filter: Record<string, unknown>, limit?: number, tenantId?: string) => ({ filter, limit, tenantId })),
     shutdown: vi.fn(async () => undefined),
   };
 }
@@ -64,10 +66,23 @@ describe("MCP contract", () => {
     const listed = await client.listTools();
     expect(listed.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
     expect(Object.keys(TOOL_SCHEMAS)).toEqual([...TOOL_NAMES]);
+    const diagnosticsSchema = listed.tools.find((tool) => tool.name === "browser_environment_diagnostics")?.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(diagnosticsSchema.properties).toHaveProperty("tenantId");
+    expect(diagnosticsSchema.properties).toHaveProperty("tenantToken");
     expect(listed.tools.map((tool) => tool.name)).not.toContain("page_evaluate");
     expect(listed.tools.map((tool) => tool.name)).not.toContain("browser_protocol");
     await client.close();
     await server.close();
+  });
+
+  it("dispatches token-free environment diagnostics as a tenant-scoped read", async () => {
+    const manager = { ...stubManager(), get: vi.fn(() => ({})) } as unknown as SessionManagerLike;
+    const result = await handleToolCall(manager, "browser_environment_diagnostics", { sessionId: "ses_stub_1234" });
+
+    expect(result.isError).not.toBe(true);
+    expect(manager.environmentDiagnostics).toHaveBeenCalledWith("ses_stub_1234");
   });
 
   it("advertises strict object schemas and annotations", async () => {
@@ -558,6 +573,33 @@ describe("MCP contract", () => {
     });
     const submitCalls = (manager.submitClusterTask as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(JSON.stringify(submitCalls[0])).not.toContain("tenant-a-secret-token");
+  });
+
+  it("lists cluster tasks with project/run filters without forwarding credentials", async () => {
+    const token = "tenant-a-secret-token-32-characters";
+    const manager = {
+      ...stubManager(),
+      get: vi.fn(() => ({})),
+    } as unknown as SessionManagerLike;
+    const authenticator = new TenantAuthenticator({ "tenant-a": token });
+
+    const result = await handleToolCall(manager, "cluster_list_tasks", {
+      projectId: "catalog",
+      runId: "run-7",
+      state: "RUNNING",
+      limit: 25,
+      tenantId: "tenant-a",
+      tenantToken: token,
+    }, { tenantAuthenticator: authenticator });
+
+    expect(result.isError).not.toBe(true);
+    expect(manager.listClusterTasks).toHaveBeenCalledWith({
+      projectId: "catalog",
+      runId: "run-7",
+      state: "RUNNING",
+    }, 25, "tenant-a");
+    const calls = (manager.listClusterTasks as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(JSON.stringify(calls[0])).not.toContain(token);
   });
 
   it("rejects invalid cluster credentials before the manager is called", async () => {

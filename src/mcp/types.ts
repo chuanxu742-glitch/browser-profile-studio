@@ -10,6 +10,7 @@ type ManagerMethod = (...args: never[]) => Promise<unknown> | unknown;
 export interface SessionManagerLike {
   start: ManagerMethod;
   status: ManagerMethod;
+  environmentDiagnostics?: ManagerMethod;
   stop: ManagerMethod;
   reopenHeaded: ManagerMethod;
   resume: ManagerMethod;
@@ -39,6 +40,7 @@ export interface SessionManagerLike {
   submitClusterBatch?: ManagerMethod;
   getClusterStatus?: ManagerMethod;
   getClusterTask?: ManagerMethod;
+  listClusterTasks?: ManagerMethod;
   createProfile?: ManagerMethod;
   listProfiles?: ManagerMethod;
   getProfile?: ManagerMethod;

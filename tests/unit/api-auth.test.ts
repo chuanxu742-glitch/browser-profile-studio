@@ -21,6 +21,7 @@ describe('Studio REST authentication and RBAC', () => {
       host: '127.0.0.1',
       credentials: [
         { token: 'viewer-token-012345678901234567890123', role: 'viewer', label: 'reader' },
+        { token: 'manager-token-0123456789012345678901', role: 'manager', label: 'manager', grants: { profile: ['prf_allowed'] } },
         { token: 'owner-token-0123456789012345678901234', role: 'owner', label: 'owner' },
       ],
       bootstrapToken: 'one-time-bootstrap',
@@ -50,11 +51,35 @@ describe('Studio REST authentication and RBAC', () => {
       body: JSON.stringify({ name: 'allowed', twoFactorSecret: 'SERVER_ONLY', proxy: { server: 'http://localhost:8080', password: 'SERVER_ONLY_PASSWORD' } }),
     });
     expect(create.status).toBe(201);
-    const payload = await create.json() as any;
+    const payload = await create.json() as { data: { twoFactorSecret?: unknown; hasTwoFactorSecret: boolean; proxy: { password?: unknown; hasPassword: boolean } } };
     expect(payload.data.twoFactorSecret).toBeUndefined();
     expect(payload.data.hasTwoFactorSecret).toBe(true);
     expect(payload.data.proxy.password).toBeUndefined();
     expect(payload.data.proxy.hasPassword).toBe(true);
+  });
+
+  it('applies profile grants inside bulk operations', async () => {
+    const ownerHeaders = { Authorization: 'Bearer owner-token-0123456789012345678901234', 'Content-Type': 'application/json' };
+    for (const [profileId, name] of [['prf_allowed', 'Allowed'], ['prf_denied', 'Denied']]) {
+      const response = await fetch(`${baseUrl}/api/v1/profiles`, {
+        method: 'POST',
+        headers: ownerHeaders,
+        body: JSON.stringify({ profileId, name }),
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const batch = await fetch(`${baseUrl}/api/v1/profiles/batch`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer manager-token-0123456789012345678901', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stop', profileIds: ['prf_allowed', 'prf_denied'] }),
+    });
+    expect(batch.status).toBe(200);
+    const result = await batch.json() as { data?: unknown };
+    expect(result.data).toEqual([
+      { profileId: 'prf_allowed', success: true },
+      { profileId: 'prf_denied', success: false, code: 'RESOURCE_ACCESS_DENIED' },
+    ]);
   });
 
   it('exchanges the bootstrap token once for an HttpOnly owner cookie', async () => {

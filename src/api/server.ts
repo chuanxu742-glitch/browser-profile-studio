@@ -4,6 +4,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
 import { URL } from 'node:url';
 import type { SessionManager } from '../browser/session-manager.js';
+import type { DistributedTaskDefinition, DistributedTaskRecord, TaskExecutionMode, TaskPriority, TaskState } from '../distributed/types.js';
 import type { ApiResponse } from './types.js';
 import { SERVER_VERSION } from '../capabilities.js';
 import { generateTotp } from '../auth/totp.js';
@@ -17,6 +18,7 @@ import type { ExternalRuntimeRegistry } from '../platform/provider-registry.js';
 import type { ManagedExtensionStore } from '../extension/managed-extension-store.js';
 import { managedBrowserIdentity } from '../fingerprint/runtime-identity.js';
 import { LocalBrowserImporter } from '../migration/local-browser-importer.js';
+import { BrowserPool } from '../control-plane/browser-pool.js';
 
 export type StudioRole = 'viewer' | 'operator' | 'manager' | 'owner';
 export interface StudioCredential { readonly token: string; readonly role: StudioRole; readonly label?: string; readonly workspaceId?: string; readonly grants?: TeamIdentity['grants']; }
@@ -36,6 +38,7 @@ export interface RestApiServerOptions {
   readonly externalRuntimes?: ExternalRuntimeRegistry;
   readonly extensionStore?: ManagedExtensionStore;
   readonly localBrowserImporter?: Pick<LocalBrowserImporter, 'scan' | 'importProfile'>;
+  readonly browserPool?: BrowserPool;
 }
 
 export class RestApiServer {
@@ -47,7 +50,9 @@ export class RestApiServer {
   private bootstrapUsed = false;
   private readonly synchronizer: WindowSynchronizer;
   private readonly localBrowserImporter: Pick<LocalBrowserImporter, 'scan' | 'importProfile'>;
+  public readonly browserPool: BrowserPool;
   private webSockets: WebSocketServer | undefined;
+  private bridgeWebSockets: WebSocketServer | undefined;
 
   constructor(
     private readonly manager: SessionManager,
@@ -56,6 +61,7 @@ export class RestApiServer {
     this.publicDir = options.publicDir || resolve(process.cwd(), 'public');
     this.synchronizer = new WindowSynchronizer(manager);
     this.localBrowserImporter = options.localBrowserImporter ?? new LocalBrowserImporter(manager.getStore());
+    this.browserPool = options.browserPool ?? new BrowserPool(manager);
   }
 
   public async start(): Promise<{ port: number; host: string }> {
@@ -67,9 +73,24 @@ export class RestApiServer {
         await this.handleRequest(req, res);
       });
       const webSockets = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
+      const bridgeWebSockets = new WebSocketServer({ noServer: true, maxPayload: 9 * 1024 * 1024 });
       this.webSockets = webSockets;
+      this.bridgeWebSockets = bridgeWebSockets;
       server.on('upgrade', (req, socket, head) => {
         const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
+        const bridgeMatch = url.pathname.match(/^\/ws\/bridge(?:\/([^/]+))?$/);
+        if (bridgeMatch) {
+          bridgeWebSockets.handleUpgrade(req, socket, head, (client) => {
+            try {
+              const specifiedId = bridgeMatch[1] ? decodeURIComponent(bridgeMatch[1]) : undefined;
+              this.browserPool.attachOrAutoRegisterBridge(client, specifiedId);
+            } catch {
+              client.close(1008, 'invalid bridge');
+            }
+          });
+          return;
+        }
+
         const match = url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/ws$/);
         const identity = this.authenticate(req);
         if (!match || !identity || !roleAllows(identity.role, 'operator') || !this.canAccessResource(identity, 'profile', this.profileForSession(decodeURIComponent(match[1]!)) ?? '*')) {
@@ -100,6 +121,9 @@ export class RestApiServer {
     for (const client of this.webSockets?.clients ?? []) client.close(1001, 'server shutdown');
     this.webSockets?.close();
     this.webSockets = undefined;
+    for (const client of this.bridgeWebSockets?.clients ?? []) client.close(1001, 'server shutdown');
+    this.bridgeWebSockets?.close();
+    this.bridgeWebSockets = undefined;
     if (!this.server) return;
     return new Promise((resolvePromise, reject) => {
       this.server?.close((err?: Error) => {
@@ -151,6 +175,12 @@ export class RestApiServer {
       return;
     }
 
+    // 轻量静默探活端点（参考 OpenCLI，供 Bridge 扩展和桌面工具秒级发现服务）
+    if (method === 'GET' && (pathname === '/ping' || pathname === '/api/v1/ping')) {
+      this.sendJson(res, 200, { success: true, code: 'OK', data: { service: 'antigravity-studio-bridge', port: this.actualPort }, timestamp: Date.now() });
+      return;
+    }
+
     const identity = this.authenticate(req);
     res.once('finish', () => {
       void this.options.audit?.record({
@@ -162,7 +192,7 @@ export class RestApiServer {
         ...(identity ? { actor: identity.label ?? identity.role, role: identity.role } : {}),
       }).catch(() => undefined);
     });
-    if (pathname.startsWith('/api/') && pathname !== '/api/v1/health') {
+    if (pathname.startsWith('/api/') && pathname !== '/api/v1/health' && pathname !== '/api/v1/ping') {
       if (!identity) {
         this.sendJson(res, 401, { success: false, code: 'UNAUTHENTICATED', message: 'Studio authentication is required', timestamp: Date.now() });
         return;
@@ -226,6 +256,18 @@ export class RestApiServer {
           serviceWorkerReason: 'Chromium aligns via CDP background target injection; Firefox aligns via native user preferences and cross-channel shadow proxy alignment (MessagePort, BroadcastChannel, ServiceWorkerContainer)',
           externalRuntimes: this.options.externalRuntimes?.list() ?? [],
         }, timestamp: Date.now() }); return;
+      }
+      const sessionDiagnosticsMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/diagnostics$/);
+      if (sessionDiagnosticsMatch && method === 'GET') {
+        const sessionId = decodeURIComponent(sessionDiagnosticsMatch[1]!);
+        const profileId = this.profileForSession(sessionId);
+        if (profileId && !this.canAccessResource(identity!, 'profile', profileId)) {
+          this.sendJson(res, 403, { success: false, code: 'RESOURCE_ACCESS_DENIED', message: 'This API key has no grant for the requested profile', timestamp: Date.now() });
+          return;
+        }
+        const diagnostics = await this.manager.environmentDiagnostics(sessionId);
+        this.sendJson(res, 200, { success: true, code: 'OK', data: diagnostics, timestamp: Date.now() });
+        return;
       }
       if (pathname === '/api/v1/product/runtime-health' && method === 'GET') {
         this.sendJson(res, 200, { success: true, code: 'OK', data: await this.options.externalRuntimes?.health() ?? [], timestamp: Date.now() }); return;
@@ -467,6 +509,89 @@ export class RestApiServer {
         return;
       }
 
+      // 会话实时画面获取（Live View / Screencast Snapshot）
+      const sessionLiveViewMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/live-view$/);
+      if (sessionLiveViewMatch && method === 'GET') {
+        const sessionId = decodeURIComponent(sessionLiveViewMatch[1]!);
+        try {
+          const status = this.manager.status(sessionId);
+          const shot = await this.manager.screenshot(sessionId);
+          this.sendJson(res, 200, {
+            success: true,
+            code: 'OK',
+            data: {
+              sessionId,
+              state: status.state,
+              url: status.url,
+              image: shot.image.data,
+              timestamp: Date.now(),
+            },
+            timestamp: Date.now(),
+          });
+        } catch (err) {
+          this.sendJson(res, 500, {
+            success: false,
+            code: 'SCREENSHOT_FAILED',
+            message: err instanceof Error ? err.message : String(err),
+            timestamp: Date.now(),
+          });
+        }
+        return;
+      }
+
+      // 会话直接交互（Direct Interaction Takeover: Mouse / Keyboard / Scroll）
+      const sessionInteractMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/interact$/);
+      if (sessionInteractMatch && method === 'POST') {
+        const sessionId = decodeURIComponent(sessionInteractMatch[1]!);
+        const body = await this.readJsonBody(req);
+        const actionType = body.type || 'mouse';
+        try {
+          let result: unknown;
+          if (actionType === 'mouse') {
+            result = await this.manager.dispatchDirectMouse(
+              sessionId,
+              body.action || 'click',
+              Number(body.x) || 0,
+              Number(body.y) || 0,
+              { button: body.button || 'left', clickCount: body.clickCount || 1 },
+            );
+          } else if (actionType === 'keyboard') {
+            result = await this.manager.dispatchDirectKeyboard(
+              sessionId,
+              body.action || 'type',
+              String(body.text || body.key || ''),
+            );
+          } else if (actionType === 'scroll') {
+            result = await this.manager.dispatchDirectScroll(
+              sessionId,
+              Number(body.deltaX) || 0,
+              Number(body.deltaY) || 0,
+            );
+          } else {
+            this.sendJson(res, 400, { success: false, code: 'INVALID_ACTION_TYPE', message: 'Supported types: mouse, keyboard, scroll', timestamp: Date.now() });
+            return;
+          }
+          this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
+        } catch (err) {
+          this.sendJson(res, 500, { success: false, code: 'INTERACTION_FAILED', message: err instanceof Error ? err.message : String(err), timestamp: Date.now() });
+        }
+        return;
+      }
+
+      // 挑战接管完成并恢复会话（Resume Session）
+      const sessionResumeMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/resume$/);
+      if (sessionResumeMatch && method === 'POST') {
+        const sessionId = decodeURIComponent(sessionResumeMatch[1]!);
+        const body = await this.readJsonBody(req);
+        try {
+          const status = await this.manager.resume(sessionId, Boolean(body.humanConfirmed ?? true));
+          this.sendJson(res, 200, { success: true, code: 'OK', data: status, timestamp: Date.now() });
+        } catch (err) {
+          this.sendJson(res, 400, { success: false, code: 'RESUME_FAILED', message: err instanceof Error ? err.message : String(err), timestamp: Date.now() });
+        }
+        return;
+      }
+
       const profileStopMatch = pathname.match(/^\/api\/v1\/profiles\/([^/]+)\/stop$/);
       if (profileStopMatch && method === 'POST') {
         const profileId = decodeURIComponent(profileStopMatch[1]!);
@@ -602,9 +727,13 @@ export class RestApiServer {
           this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'profileIds and a supported action are required', timestamp: Date.now() });
           return;
         }
-        const results = [];
+        const results: Array<{ profileId: string; success: boolean; sessionId?: string; code?: unknown }> = [];
         for (const id of ids) {
           try {
+            if (!this.canAccessResource(identity!, 'profile', id)) {
+              results.push({ profileId: id, success: false, code: 'RESOURCE_ACCESS_DENIED' });
+              continue;
+            }
             if (body.action === 'delete') results.push({ profileId: id, success: await this.manager.deleteProfile(id) });
             else if (body.action === 'start') {
               const session = await this.manager.start({ profileId: id, headless: body.headless ?? false, fingerprint: true });
@@ -678,6 +807,119 @@ export class RestApiServer {
       if (pathname === '/api/v1/rpa/workflows' && method === 'POST' && this.options.rpa) {
         const created = await this.options.rpa.createWorkflow(await this.readJsonBody(req) as any);
         this.sendJson(res, 201, { success: true, code: 'CREATED', data: created, timestamp: Date.now() });
+        return;
+      }
+      // Distributed crawl task workspace: enqueue, filter and inspect task runs.
+      if (pathname === '/api/v1/cluster/tasks' && method === 'GET') {
+        const projectId = parsedUrl.searchParams.get('projectId')?.trim() || undefined;
+        const runId = parsedUrl.searchParams.get('runId')?.trim() || undefined;
+        const stateValue = parsedUrl.searchParams.get('state')?.trim() || undefined;
+        const modeValue = parsedUrl.searchParams.get('mode')?.trim() || undefined;
+        const priorityValue = parsedUrl.searchParams.get('priority')?.trim() || undefined;
+        const states = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'RETRYING', 'CANCELLED'] as const;
+        if (stateValue && !states.includes(stateValue as TaskState)) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'state is invalid', timestamp: Date.now() });
+          return;
+        }
+        if (modeValue && modeValue !== 'fetch' && modeValue !== 'browser') {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'mode is invalid', timestamp: Date.now() });
+          return;
+        }
+        if (priorityValue && !['LOW', 'NORMAL', 'HIGH', 'CRITICAL'].includes(priorityValue)) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'priority is invalid', timestamp: Date.now() });
+          return;
+        }
+        const limit = boundedQueryInteger(parsedUrl.searchParams.get('limit'), 1, 100, 100);
+        const offset = boundedQueryInteger(parsedUrl.searchParams.get('offset'), 0, 100_000, 0);
+        const createdAfter = optionalQueryTimestamp(parsedUrl.searchParams.get('createdAfter'));
+        const createdBefore = optionalQueryTimestamp(parsedUrl.searchParams.get('createdBefore'));
+        const rawTasks = await this.manager.listClusterTasks({
+          ...(projectId ? { projectId } : {}),
+          ...(runId ? { runId } : {}),
+          ...(stateValue ? { state: stateValue as TaskState } : {}),
+          ...(modeValue ? { mode: modeValue as TaskExecutionMode } : {}),
+          ...(priorityValue ? { priority: priorityValue as TaskPriority } : {}),
+          ...(createdAfter !== undefined ? { createdAfter } : {}),
+          ...(createdBefore !== undefined ? { createdBefore } : {}),
+        }, Math.min(500, offset + limit + 1));
+        const tasks = rawTasks.slice(offset, offset + limit).map(publicTask);
+        res.setHeader('X-Offset', String(offset));
+        res.setHeader('X-Limit', String(limit));
+        res.setHeader('X-Has-More', String(rawTasks.length > offset + limit));
+        this.sendJson(res, 200, { success: true, code: 'OK', data: tasks, timestamp: Date.now() });
+        return;
+      }
+      if (pathname === '/api/v1/cluster/tasks/preflight' && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        if (typeof body.url !== 'string' || !body.url.trim()) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'A URL is required', timestamp: Date.now() });
+          return;
+        }
+        this.sendJson(res, 200, { success: true, code: 'OK', data: await this.manager.preflightClusterTaskUrl(body.url.trim()), timestamp: Date.now() });
+        return;
+      }
+      if (pathname === '/api/v1/cluster/tasks/actions' && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        const ids = Array.isArray(body.ids) ? [...new Set(body.ids.filter((id: unknown): id is string => typeof id === 'string'))] : [];
+        if (ids.length < 1 || ids.length > 100 || (body.action !== 'cancel' && body.action !== 'retry')) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'ids and action are required', timestamp: Date.now() });
+          return;
+        }
+        const results = await Promise.all(ids.map(async (id) => {
+          try {
+            const task = body.action === 'cancel'
+              ? await this.manager.cancelClusterTask(id)
+              : await this.manager.retryClusterTask(id);
+            return { id, success: true, task: publicTask(task) };
+          } catch (error: unknown) {
+            return { id, success: false, code: error instanceof Error ? error.message : 'TASK_ACTION_FAILED' };
+          }
+        }));
+        this.sendJson(res, 200, { success: true, code: 'OK', data: results, timestamp: Date.now() });
+        return;
+      }
+      if (pathname === '/api/v1/cluster/tasks' && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        if (typeof body.url !== 'string' || !/^https?:\/\//i.test(body.url)) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'A http(s) url is required', timestamp: Date.now() });
+          return;
+        }
+        const mode = body.mode === undefined ? undefined : body.mode;
+        const priority = body.priority === undefined ? undefined : body.priority;
+        if (mode !== undefined && mode !== 'fetch' && mode !== 'browser') {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'mode is invalid', timestamp: Date.now() });
+          return;
+        }
+        if (priority !== undefined && !['LOW', 'NORMAL', 'HIGH', 'CRITICAL'].includes(priority)) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'priority is invalid', timestamp: Date.now() });
+          return;
+        }
+        const definition: DistributedTaskDefinition = {
+          url: body.url,
+          ...(typeof body.projectId === 'string' ? { projectId: body.projectId } : {}),
+          ...(typeof body.runId === 'string' ? { runId: body.runId } : {}),
+          ...(mode !== undefined ? { mode: mode as TaskExecutionMode } : {}),
+          ...(priority !== undefined ? { priority: priority as TaskPriority } : {}),
+          ...(typeof body.maxRetries === 'number' ? { maxRetries: body.maxRetries } : {}),
+          ...(typeof body.timeoutMs === 'number' ? { timeoutMs: body.timeoutMs } : {}),
+        };
+        const task = await this.manager.submitClusterTask(definition);
+        this.sendJson(res, 202, { success: true, code: 'ACCEPTED', data: publicTask(task), timestamp: Date.now() });
+        return;
+      }
+      const clusterTaskMatch = pathname.match(/^\/api\/v1\/cluster\/tasks\/([^/]+)$/);
+      if (clusterTaskMatch && method === 'GET') {
+        const task = await this.manager.getClusterTask(decodeURIComponent(clusterTaskMatch[1]!));
+        this.sendJson(res, task ? 200 : 404, {
+          success: Boolean(task),
+          code: task ? 'OK' : 'TASK_NOT_FOUND',
+          ...(task ? { data: publicTask(task) } : { message: 'Task was not found' }),
+          timestamp: Date.now(),
+        });
+        return;
+      }
+      if (pathname === '/api/v1/cluster/status' && method === 'GET') {
+        this.sendJson(res, 200, { success: true, code: 'OK', data: await this.manager.getClusterStatus(), timestamp: Date.now() });
         return;
       }
       const rpaWorkflowMatch = pathname.match(/^\/api\/v1\/rpa\/workflows\/([^/]+)$/);
@@ -1031,7 +1273,6 @@ export class RestApiServer {
         const { targetSessionIds = [], action, jitterMs = 40 } = body;
         if (!Array.isArray(targetSessionIds) || targetSessionIds.length === 0 || !action) {
           this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'targetSessionIds and action are required', timestamp: Date.now() });
-          return;
         }
 
         const syncResults = await this.synchronizer.broadcast(targetSessionIds, action, { jitterMs });
@@ -1060,6 +1301,62 @@ export class RestApiServer {
         return;
       }
 
+      // 14. Bridge 浏览器实时拉取与控制 (OpenCLI 模式 / 免关浏览器 / 免解密)
+      if (pathname === '/api/v1/bridge/browsers' && method === 'GET') {
+        const browsers = this.browserPool.list().filter((b) => b.mode === 'bridge');
+        this.sendJson(res, 200, { success: true, code: 'OK', data: { items: browsers }, timestamp: Date.now() });
+        return;
+      }
+
+      const bridgeTabsMatch = pathname.match(/^\/api\/v1\/bridge\/browsers\/([^/]+)\/tabs$/);
+      if (bridgeTabsMatch && method === 'GET') {
+        const tabs = await this.browserPool.pullTabs(bridgeTabsMatch[1]!);
+        this.sendJson(res, 200, { success: true, code: 'OK', data: { browserId: bridgeTabsMatch[1]!, tabs }, timestamp: Date.now() });
+        return;
+      }
+
+      const bridgeBindMatch = pathname.match(/^\/api\/v1\/bridge\/browsers\/([^/]+)\/tabs\/bind$/);
+      if (bridgeBindMatch && method === 'POST') {
+        const body = (await this.readJsonBody(req).catch(() => ({}))) as { tabId?: number };
+        const result = typeof body.tabId === 'number'
+          ? await this.browserPool.switchTab(bridgeBindMatch[1]!, body.tabId)
+          : await this.browserPool.bindCurrentTab(bridgeBindMatch[1]!);
+        this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
+        return;
+      }
+
+      const bridgeOpenMatch = pathname.match(/^\/api\/v1\/bridge\/browsers\/([^/]+)\/tabs\/open$/);
+      if (bridgeOpenMatch && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        const result = await this.browserPool.createTab(bridgeOpenMatch[1]!, body.url, body.active !== false);
+        this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
+        return;
+      }
+
+      const bridgeCloseMatch = pathname.match(/^\/api\/v1\/bridge\/browsers\/([^/]+)\/tabs\/close$/);
+      if (bridgeCloseMatch && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        if (typeof body.tabId !== 'number') throw new Error('tabId is required');
+        const result = await this.browserPool.closeTab(bridgeCloseMatch[1]!, body.tabId);
+        this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
+        return;
+      }
+
+      const bridgeSnapshotMatch = pathname.match(/^\/api\/v1\/bridge\/browsers\/([^/]+)\/snapshot$/);
+      if (bridgeSnapshotMatch && method === 'GET') {
+        const result = await this.browserPool.bridgeCall(bridgeSnapshotMatch[1]!, { op: 'snapshot' });
+        this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
+        return;
+      }
+
+      const bridgeCallMatch = pathname.match(/^\/api\/v1\/bridge\/browsers\/([^/]+)\/call$/);
+      if (bridgeCallMatch && method === 'POST') {
+        const body = await this.readJsonBody(req);
+        const result = await this.browserPool.bridgeCall(bridgeCallMatch[1]!, body);
+        this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
+        return;
+      }
+
       // 404 Fallthrough
       this.sendJson(res, 404, {
         success: false,
@@ -1077,6 +1374,7 @@ export class RestApiServer {
       else if (code === 'UNAUTHENTICATED' || code === 'PERMISSION_DENIED' || code.endsWith('_ACCESS_DENIED')) statusCode = 403;
       else if (code.endsWith('_NOT_FOUND')) statusCode = 404;
       else if (code === 'SESSION_BUSY' || code === 'ACTION_ID_CONFLICT' || code === 'TWO_FACTOR_NOT_CONFIGURED' || code === 'EXTENSION_INTEGRITY_FAILED') statusCode = 409;
+      else if (['TASK_RUNNING', 'TASK_NOT_RETRYABLE', 'TASK_LEASE_LOST'].includes(code)) statusCode = 409;
       else if (code.startsWith('EXTENSION_') && code !== 'EXTENSION_STORE_UNAVAILABLE') statusCode = 400;
       else if (code === 'EXTENSION_STORE_UNAVAILABLE') statusCode = 503;
 
@@ -1208,6 +1506,17 @@ export class RestApiServer {
   private attachAutomationSocket(socket: WebSocket, sessionId: string): void {
     socket.send(JSON.stringify({ type: 'ready', sessionId, protocol: 'abs-rpc/1' }));
     let tail = Promise.resolve();
+    let screencastTimer: NodeJS.Timeout | null = null;
+
+    const stopScreencast = () => {
+      if (screencastTimer) {
+        clearInterval(screencastTimer);
+        screencastTimer = null;
+      }
+    };
+
+    socket.on('close', () => stopScreencast());
+
     socket.on('message', (bytes) => {
       tail = tail.then(async () => {
         let request: any;
@@ -1223,7 +1532,58 @@ export class RestApiServer {
           else if (request.op === 'scroll') data = await this.manager.scroll(sessionId, request.direction, request.amount);
           else if (request.op === 'snapshot') data = await this.manager.snapshot(sessionId, request.options);
           else if (request.op === 'screenshot') data = await this.manager.screenshot(sessionId, request.options);
-          else throw Object.assign(new Error('Unsupported WebSocket operation'), { code: 'OPERATION_UNSUPPORTED' });
+          else if (request.op === 'interact_mouse') {
+            data = await this.manager.dispatchDirectMouse(
+              sessionId,
+              request.action || 'click',
+              Number(request.x) || 0,
+              Number(request.y) || 0,
+              request.options,
+            );
+          } else if (request.op === 'interact_keyboard') {
+            data = await this.manager.dispatchDirectKeyboard(
+              sessionId,
+              request.action || 'type',
+              String(request.text || request.key || ''),
+            );
+          } else if (request.op === 'interact_scroll') {
+            data = await this.manager.dispatchDirectScroll(
+              sessionId,
+              Number(request.deltaX) || 0,
+              Number(request.deltaY) || 0,
+            );
+          } else if (request.op === 'resume') {
+            data = await this.manager.resume(sessionId, Boolean(request.humanConfirmed ?? true));
+          } else if (request.op === 'start_screencast') {
+            stopScreencast();
+            const interval = Math.max(100, Math.min(2000, Number(request.intervalMs) || 250));
+            let inFlight = false;
+            screencastTimer = setInterval(async () => {
+              if (inFlight || socket.readyState !== 1) return;
+              inFlight = true;
+              try {
+                const shot = await this.manager.screenshot(sessionId);
+                const stat = this.manager.status(sessionId);
+                if (socket.readyState === 1) {
+                  socket.send(JSON.stringify({
+                    type: 'screencast_frame',
+                    sessionId,
+                    timestamp: Date.now(),
+                    state: stat.state,
+                    url: stat.url,
+                    image: shot.image.data,
+                  }));
+                }
+              } catch (_) {}
+              finally { inFlight = false; }
+            }, interval);
+            data = { streaming: true, intervalMs: interval };
+          } else if (request.op === 'stop_screencast') {
+            stopScreencast();
+            data = { streaming: false };
+          } else {
+            throw Object.assign(new Error('Unsupported WebSocket operation'), { code: 'OPERATION_UNSUPPORTED' });
+          }
           socket.send(JSON.stringify({ id, success: true, data }));
         } catch (error) { socket.send(JSON.stringify({ id, success: false, code: typeof error === 'object' && error && 'code' in error ? String(error.code) : 'OPERATION_FAILED', message: error instanceof Error ? error.message : String(error) })); }
       }).catch(() => undefined);
@@ -1244,10 +1604,11 @@ function roleAllows(actual: StudioRole, required: StudioRole): boolean {
 }
 
 function requiredRole(method: string | undefined, pathname: string): StudioRole {
+  if (pathname.startsWith('/api/v1/bridge/')) return method === 'GET' ? 'viewer' : 'operator';
   if (pathname.startsWith('/api/v1/team/') || pathname.startsWith('/api/v1/migration/') || pathname.includes('/purge') || pathname.includes('/extensions/import') || (pathname.startsWith('/api/v1/extensions/') && method === 'DELETE')) return 'owner';
   if (pathname.includes('/cookies') || pathname.includes('/2fa/') || method === 'DELETE') return 'owner';
   if (method === 'GET') return 'viewer';
-  if (pathname.includes('/start') || pathname.includes('/stop') || pathname.includes('/navigate') || pathname.includes('/rpa/tasks') || pathname.includes('/external-runtimes/')) return 'operator';
+  if (pathname.includes('/start') || pathname.includes('/stop') || pathname.includes('/navigate') || pathname.includes('/interact') || pathname.includes('/resume') || pathname.includes('/rpa/tasks') || pathname.includes('/external-runtimes/') || pathname === '/api/v1/cluster/tasks/actions') return 'operator';
   return 'manager';
 }
 
@@ -1262,7 +1623,7 @@ function resourceFromPath(pathname: string): { kind: 'profile' | 'proxy' | 'work
 function boundedQueryInteger(raw: string | null, minimum: number, maximum: number, fallback: number): number { const value = Number(raw); return Number.isInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback; }
 
 function studioOpenApiDocument(host: string, port: number): Record<string, unknown> {
-  const paths = ['/health', '/auth/me', '/profiles', '/profiles/trash', '/profiles/{id}/extensions', '/extensions', '/extensions/import', '/extensions/{id}', '/migration/local-browsers', '/migration/import-local', '/proxies', '/rpa/workflows', '/rpa/tasks', '/external-runtimes/{provider}/create', '/external-runtimes/{provider}/{runtime}/stop', '/team/workspaces', '/team/members', '/synchronizer/broadcast'];
+  const paths = ['/health', '/auth/me', '/profiles', '/profiles/batch', '/profiles/batch-import-csv', '/profiles/batch-export-csv', '/profiles/trash', '/profiles/{id}/extensions', '/extensions', '/extensions/import', '/extensions/{id}', '/migration/local-browsers', '/migration/import-local', '/proxies', '/rpa/workflows', '/rpa/tasks', '/sessions/{sessionId}/diagnostics', '/cluster/tasks', '/cluster/tasks/preflight', '/cluster/tasks/actions', '/cluster/tasks/{id}', '/cluster/status', '/external-runtimes/{provider}/create', '/external-runtimes/{provider}/{runtime}/stop', '/team/workspaces', '/team/members', '/synchronizer/broadcast', '/bridge/browsers', '/bridge/browsers/{id}/tabs'];
   return { openapi: '3.1.0', info: { title: 'Antigravity Browser Studio API', version: SERVER_VERSION }, servers: [{ url: `http://${host}:${port}/api/v1` }], security: [{ bearerAuth: [] }], paths: Object.fromEntries(paths.map((path) => [path, { get: { summary: path }, post: { summary: path } }])), components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } } };
 }
 
@@ -1286,6 +1647,11 @@ function publicProxy(proxy: any): Record<string, unknown> {
   const health = proxy.lastCheck ? (proxy.lastCheck.verified ? 'verified' : proxy.lastCheck.success ? 'reachable' : 'unhealthy') : 'unknown';
   return { ...proxy, password: undefined, hasPassword: Boolean(proxy.password), health };
 }
+function optionalQueryTimestamp(raw: string | null): number | undefined {
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
 
 function parseCsvLine(line: string): string[] {
   const fields: string[] = [];
@@ -1306,4 +1672,9 @@ function parseCsvLine(line: string): string[] {
 
 function csvCell(value: unknown): string {
   return `"${String(value ?? '').replaceAll('"', '""')}"`;
+}
+
+function publicTask(task: DistributedTaskRecord): Record<string, unknown> {
+  const { leaseId: _leaseId, ...safeTask } = task;
+  return safeTask;
 }
