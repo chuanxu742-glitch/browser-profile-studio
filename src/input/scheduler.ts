@@ -210,10 +210,47 @@ export function easeInOut(t: number): number {
   return clamped * clamped * (3 - 2 * clamped);
 }
 
+export function sampleGaussian(rng: SeededRng, mean = 0, stdDev = 1): number {
+  let u1 = rng.next();
+  let u2 = rng.next();
+  while (u1 <= 1e-7) u1 = rng.next();
+  const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+  return mean + z0 * stdDev;
+}
+
+const COMMON_DIGRAPHS = new Set([
+  'th', 'he', 'in', 'er', 'an', 're', 'on', 'at', 'en', 'nd', 'ed', 'es', 'or', 'te', 'of', 'ea',
+  'ti', 'to', 'it', 'st', 'io', 'le', 'is', 'ou', 'ar', 'as', 'de', 'rt', 've'
+]);
+
+export function calculateHumanKeyDelay(
+  currentKey: string,
+  prevKey: string | undefined,
+  rng: SeededRng,
+  minBound: number,
+  maxBound: number,
+): number {
+  const center = (minBound + maxBound) / 2;
+  const spread = Math.max(1, (maxBound - minBound) / 6);
+  let delay = sampleGaussian(rng, center, spread);
+
+  if (prevKey) {
+    const digraph = (prevKey + currentKey).toLowerCase();
+    if (COMMON_DIGRAPHS.has(digraph)) {
+      // 常见双字母加速 15%~20%
+      delay *= 0.85;
+    } else if (/[^a-zA-Z0-9]/.test(currentKey)) {
+      // 标点符号与特殊按键减速 20%
+      delay *= 1.20;
+    }
+  }
+
+  return Math.max(minBound, Math.min(maxBound, Math.round(delay)));
+}
+
 /**
- * Build a bounded multi-point pointer path.  The first and final points are
- * exactly the supplied endpoints.  A small perpendicular control-point bend
- * keeps the path useful for visual stability without leaving a large area.
+ * Build a bounded multi-point pointer path with Fitts's Law pacing and muscular jitter.
+ * The first and final points are exactly the supplied endpoints.
  */
 export function createBezierTrajectory(
   from: Point,
@@ -235,6 +272,17 @@ export function createBezierTrajectory(
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const distance = Math.hypot(dx, dy);
+
+  // 菲茨定律估算自然时间：T = a + b * log2(1 + D/W)
+  let durationMs: number;
+  if (durationMin === durationMax) {
+    durationMs = durationMin;
+  } else {
+    const fittsFactor = Math.min(1, Math.max(0, Math.log2(1 + distance / 45) / 4.2));
+    const estimated = Math.round(durationMin + (durationMax - durationMin) * fittsFactor);
+    durationMs = Math.max(durationMin, Math.min(durationMax, estimated));
+  }
+
   const perpendicularLength = distance === 0 ? 0 : Math.min(80, Math.max(4, distance * 0.18));
   const normal = distance === 0 ? { x: 0, y: 0 } : { x: -dy / distance, y: dx / distance };
   const bend = rng.float(-perpendicularLength, perpendicularLength);
@@ -250,14 +298,28 @@ export function createBezierTrajectory(
   const points: Point[] = [];
   for (let index = 0; index < count; index += 1) {
     const raw = count === 1 ? 1 : index / (count - 1);
-    const point = raw === 0
-      ? from
-      : raw === 1
-        ? to
-        : cubicBezier(easeInOut(raw), from, p1, p2, to);
-    points.push({ x: Number(point.x.toFixed(3)), y: Number(point.y.toFixed(3)) });
+    if (raw === 0) {
+      points.push({ x: Number(from.x.toFixed(3)), y: Number(from.y.toFixed(3)) });
+      continue;
+    }
+    if (raw === 1) {
+      points.push({ x: Number(to.x.toFixed(3)), y: Number(to.y.toFixed(3)) });
+      continue;
+    }
+
+    const curvePoint = cubicBezier(easeInOut(raw), from, p1, p2, to);
+
+    // 人类手部微小肌肉抖动（Muscular Jitter）：在运动中间产生微小的高斯随机偏置，两端自然衰减至 0
+    const jitterMagnitude = Math.sin(raw * Math.PI) * 0.75;
+    const jitterX = jitterMagnitude === 0 ? 0 : rng.float(-jitterMagnitude, jitterMagnitude);
+    const jitterY = jitterMagnitude === 0 ? 0 : rng.float(-jitterMagnitude, jitterMagnitude);
+
+    points.push({
+      x: Number((curvePoint.x + jitterX).toFixed(3)),
+      y: Number((curvePoint.y + jitterY).toFixed(3)),
+    });
   }
-  return { points, durationMs: rng.int(durationMin, durationMax) };
+  return { points, durationMs };
 }
 
 export function makeSafePoint(box: BoundingBox, rng: SeededRng): Point {
@@ -336,13 +398,26 @@ export class InteractionScheduler {
     return this.rng.int(this.postDelayRange[0], this.postDelayRange[1]);
   }
 
-  public sampleKeyDelay(): number {
-    return this.rng.int(this.keyDelayRange[0], this.keyDelayRange[1]);
+  public sampleKeyDelay(currentKey?: string, prevKey?: string): number {
+    return calculateHumanKeyDelay(
+      currentKey ?? 'a',
+      prevKey,
+      this.rng,
+      this.keyDelayRange[0],
+      this.keyDelayRange[1],
+    );
   }
 
-  public keyDelays(length: number): number[] {
+  public keyDelays(length: number, text?: string): number[] {
     if (!Number.isInteger(length) || length < 0) throw new RangeError('Text length must be non-negative');
-    return Array.from({ length }, () => this.sampleKeyDelay());
+    const delays: number[] = [];
+    let prevChar: string | undefined;
+    for (let i = 0; i < length; i += 1) {
+      const char = text ? text[i] : undefined;
+      delays.push(this.sampleKeyDelay(char, prevChar));
+      prevChar = char;
+    }
+    return delays;
   }
 
   public planTrajectory(from: Point, to: Point): MouseTrajectory {
@@ -479,9 +554,11 @@ export class InteractionScheduler {
     }
 
     const keyDelaysMs: number[] = [];
+    let prevChar: string | undefined;
     for (const character of text) {
       throwIfAborted(actualSignal);
-      const keyDelayMs = this.sampleKeyDelay();
+      const keyDelayMs = this.sampleKeyDelay(character, prevChar);
+      prevChar = character;
       keyDelaysMs.push(keyDelayMs);
       await this.sleep(keyDelayMs, actualSignal);
       throwIfAborted(actualSignal);
@@ -534,16 +611,30 @@ export class InteractionScheduler {
       const chunkAmount = Math.min(3, remaining);
       const total = Math.min(this.scrollStepPixels * chunkAmount, maxChunkPixels);
       const chunkSteps = this.isPaced ? Math.max(1, Math.min(6, chunkAmount * 2)) : 1;
-      const chunkDeltaX = signedX * (total / chunkSteps);
-      const chunkDeltaY = signed * (total / chunkSteps);
+
+      // 拟人化惯性阻尼：多步滚动时按指数阻尼权重衰减，权重归一化保证总距离完全守恒
+      const rawWeights: number[] = [];
+      let weightSum = 0;
+      for (let i = 0; i < chunkSteps; i += 1) {
+        const w = Math.exp(-0.35 * i);
+        rawWeights.push(w);
+        weightSum += w;
+      }
+
       for (let index = 0; index < chunkSteps; index += 1) {
         throwIfAborted(signal);
-        await actualPage.mouse.wheel(chunkDeltaX, chunkDeltaY);
+        const weightFraction = rawWeights[index]! / weightSum;
+        const stepDeltaX = signedX * total * weightFraction;
+        const stepDeltaY = signed * total * weightFraction;
+        await actualPage.mouse.wheel(stepDeltaX, stepDeltaY);
         throwIfAborted(signal);
         steps += 1;
-        deltaX += chunkDeltaX;
-        deltaY += chunkDeltaY;
-        if (this.isPaced && index + 1 < chunkSteps) await this.sleep(this.samplePostDelay(), signal);
+        deltaX += stepDeltaX;
+        deltaY += stepDeltaY;
+        if (this.isPaced && index + 1 < chunkSteps) {
+          const pacingMs = Math.round(this.samplePostDelay() / chunkSteps);
+          await this.sleep(Math.max(15, pacingMs), signal);
+        }
       }
       remaining -= chunkAmount;
       if (this.isPaced && remaining > 0) await this.sleep(this.samplePostDelay(), signal);
