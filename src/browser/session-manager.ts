@@ -2,6 +2,9 @@ import { BrowserSession, BrowserSessionError } from './browser-session.js';
 import type { BrowserSessionOptions, BrowserSessionStatus, BrowserTabStatus } from './browser-session.js';
 import type { EnvironmentDiagnostics } from './environment-diagnostics.js';
 import type { ChallengePolicy } from '../challenge/policy.js';
+import type { LeaseManager, ProfileLease } from '../distributed/profile-lease.js';
+import { MemoryLeaseManager, RedisLeaseManager } from '../distributed/profile-lease.js';
+import type { Cluster, Redis } from 'ioredis';
 import { BrowserToolError } from '../domain.js';
 import type { Workspace, WorkspaceRetention } from '../domain.js';
 import { createWorkspaceId, cloneWorkspace, digestWorkspaceLease, normalizeWorkspaceName } from './workspace.js';
@@ -29,6 +32,7 @@ import {
   type ProfileCreateOptions,
   type ProfileSummary,
   type CookieRecord,
+  type BrowserStorageState,
   type CookieFormat,
 } from '../profile/index.js';
 import { normalizeProxyConfig, checkProxy, type ProxyConfig, type ProxyCheckResult } from '../proxy/index.js';
@@ -141,8 +145,10 @@ export const DEFAULT_MAX_TABS_PER_SESSION = getAutomationPolicy(DEFAULT_AUTOMATI
 export class SessionManager {
   private readonly options: SessionManagerOptions;
   private readonly sessions = new Map<string, BrowserSession>();
-  /** Prevent two live Firefox processes from opening the same persistent profile. */
-  private readonly persistentProfileOwners = new Map<string, string>();
+  /** Lease manager for persistent profile ownership across distributed workers */
+  private readonly profileLeaseManager: LeaseManager;
+  private readonly activeProfileLeases = new Map<string, { tenantId: string; lease: ProfileLease }>();
+  private readonly leaseRenewalTimers = new Map<string, unknown>();
   private readonly workspaces = new Map<string, Workspace>();
   private readonly workspaceBySession = new Map<string, string>();
   /** Only a digest and expiry are retained; the raw handoff token stays with the caller. */
@@ -198,6 +204,12 @@ export class SessionManager {
         startLocalWorker: false,
         ...(options.cluster ?? {}),
       });
+    }
+    if (this.clusterScheduler && this.clusterScheduler.getAdapter().underlyingRedisClient) {
+      const redis = this.clusterScheduler.getAdapter().underlyingRedisClient as Redis | Cluster;
+      this.profileLeaseManager = new RedisLeaseManager(redis);
+    } else {
+      this.profileLeaseManager = new MemoryLeaseManager();
     }
   }
 
@@ -269,6 +281,7 @@ export class SessionManager {
     let effectiveFingerprint: FingerprintConfig | boolean | undefined = options.fingerprint ?? this.options.fingerprint;
     let effectiveFingerprintSeed = options.fingerprintSeed ?? this.options.fingerprintSeed;
     let initialCookies: CookieRecord[] | undefined;
+    let initialStorageState: BrowserStorageState | undefined;
     let managedExtensions: BrowserSessionOptions['managedExtensions'];
     let savedProfile: ProfileMetadata | undefined;
     if (options.profileId) {
@@ -294,6 +307,7 @@ export class SessionManager {
       savedProfile = profileMeta;
       effectiveFingerprintSeed ??= profileMeta.fingerprint?.seed ?? stableProfileSeed(profileMeta.profileId);
       initialCookies = await this.profileStore.getCookies(profileMeta.profileId);
+      initialStorageState = await this.profileStore.getStorageState(profileMeta.profileId);
     }
 
     if (effectiveFingerprint === true && savedProfile) {
@@ -341,9 +355,6 @@ export class SessionManager {
     const profileKey = persistBrowserProfile
       ? persistentProfileKey(effectiveProfileName)
       : undefined;
-    if (profileKey !== undefined && this.persistentProfileOwners.has(profileKey)) {
-      throw new BrowserSessionError('RESOURCE_EXHAUSTED', 'The requested persistent profile is already in use', { retryable: true });
-    }
     // Construct an explicit allowlist of per-session fields. Policy, audit,
     // launcher, detector, scheduler and server-owned roots always come from
     // the manager and cannot be replaced by a session caller.
@@ -379,9 +390,11 @@ export class SessionManager {
       ...(effectiveFingerprint !== undefined ? { fingerprint: effectiveFingerprint } : {}),
       ...(effectiveFingerprintSeed !== undefined ? { fingerprintSeed: effectiveFingerprintSeed } : {}),
       ...(initialCookies !== undefined ? { initialCookies } : {}),
+      ...(initialStorageState !== undefined ? { initialStorageState } : {}),
       ...(managedExtensions !== undefined ? { managedExtensions } : {}),
       ...(options.profileId !== undefined ? {
         onCookiesPersist: (cookies: readonly CookieRecord[]) => this.profileStore.saveCookies(options.profileId!, cookies),
+        onStorageStatePersist: (state: BrowserStorageState) => this.profileStore.saveStorageState(options.profileId!, state),
       } : {}),
       ...(options.challengePolicy !== undefined ? { challengePolicy: options.challengePolicy } : {}),
     };
@@ -398,7 +411,9 @@ export class SessionManager {
     const session = this.options.sessionFactory
       ? this.options.sessionFactory(merged)
       : new BrowserSession(merged);
-    if (profileKey !== undefined) this.persistentProfileOwners.set(profileKey, session.sessionId);
+    if (profileKey !== undefined) {
+      await this.acquireProfileLease(session.sessionId, tenantId, profileKey);
+    }
     this.expiredSessionIds.delete(session.sessionId);
     this.sessions.set(session.sessionId, session);
     try {
@@ -425,9 +440,7 @@ export class SessionManager {
     } catch (error) {
       this.clearExpiryTimer(session.sessionId);
       this.sessions.delete(session.sessionId);
-      if (profileKey !== undefined && this.persistentProfileOwners.get(profileKey) === session.sessionId) {
-        this.persistentProfileOwners.delete(profileKey);
-      }
+      await this.releasePersistentProfile(session.sessionId).catch(() => undefined);
       throw error;
     }
   }
@@ -608,7 +621,7 @@ export class SessionManager {
     try {
       const status = await session.stop(reason);
       this.sessions.delete(sessionId);
-      this.releasePersistentProfile(sessionId);
+      await this.releasePersistentProfile(sessionId);
       this.deactivateWorkspace(sessionId);
       this.rememberClosed(status);
       return status;
@@ -616,7 +629,7 @@ export class SessionManager {
       // 无论何种原因导致的 stop 失败（如底层进程卡死、I/O 超时或审计落盘异常），
       // 只要该会话已不可用，强制清理槽位与释放 Profile 锁，防止并发资源永久泄漏
       this.sessions.delete(sessionId);
-      this.releasePersistentProfile(sessionId);
+      await this.releasePersistentProfile(sessionId).catch(() => undefined);
       this.deactivateWorkspace(sessionId);
       try {
         this.rememberClosed(session.status());
@@ -781,6 +794,7 @@ export class SessionManager {
   public async shutdown(reason = 'shutdown'): Promise<void> {
     await this.shutdownSessions(reason);
     await this.clusterScheduler?.shutdown();
+    await this.profileLeaseManager.shutdown();
   }
 
   /** Close browser sessions without shutting down the cluster coordinator. */
@@ -788,8 +802,8 @@ export class SessionManager {
     this.clearAllExpiryTimers();
     const sessions = [...this.sessions.values()];
     await Promise.all(sessions.map((session) => session.stop(reason).catch(() => undefined)));
+    await Promise.all(sessions.map((session) => this.releasePersistentProfile(session.sessionId)));
     for (const session of sessions) {
-      this.releasePersistentProfile(session.sessionId);
       this.deactivateWorkspace(session.sessionId);
       this.rememberClosed(session.status());
     }
@@ -1010,10 +1024,62 @@ export class SessionManager {
     return this.clusterScheduler;
   }
 
-  private releasePersistentProfile(sessionId: string): void {
-    for (const [profileKey, owner] of this.persistentProfileOwners.entries()) {
-      if (owner === sessionId) this.persistentProfileOwners.delete(profileKey);
+  private async acquireProfileLease(sessionId: string, tenantId: string, profileKey: string): Promise<void> {
+    try {
+      const lease = await this.profileLeaseManager.acquire(tenantId, profileKey);
+      this.activeProfileLeases.set(sessionId, { tenantId, lease });
+      this.scheduleProfileLeaseRenewal(sessionId);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'LEASE_ALREADY_ACQUIRED') {
+        throw new BrowserSessionError('RESOURCE_EXHAUSTED', 'The requested persistent profile is already in use', { retryable: true });
+      }
+      throw error;
     }
+  }
+
+  private scheduleProfileLeaseRenewal(sessionId: string): void {
+    this.leaseRenewalTimers.set(sessionId, this.scheduleTimer(() => {
+      void this.renewProfileLease(sessionId);
+    }, 15_000));
+  }
+
+  private async renewProfileLease(sessionId: string): Promise<void> {
+    const owned = this.activeProfileLeases.get(sessionId);
+    if (!owned) return;
+
+    try {
+      const lease = await this.profileLeaseManager.renew(
+        owned.tenantId,
+        owned.lease.profileId,
+        owned.lease.leaseToken,
+      );
+      this.activeProfileLeases.set(sessionId, { tenantId: owned.tenantId, lease });
+      this.scheduleProfileLeaseRenewal(sessionId);
+    } catch {
+      this.activeProfileLeases.delete(sessionId);
+      const timer = this.leaseRenewalTimers.get(sessionId);
+      if (timer !== undefined) {
+        this.cancelTimer(timer);
+        this.leaseRenewalTimers.delete(sessionId);
+      }
+      void this.stop(sessionId, 'Profile lease renewal failed').catch(() => undefined);
+    }
+  }
+
+  private async releasePersistentProfile(sessionId: string): Promise<void> {
+    const owned = this.activeProfileLeases.get(sessionId);
+    if (!owned) return;
+    this.activeProfileLeases.delete(sessionId);
+    const timer = this.leaseRenewalTimers.get(sessionId);
+    if (timer !== undefined) {
+      this.cancelTimer(timer);
+      this.leaseRenewalTimers.delete(sessionId);
+    }
+    await this.profileLeaseManager.release(
+      owned.tenantId,
+      owned.lease.profileId,
+      owned.lease.leaseToken,
+    );
   }
 }
 

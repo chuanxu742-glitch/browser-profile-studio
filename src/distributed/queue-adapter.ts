@@ -44,6 +44,8 @@ export interface TaskQueueAdapter {
   markUrlSeen(url: string, ttlSeconds?: number, tenantId?: string): Promise<void>;
   /** 优雅关闭连接 */
   close(): Promise<void>;
+  /** 暴露底层 Redis 客户端（如果存在） */
+  get underlyingRedisClient(): unknown | undefined;
 }
 
 /**
@@ -51,6 +53,9 @@ export interface TaskQueueAdapter {
  */
 export class MemoryQueueAdapter implements TaskQueueAdapter {
   public readonly shardCount: number = 1;
+  public get underlyingRedisClient(): unknown | undefined {
+    return undefined;
+  }
   public readonly leaseDurationMs = 300_000;
   private readonly tasks = new Map<string, DistributedTaskRecord>();
   private readonly pendingQueue: string[] = [];

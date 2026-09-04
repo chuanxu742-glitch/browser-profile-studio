@@ -56,7 +56,7 @@ import {
   type EnvironmentDiagnostics,
   type EnvironmentSurfaceSnapshot,
 } from './environment-diagnostics.js';
-import type { CookieRecord } from '../profile/types.js';
+import type { CookieRecord, BrowserStorageState } from '../profile/types.js';
 
 export type BrowserSessionState =
   | 'STOPPED'
@@ -198,8 +198,12 @@ export interface BrowserSessionOptions {
   fingerprintSeed?: number;
   /** Server-loaded cookies for a saved profile. */
   initialCookies?: readonly CookieRecord[];
+  /** Server-loaded storage state for a saved profile. */
+  initialStorageState?: BrowserStorageState;
   /** Server-owned callback used to persist the final profile cookie jar. */
   onCookiesPersist?: (cookies: readonly CookieRecord[]) => Promise<void> | void;
+  /** Server-owned callback used to persist the final profile storage state. */
+  onStorageStatePersist?: (state: BrowserStorageState) => Promise<void> | void;
   /** Server-owned resource policy selected by SessionManager. */
   automationPolicy?: AutomationPolicy;
   /** Server-owned default action timeout, bounded to 1-60 seconds. */
@@ -629,6 +633,7 @@ export class BrowserSession {
         await mkdir(this.profileDirectory, { recursive: true, mode: 0o700 });
         await mkdir(this.artifactsDirectory, { recursive: true, mode: 0o700 });
         await this.launchContext(this.headless);
+        await this.loadInitialStorageState();
         await this.loadInitialCookies();
         this._state = 'READY';
         await this.scanChallenge();
@@ -804,13 +809,29 @@ export class BrowserSession {
         }),
       ]);
       if (drainTimer) clearTimeout(drainTimer);
-      await this.persistContextCookies().catch(() => undefined);
+      let persistenceError: unknown;
+      try {
+        await this.persistContextStorageState();
+      } catch (error) {
+        persistenceError = error;
+      }
+      try {
+        await this.persistContextCookies();
+      } catch (error) {
+        persistenceError ??= error;
+      }
       await this.closeContext().catch(() => undefined);
       await this.cleanupOwnedProfile().catch(() => undefined);
       await this.cleanupOwnedArtifacts().catch(() => undefined);
       this.controlLease.dispose();
       this.actionCache.clear();
       this._state = 'STOPPED';
+      if (persistenceError !== undefined) {
+        await this.audit({ action: 'browser_stop', outcome: 'failure', reason: 'login_state_checkpoint_failed' });
+        throw new BrowserSessionError('INTERNAL', 'Browser closed but the login state checkpoint failed', {
+          cause: persistenceError,
+        });
+      }
       await this.audit({ action: 'browser_stop', outcome: 'success', reason });
       return this.status();
     })();
@@ -2086,6 +2107,15 @@ export class BrowserSession {
     })));
   }
 
+
+  private async loadInitialStorageState(): Promise<void> {
+    const state = this.options.initialStorageState;
+    if (!state || !this.context) return;
+    if (!this.context.setStorageState) {
+      throw new BrowserSessionError('INVALID_STATE', 'Browser runtime cannot restore the saved login state');
+    }
+    await this.context.setStorageState(state);
+  }
   private async persistContextCookies(): Promise<void> {
     if (!this.options.onCookiesPersist || !this.context?.cookies) return;
     const cookies = await this.context.cookies();
@@ -2099,6 +2129,17 @@ export class BrowserSession {
       secure: cookie.secure,
       sameSite: cookie.sameSite,
     })));
+  }
+
+  private async persistContextStorageState(): Promise<void> {
+    if (!this.options.onStorageStatePersist || !this.context) return;
+    if (!this.context.storageState) {
+      throw new BrowserSessionError('INVALID_STATE', 'Browser runtime cannot checkpoint the current login state');
+    }
+    await this.options.onStorageStatePersist(await this.context.storageState({
+      indexedDB: true,
+      credentials: true,
+    }));
   }
   private async cleanupOwnedProfile(): Promise<void> {
     if (this.persistentProfile) return;

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
 import { URL } from 'node:url';
+import { z } from 'zod';
 import type { SessionManager } from '../browser/session-manager.js';
 import type { DistributedTaskDefinition, DistributedTaskRecord, TaskExecutionMode, TaskPriority, TaskState } from '../distributed/types.js';
 import type { ApiResponse } from './types.js';
@@ -359,19 +360,82 @@ export class RestApiServer {
       // 3. Profiles Management
       if (pathname === '/api/v1/profiles' && method === 'GET') {
         const allProfiles = await this.manager.listProfiles();
-        const query = (parsedUrl.searchParams.get('q') ?? '').trim().toLowerCase();
         const accessible = allProfiles.filter((profile) => this.canAccessResource(identity!, 'profile', profile.profileId));
-        const filtered = query ? accessible.filter((profile) => profile.name.toLowerCase().includes(query) || profile.profileId.toLowerCase().includes(query) || profile.tags?.some((tag) => tag.toLowerCase().includes(query))) : accessible;
-        const offset = boundedQueryInteger(parsedUrl.searchParams.get('offset'), 0, 100_000, 0);
-        const limit = boundedQueryInteger(parsedUrl.searchParams.get('limit'), 1, 500, 100);
-        const profiles = filtered.slice(offset, offset + limit);
+
+        const qName = (parsedUrl.searchParams.get('name') ?? '').trim().toLowerCase();
+        const qTag = (parsedUrl.searchParams.get('tag') ?? '').trim().toLowerCase();
+        const qCountry = (parsedUrl.searchParams.get('country') ?? '').trim().toLowerCase();
+        const qEngine = (parsedUrl.searchParams.get('engine') ?? '').trim().toLowerCase();
+        const qLegacy = (parsedUrl.searchParams.get('q') ?? '').trim().toLowerCase();
+
+        let filtered = accessible;
+        if (qName) {
+          filtered = filtered.filter((p) => p.name.toLowerCase().includes(qName) || p.profileId.toLowerCase().includes(qName));
+        }
+        if (qTag) {
+          filtered = filtered.filter((p) => p.tags?.some((tag) => tag.toLowerCase().includes(qTag)));
+        }
+        if (qCountry) {
+          filtered = filtered.filter((p) => p.country?.toLowerCase() === qCountry);
+        }
+        if (qEngine) {
+          filtered = filtered.filter((p) => p.engine?.toLowerCase() === qEngine);
+        }
+        if (qLegacy) {
+          filtered = filtered.filter((p) => p.name.toLowerCase().includes(qLegacy) || p.profileId.toLowerCase().includes(qLegacy) || p.tags?.some((tag) => tag.toLowerCase().includes(qLegacy)));
+        }
+
+        filtered.sort((a, b) => {
+          if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+          return b.profileId.localeCompare(a.profileId);
+        });
+
+        const limit = boundedQueryInteger(parsedUrl.searchParams.get('limit'), 1, 200, 100);
+        const cursor = parsedUrl.searchParams.get('cursor');
+
+        let startIndex = 0;
+        if (cursor) {
+          try {
+            const parsedCursor = ProfileListCursorSchema.parse(
+              JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')),
+            );
+            startIndex = filtered.findIndex((profile) => (
+              profile.updatedAt < parsedCursor.updatedAt
+              || (
+                profile.updatedAt === parsedCursor.updatedAt
+                && profile.profileId.localeCompare(parsedCursor.profileId) < 0
+              )
+            ));
+            if (startIndex === -1) startIndex = filtered.length;
+          } catch {
+            this.sendJson(res, 400, {
+              success: false,
+              code: 'INVALID_INPUT',
+              message: 'Profile list cursor is invalid',
+              timestamp: Date.now(),
+            });
+            return;
+          }
+        }
+
+        const items = filtered.slice(startIndex, startIndex + limit);
+        let nextCursor: string | null = null;
+        if (startIndex + limit < filtered.length && items.length > 0) {
+          const lastItem = items[items.length - 1];
+          if (lastItem) {
+            nextCursor = Buffer.from(JSON.stringify({ updatedAt: lastItem.updatedAt, profileId: lastItem.profileId })).toString('base64url');
+          }
+        }
+
         res.setHeader('X-Total-Count', String(filtered.length));
-        res.setHeader('X-Offset', String(offset));
-        res.setHeader('X-Limit', String(limit));
         this.sendJson(res, 200, {
           success: true,
           code: 'OK',
-          data: profiles,
+          data: {
+            items: items.map(publicProfile),
+            nextCursor,
+            total: filtered.length
+          },
           timestamp: Date.now(),
         });
         return;
@@ -698,7 +762,7 @@ export class RestApiServer {
         }
         const body = await this.readJsonBody(req);
         await this.validateExtensionIds(source.extensionIds ?? [], source.engine ?? 'firefox', identity!);
-        const cookies = body.includeCookies === false ? [] : await this.manager.getStore().getCookies(sourceId);
+        const cookies = body.includeCookies === true ? await this.manager.getStore().getCookies(sourceId) : [];
         const created = await this.manager.createProfile({
           name: body.name?.trim() || `${source.name} - Copy`,
           ...(source.description !== undefined ? { description: source.description } : {}),
@@ -1621,6 +1685,11 @@ function resourceFromPath(pathname: string): { kind: 'profile' | 'proxy' | 'work
 }
 
 function boundedQueryInteger(raw: string | null, minimum: number, maximum: number, fallback: number): number { const value = Number(raw); return Number.isInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback; }
+const ProfileListCursorSchema = z.object({
+  updatedAt: z.number().finite().nonnegative(),
+  profileId: z.string().min(1).max(128),
+}).strict();
+
 
 function studioOpenApiDocument(host: string, port: number): Record<string, unknown> {
   const paths = ['/health', '/auth/me', '/profiles', '/profiles/batch', '/profiles/batch-import-csv', '/profiles/batch-export-csv', '/profiles/trash', '/profiles/{id}/extensions', '/extensions', '/extensions/import', '/extensions/{id}', '/migration/local-browsers', '/migration/import-local', '/proxies', '/rpa/workflows', '/rpa/tasks', '/sessions/{sessionId}/diagnostics', '/cluster/tasks', '/cluster/tasks/preflight', '/cluster/tasks/actions', '/cluster/tasks/{id}', '/cluster/status', '/external-runtimes/{provider}/create', '/external-runtimes/{provider}/{runtime}/stop', '/team/workspaces', '/team/members', '/synchronizer/broadcast', '/bridge/browsers', '/bridge/browsers/{id}/tabs'];
@@ -1633,13 +1702,28 @@ function routeTemplate(pathname: string): string {
     .replace(/\/profiles\/[A-Za-z0-9_-]+/g, '/profiles/:id');
 }
 
-function publicProfile(profile: any): Record<string, unknown> {
-  const result = { ...profile };
-  if (result.proxy) result.proxy = { ...result.proxy, password: undefined, hasPassword: Boolean(result.proxy.password) };
+function publicProfile(profile: unknown): Record<string, unknown> {
+  const result = { ...(profile as Record<string, unknown>) };
+  if (result.proxy && typeof result.proxy === 'object') {
+    const p = result.proxy as Record<string, unknown>;
+    result.proxy = { ...p, password: undefined, hasPassword: Boolean(p.password) };
+  }
+  if (result.proxyServer && typeof result.proxyServer === 'string') {
+    try {
+      const u = new URL(result.proxyServer);
+      if (u.username || u.password) {
+        u.username = '';
+        u.password = '';
+        result.proxyServer = u.toString().replace(/\/$/, '');
+      }
+    } catch {}
+  }
   if (result.twoFactorSecret) {
     result.hasTwoFactorSecret = true;
-    delete result.twoFactorSecret;
   }
+  delete result.twoFactorSecret;
+  delete result.cookies;
+  delete result.loginState;
   return result;
 }
 
