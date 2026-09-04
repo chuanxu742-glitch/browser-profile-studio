@@ -32,11 +32,13 @@ Studio 已交付 REST 鉴权、四级 RBAC、受限 CORS、HTTP 审计、Profile
 
 ## 3. 公开工具集
 
-会话与人工控制：`browser_start`、`browser_status`、`browser_stop`、`browser_reopen_headed`、`browser_resume`、`browser_handoff`、`browser_takeover`。
+会话与人工控制：`browser_start`、`browser_status`、`browser_environment_diagnostics`、`browser_stop`、`browser_reopen_headed`、`browser_resume`、`browser_handoff`、`browser_takeover`。
 
 页面读取与交互：`page_fetch`、`page_open`、`page_snapshot`、`page_extract`、`page_screenshot`、`page_click`、`page_type`、`page_select`、`page_scroll`、`page_wait`、`page_workflow`。
 
-集群：`cluster_submit_task`、`cluster_batch_submit`、`cluster_status`、`cluster_get_task`。
+集群：`cluster_submit_task`、`cluster_batch_submit`、`cluster_status`、`cluster_get_task`、`cluster_list_tasks`；Studio REST 另外提供任务 URL 预检、分页/多维筛选、取消/重试和批量动作。任务支持 `projectId` / `runId` 运行关联、脱敏详情、状态事件时间线和结构化结果预览。
+
+Studio 爬虫工作台已补齐：提交前授权确认与 URL allowlist 预检、robots 治理提示、任务详情、事件时间线、错误码、Profile/Session/Worker 关联、结构化结果表格与 JSON、分页、批量取消/重试/导出、自动刷新开关、移动端筛选和可区分的空/错状态。挑战求解、绕过、原始 lease token 和敏感凭据仍不进入 UI/API。
 
 ## 4. 验证状态
 
@@ -44,9 +46,9 @@ Studio 已交付 REST 鉴权、四级 RBAC、受限 CORS、HTTP 审计、Profile
 | --- | --- | --- |
 | `npm run typecheck` | 通过 | TypeScript 类型检查 |
 | `npm run build` | 通过 | 生成 ESM `dist/`，包含 Worker 入口；Worker 入口导入检查通过 |
-| `npm run test:unit` | 通过（150） | 新增 REST RBAC、密文落盘/旧数据迁移、代理池轮换、Studio API 接线和 RPA 持久任务覆盖 |
-| `npm run test:mcp` | 通过（33） | 覆盖工具 schema、Snapshot diff/workflow/handoff 分发、错误脱敏、租户认证和 MCP 边界拒绝 |
-| `npm run test:integration` | 通过（24） | 覆盖真实浏览器环境一致性、Service Worker 兼容、挑战冻结、会话/队列/清理；另有 1 项按条件跳过 |
+| `npm run test:unit` | 通过（203） | 覆盖 REST 预检、任务筛选分页、脱敏详情、任务取消/重试及既有单元回归 |
+| `npm run test:mcp` | 通过（35） | 覆盖工具 schema、Snapshot diff/workflow/handoff 分发、错误脱敏、租户认证和 MCP 边界拒绝 |
+| `npm run test:integration` | 未完全通过（25 通过 / 1 失败 / 5 跳过） | Firefox frame/worker 一致性用例等待 Service Worker 消息超时；超时后清理 Profile 时另见 SQLite `EBUSY` |
 | `npm run test:firefox` | 通过（1） | 真实 Firefox 浏览器回归 |
 
 真实 Firefox smoke 已在当前宿主通过。发布前仍需在目标环境复跑，并完成真实业务域名与出口策略验收。

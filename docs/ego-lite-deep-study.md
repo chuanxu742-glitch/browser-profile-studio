@@ -61,7 +61,7 @@ ego-lite 的公开仓库包含：
 | 事件 | popup 关闭、dialog dismiss、download cancel，调用方不可见 | 缓冲 CDP 事件，跟踪 pending dialog，支持 wait/drain | 增加安全事件摘要和 wait API，不返回敏感 payload |
 | 经验复用 | 无 | 域名绑定的 notes、Node tools、browser tools | 实现只含 notes + declarative recipes 的合规子集 |
 | 证据 | 截图立即返回，session 停止时删除 | 截图、screencast、任务空间保留供复核 | 增加有保留期的 evidence manifest，录屏保持显式 opt-in |
-| 自描述 | README + 31 个 MCP schema | Skill、`help()`、同一 helper context | 从 schema 生成 Agent 指南与能力清单，减少文档漂移 |
+| 自描述 | README + 40 个 MCP schema | Skill、`help()`、同一 helper context | 从 schema 生成 Agent 指南与能力清单，减少文档漂移 |
 
 | 分布式 | Redis 队列、租户、worker、fetch/browser 双模 | 重点是本地并行 Space | 保留现有优势，补上 workspace 与 worker 归属/租约 |
 

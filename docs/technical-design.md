@@ -2,7 +2,7 @@
 
 > 当前产品包含本地 Profile 隔离 Studio 与策略约束 MCP。MCP 不公开 evaluate、写操作 raw selector 或原始协议；Studio 的确定性环境配置、代理池和 RPA 仍通过 SessionManager 高层动作与统一审计。
 
-> 文档定位：这是资深技术视角的目标态/候选设计稿。其中 `browser_session_*`、虚拟显示和远程操作员身份认证等仍是后续演进方案。当前实现公开 31 个高层工具，已包含本地短期 handoff/takeover 租约、差分快照和声明式 workflow；实现差异与验证证据见 `docs/implementation-report.md`。
+> 文档定位：这是资深技术视角的目标态/候选设计稿。其中 `browser_session_*`、虚拟显示和远程操作员身份认证等仍是后续演进方案。当前实现公开 40 个高层工具，已包含本地短期 handoff/takeover 租约、差分快照、声明式 workflow 和只读环境一致性诊断；实现差异与验证证据见 `docs/implementation-report.md`。
 
 > 当前实现补充：`cluster_*` 已支持 Redis standalone/native Cluster、租户 + 分片路由、租户级 URL/任务/Worker 隔离，以及本地 stdio 控制面的可选 token/RBAC 认证；远程 MCP 网关认证仍按下文目标态设计执行。
 
@@ -235,7 +235,7 @@ CLOSING -> CLOSED
 
 ### 7.2 工具清单与输入 Schema
 
-以下为目标态候选工具，供后续扩展评审；其中命名可能不同于当前实现。当前实现公开 31 个工具，以 README、PRD 和实现报告为准。
+以下为目标态候选工具，供后续扩展评审；其中命名可能不同于当前实现。当前实现公开 40 个工具，以 README、PRD 和实现报告为准。
 
 
 #### `browser_session_create`

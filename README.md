@@ -78,6 +78,8 @@ $env:BROWSER_ALLOWED_HOSTS = 'test.example.com,*.staging.example.com'
 npm start
 ```
 
+如果当前网络通过 Meta Tunnel 将已批准的公网域名解析到 `198.18.0.0/15` 的合成地址，管理员可显式设置 `BROWSER_ALLOW_SYNTHETIC_TUNNEL=true`。该开关只放行 `198.18.0.0/15`，仍然拒绝 RFC1918、回环、链路本地和云元数据地址；默认关闭，不应替代正常公网 DNS。
+
 当前版本的服务仍只从环境和 Studio 管理面读取管理员配置；MCP 调用不能传入 allowlist、浏览器可执行文件、扩展包、扩展路径或 profile 路径，但 `browser_start` 支持按会话传入代理、指纹、GeoIP、语言、时区、地理位置、UA、视口和种子。自定义 UA 的浏览器品牌与主版本必须匹配项目锁定的受管内核，并且只能与受管指纹同时使用；留空时服务会自动生成兼容值。Chromium 的 JS Client Hints 与网络 `Sec-CH-UA-*` 由同一版本/OS 模型配置，外部 CDP 浏览器禁止注入受管指纹。扩展只能由 Studio owner 导入受管仓库，并通过服务器生成的扩展 ID 分配给持久 Profile。
 
 ### 受管扩展中心
@@ -110,8 +112,28 @@ Agent 通过 WS 反向连接后可以调用受策略约束的 MCP 工具；这�
 浏览器池中的 `managed` 实例由服务启动 Firefox 或 Chromium，`cdp` 实例通过
 `cdpEndpoint` 接管已有 Chromium，`bridge` 实例等待 OpenCLI 扩展连接到
 `/ws/bridge/<browserId>`。Bridge 使用带 requestId 的有界 RPC，不开放任意 JavaScript；扩展
-侧应实现 `opencli-bridge.v1` 协议并继续执行页面挑战暂停与人工确认流程。实例可以通过
+侧实现 `antigravity-bridge.v1` 协议并继续执行页面挑战暂停与人工确认流程。实例可以通过
 `PATCH /api/browsers/<id>` 在停止状态切换模式，并通过 `/api/bindings` 将站点绑定到指定实例。
+
+仓库现已自带 [`browser-bridge-extension`](./browser-bridge-extension) Manifest V3 扩展。它参考
+OpenCLI/Razormind 的“扩展 + 本机守护进程 + `chrome.debugger`”架构，直接使用常用 Chrome 中
+已经登录的页面，不复制 Cookie，也不受 Chrome App-Bound Encryption 的跨内核解密限制。
+扩展只允许连接 `localhost`/`127.0.0.1`，控制面只接受 `navigate`、语义快照、点击、输入、
+选择、滚动、截图和受限标签页管理；没有原始 Cookie、任意 JavaScript 或任意 CDP 方法入口。
+
+构建并启动控制面后，可生成/复用本机 Chrome Bridge 配置：
+
+```sh
+npm run build
+CONTROL_PLANE_TOKEN='use-a-long-random-secret' npm run start:control-plane
+# 另开一个终端，使用相同 Token：
+CONTROL_PLANE_TOKEN='use-a-long-random-secret' npm run bridge:setup
+```
+
+随后打开 `chrome://extensions`，启用开发者模式并“加载已解压的扩展程序”，选择命令输出的
+绝对目录，在扩展弹窗中填写 endpoint、browserId 和 Token，再在已登录网站点击“绑定当前标签页”。
+Chrome 显示“正在调试此浏览器”的提示属于 `chrome.debugger` 的正常安全提醒。控制面还提供
+`POST /api/browsers/<id>/call` 供受信任的本机客户端调用上述受限操作。
 例如把 noVNC 中已登录的 Chromium 接管到池中：
 
 ```sh
@@ -162,6 +184,20 @@ Snapshot 历史容量/保留时间/对象大小和 retained workspace TTL：
 
 仅在自有本地 fixture 且经过评审时，才在服务端显式设置 `BROWSER_ALLOW_HTTP=true` 或 `BROWSER_ALLOW_PRIVATE_NETWORK=true`。私网开关打开时会写 stderr 警告；示例配置不会打开它，也不给任何私网地址。
 
+### 通用生产出口验收
+
+使用环境变量驱动，不把业务域名写入代码：
+
+```powershell
+$env:BROWSER_ALLOWED_HOSTS = 'shop.example.com,static.shop.example.com'
+$env:ACCEPTANCE_TARGET_URLS = 'https://shop.example.com/health,https://static.shop.example.com/'
+$env:ACCEPTANCE_EXPECTED_EGRESS_IPS = '203.0.113.10'
+$env:ACCEPTANCE_EGRESS_IP_URL = 'https://你的出口探针域名/ip'
+npm run acceptance:egress
+```
+
+脚本只执行无登录 GET、策略预检和手动检查重定向，不跟随未授权重定向，不读取响应正文。未设置 `ACCEPTANCE_TARGET_URLS` 时仅执行应用层策略矩阵；未设置预期出口 IP 时出口检查标记为 `SKIP`，不会冒充生产网络验收。使用 `npm run acceptance:egress -- --fixture` 可在无生产域名时执行确定性的 allowlist、HTTPS、私网和元数据阻断验收。
+
 ## MCP 配置
 
 `mcp-config.example.json` 是可复制的最小示例。将 `args` 改成生成后的绝对路径，并替换为自己管理的测试域名。Windows 配置：
@@ -202,12 +238,13 @@ stdio 的 stdout 只承载 MCP 协议帧；启动错误、清理错误和私网�
 
 ## 工具
 
-服务注册以下 31 个标准 MCP 工具：
+服务注册以下 40 个标准 MCP 工具：
 
 | 工具 | 作用 |
 | --- | --- |
 | `browser_start` | 启动受策略约束的 headless/headed Firefox 会话 |
 | `browser_status` | 查询状态、页面摘要、挑战状态和最近的安全阻断事件 |
+| `browser_environment_diagnostics` | 只读检查 User-Agent、平台、语言、时区、Viewport、硬件、WebGL 与 `navigator.webdriver` 一致性；不返回页面正文、Cookie 或凭据 |
 | `browser_stop` | 停止并清理会话（可重复调用） |
 | `browser_reopen_headed` | 仅在暂停状态请求人工接管窗口 |
 | `browser_resume` | `humanConfirmed: true` 后重新检查并恢复 |
@@ -237,6 +274,9 @@ stdio 的 stdout 只承载 MCP 协议帧；启动错误、清理错误和私网�
 | `cluster_batch_submit` | 批量提交爬取任务到集群调度队列（支持并发与重试控制） |
 | `cluster_status` | 查询集群 Worker 节点状态与队列统计 |
 | `cluster_get_task` | 按 `taskId` 查询分布式任务执行状态与抽取结果 |
+| `cluster_list_tasks` | 按 `projectId`、`runId`、状态和租户筛选任务，便于观察一次爬取运行 |
+
+提交任务时可带稳定的 `projectId` / `runId`（仅允许字母、数字、`.`, `_`, `-`，最多 64 字符），随后用 `cluster_list_tasks` 查询某次运行；查询仍按租户隔离并受既有 URL allowlist、重试、租约和审计策略约束。
 
 语义目标示例：
 

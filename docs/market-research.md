@@ -71,7 +71,17 @@ Mozilla 官方将 geckodriver 定义为 W3C WebDriver 客户端与 Gecko 浏览�
 
 需要注意：Playwright 官方明确说明其 Firefox 依赖补丁，不能直接与品牌 Firefox 混用，因此这是“Playwright 锁定的 Firefox 兼容构建”，不是“系统任意版本 Firefox 都保证兼容”。参见 [Playwright Browsers](https://playwright.dev/docs/browsers)。如未来必须控制企业已安装 Firefox，应新增 WebDriver BiDi 适配器，而不是混用内部协议。
 
-### 4.2 MCP 形态
+### 4.2 开源爬虫项目对比与采用建议
+
+| 项目 | 强项 | 与本项目的关系 | 采用决定 |
+| --- | --- | --- | --- |
+| [Crawlee](https://github.com/apify/crawlee) | 统一 HTTP/浏览器爬虫、持久 RequestQueue、Dataset、会话/代理、重试和自动扩缩 | 与现有 `fetch`/`browser` 双模队列最接近 | 借鉴 `projectId`/`runId` 运行关联、任务可查询和结果关联；暂不引入依赖 |
+| [Scrapy](https://github.com/scrapy/scrapy) | 高吞吐 HTTP 调度、Item Pipeline、Feed Export、AutoThrottle | 适合纯 HTTP 大规模采集，不负责本项目的 Firefox 会话隔离 | 作为外部 HTTP worker 的备选，不替换现有浏览器 Worker |
+| [Colly](https://github.com/gocolly/colly) | Go 原生并发、限速、Cookie/缓存、robots.txt 和分布式扩展 | 适合轻量 HTTP worker，不能替代 Playwright Firefox 控制面 | 作为后续跨语言 worker 参考，不在本次加依赖 |
+
+本次只采用可审计的调度/观测模式：任务保留 URL allowlist、租户隔离、重试、租约和挑战暂停；不复制 CAPTCHA 求解、stealth、住宅代理轮换或规避风控能力。来源：[Crawlee](https://github.com/apify/crawlee)、[Scrapy](https://github.com/scrapy/scrapy)、[Colly](https://github.com/gocolly/colly)。
+
+### 4.3 MCP 形态
 
 MCP 工具由名称、描述和输入 schema 组成，适合将浏览器会话封装为受约束的高层动作。MVP 使用本地 stdio transport，避免默认暴露网络服务；远程部署若有必要再引入鉴权后的 Streamable HTTP。参见 [MCP Tools 规范](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) 与 [MCP TypeScript Server 文档](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/server.md)。
 
