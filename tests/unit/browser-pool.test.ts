@@ -40,6 +40,8 @@ describe('BrowserPool control-plane integration', () => {
     const socket = Object.assign(new EventEmitter(), { readyState: 1, send: vi.fn() });
     pool.attachBridge(instance.id, socket as never);
     await expect(pool.bridgeCall(instance.id, { op: 'navigate', url: 'https://blocked.example/' })).rejects.toThrow('URL_HOST_NOT_ALLOWED');
+    await expect(pool.createTab(instance.id, 'https://blocked.example/')).rejects.toThrow('URL_HOST_NOT_ALLOWED');
+    expect(assertAllowed).toHaveBeenCalledTimes(2);
     expect(socket.send).toHaveBeenCalledTimes(1);
   });
 

@@ -372,9 +372,10 @@ export class BrowserPool {
 
   public async bridgeCall(id: string, payload: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
     validateBridgePayload(payload);
-    if (payload.op === 'navigate') {
-      if (typeof payload.url !== 'string') throw new Error('BRIDGE_URL_REQUIRED');
-      await this.bridgeUrlPolicy?.assertAllowed(payload.url, 'navigation');
+    if (payload.op === 'navigate' || payload.op === 'tabs.create') {
+      if (payload.url !== undefined && typeof payload.url !== 'string') throw new Error('BRIDGE_URL_REQUIRED');
+      if (payload.op === 'navigate' && typeof payload.url !== 'string') throw new Error('BRIDGE_URL_REQUIRED');
+      if (typeof payload.url === 'string') await this.bridgeUrlPolicy?.assertAllowed(payload.url, 'navigation');
     }
     const socket = this.bridgeSockets.get(id);
     if (!socket || socket.readyState !== 1) throw new Error('BRIDGE_NOT_CONNECTED');
