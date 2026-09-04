@@ -1,5 +1,6 @@
 import { BrowserSession, BrowserSessionError } from './browser-session.js';
 import type { BrowserSessionOptions, BrowserSessionStatus, BrowserTabStatus } from './browser-session.js';
+import type { EnvironmentDiagnostics } from './environment-diagnostics.js';
 import type { ChallengePolicy } from '../challenge/policy.js';
 import { BrowserToolError } from '../domain.js';
 import type { Workspace, WorkspaceRetention } from '../domain.js';
@@ -11,7 +12,7 @@ import { fetchPage } from '../fetcher/http-client.js';
 import type { FetchOptions, FetchResult, FetchUrlPolicy } from '../fetcher/types.js';
 import { DistributedMasterScheduler } from '../distributed/scheduler.js';
 import type { MasterSchedulerOptions } from '../distributed/scheduler.js';
-import type { DistributedTaskDefinition, DistributedTaskRecord, ClusterStatus } from '../distributed/types.js';
+import type { DistributedTaskDefinition, DistributedTaskRecord, ClusterStatus, TaskListFilter, TaskUrlPreflight } from '../distributed/types.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from '../distributed/tenant.js';
 import { SERVER_VERSION, FORBIDDEN_CAPABILITIES } from '../capabilities.js';
 import {
@@ -450,6 +451,10 @@ export class SessionManager {
     return workspace ? { ...status, workspace: cloneWorkspace(workspace) } : status;
   }
 
+  public async environmentDiagnostics(sessionId: string, tenantId?: string): Promise<EnvironmentDiagnostics> {
+    return this.get(sessionId, tenantId).environmentDiagnostics();
+  }
+
   public getSessionState(sessionId: string, tenantId?: string): BrowserSessionStatus['state'] {
     return this.get(sessionId, tenantId).state;
   }
@@ -601,16 +606,14 @@ export class SessionManager {
       this.rememberClosed(status);
       return status;
     } catch (error) {
-      // stop() reaches STOPPED only after context/profile/artifact cleanup.
-      // An audit sink may still fail afterward; do not let that permanently
-      // occupy a concurrency slot or make the cleaned session unreachable.
-      if (session.state === 'STOPPED') {
-        const status = session.status();
-        this.sessions.delete(sessionId);
-        this.releasePersistentProfile(sessionId);
-        this.deactivateWorkspace(sessionId);
-        this.rememberClosed(status);
-      }
+      // 无论何种原因导致的 stop 失败（如底层进程卡死、I/O 超时或审计落盘异常），
+      // 只要该会话已不可用，强制清理槽位与释放 Profile 锁，防止并发资源永久泄漏
+      this.sessions.delete(sessionId);
+      this.releasePersistentProfile(sessionId);
+      this.deactivateWorkspace(sessionId);
+      try {
+        this.rememberClosed(session.status());
+      } catch (_) {}
       throw error;
     }
   }
@@ -621,6 +624,35 @@ export class SessionManager {
 
   public async resume(sessionId: string, humanConfirmed: boolean, tenantId?: string): Promise<BrowserSessionStatus> {
     return this.get(sessionId, tenantId).resume(humanConfirmed);
+  }
+
+  public async dispatchDirectMouse(
+    sessionId: string,
+    action: 'click' | 'move' | 'down' | 'up',
+    x: number,
+    y: number,
+    options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number },
+    tenantId?: string,
+  ) {
+    return this.get(sessionId, tenantId).dispatchDirectMouse(action, x, y, options);
+  }
+
+  public async dispatchDirectKeyboard(
+    sessionId: string,
+    action: 'type' | 'press' | 'down' | 'up',
+    keyOrText: string,
+    tenantId?: string,
+  ) {
+    return this.get(sessionId, tenantId).dispatchDirectKeyboard(action, keyOrText);
+  }
+
+  public async dispatchDirectScroll(
+    sessionId: string,
+    deltaX: number,
+    deltaY: number,
+    tenantId?: string,
+  ) {
+    return this.get(sessionId, tenantId).dispatchDirectScroll(deltaX, deltaY);
   }
   public async handoff(sessionId: string, options?: Parameters<BrowserSession['handoff']>[0], tenantId?: string): Promise<Awaited<ReturnType<BrowserSession['handoff']>>> {
     const result = await this.get(sessionId, tenantId).handoff(options);
@@ -717,6 +749,26 @@ export class SessionManager {
 
   public async getClusterTask(taskId: string, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord | null> {
     return this.requireClusterScheduler().getTask(taskId, tenantId);
+  }
+
+  public async listClusterTasks(
+    filter: TaskListFilter = {},
+    limit = 100,
+    tenantId = DEFAULT_TENANT_ID,
+  ): Promise<DistributedTaskRecord[]> {
+    return this.requireClusterScheduler().listTasks(filter, limit, tenantId);
+  }
+
+  public async preflightClusterTaskUrl(url: string, tenantId = DEFAULT_TENANT_ID): Promise<TaskUrlPreflight> {
+    return this.requireClusterScheduler().preflightTaskUrl(url, tenantId);
+  }
+
+  public async cancelClusterTask(taskId: string, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord> {
+    return this.requireClusterScheduler().cancelTask(taskId, tenantId);
+  }
+
+  public async retryClusterTask(taskId: string, tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord> {
+    return this.requireClusterScheduler().retryTask(taskId, tenantId);
   }
 
   public async shutdown(reason = 'shutdown'): Promise<void> {

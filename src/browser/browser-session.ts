@@ -50,6 +50,12 @@ import {
   type FingerprintConfig,
   type UnifiedFingerprintProfile,
 } from '../fingerprint/index.js';
+import {
+  buildEnvironmentDiagnostics,
+  expectedEnvironment,
+  type EnvironmentDiagnostics,
+  type EnvironmentSurfaceSnapshot,
+} from './environment-diagnostics.js';
 import type { CookieRecord } from '../profile/types.js';
 
 export type BrowserSessionState =
@@ -234,12 +240,60 @@ export interface BrowserSessionStatus {
 export interface BrowserTabStatus {
   tabId: string;
   isMain: boolean;
+
   active: boolean;
   createdAt: number;
   pageRevision: number;
   url?: string;
   title?: string;
 }
+const ENVIRONMENT_PROBE = `(() => {
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  const debugInfo = gl && gl.getExtension('WEBGL_debug_renderer_info');
+
+  // 原生对象完整性检验
+  const suspectedProps = ['userAgent', 'platform', 'hardwareConcurrency', 'deviceMemory', 'webdriver', 'languages', 'language'];
+  const ownProps = Object.getOwnPropertyNames(navigator);
+  const pollutedNavigatorProps = suspectedProps.filter(p => ownProps.includes(p));
+
+  const fnToStringStr = Function.prototype.toString.toString();
+  const isFunctionToStringNative = fnToStringStr.includes('[native code]') && Function.prototype.toString.name === 'toString';
+  const isNavigatorToStringNative = Object.prototype.toString.call(navigator) === '[object Navigator]';
+  const isWebglNative = !gl || !gl.getParameter || gl.getParameter.toString().includes('[native code]');
+
+  return {
+    userAgent: navigator.userAgent,
+    platform: navigator.platform,
+    language: navigator.language,
+    languages: Array.from(navigator.languages || []),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    screen: {
+      width: screen.width,
+      height: screen.height,
+      availWidth: screen.availWidth,
+      availHeight: screen.availHeight,
+      colorDepth: screen.colorDepth,
+      pixelDepth: screen.pixelDepth,
+      devicePixelRatio: window.devicePixelRatio,
+    },
+    hardwareConcurrency: navigator.hardwareConcurrency,
+    deviceMemory: navigator.deviceMemory,
+    webdriver: navigator.webdriver === true,
+    webgl: gl ? {
+      vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : undefined,
+      renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : undefined,
+    } : undefined,
+    integrity: {
+      hasNavigatorInstancePollution: pollutedNavigatorProps.length > 0,
+      pollutedNavigatorProps,
+      isNavigatorToStringNative,
+      isFunctionToStringNative,
+      isWebglNative,
+    },
+  };
+})()`;
 interface ManagedTab {
   tabId: string;
   page: BrowserPageLike;
@@ -600,6 +654,34 @@ export class BrowserSession {
     }
   }
 
+
+  /**
+   * Read-only, token-free consistency diagnostics for the active browser
+   * surface. This never changes browser state and never returns page content,
+   * cookies, URLs, or network credentials.
+   */
+  public async environmentDiagnostics(): Promise<EnvironmentDiagnostics> {
+    return this.enqueue('browser_environment_diagnostics', async () => {
+      const expected = expectedEnvironment(this.resolveFingerprintProfile());
+      let observed: EnvironmentSurfaceSnapshot | undefined;
+      if (this.page?.evaluate) {
+        try {
+          observed = await this.page.evaluate(ENVIRONMENT_PROBE) as EnvironmentSurfaceSnapshot;
+        } catch {
+          observed = undefined;
+        }
+      }
+      const result = buildEnvironmentDiagnostics({
+        sessionId: this.sessionId,
+        engine: this.engine,
+        headless: this.currentHeadless,
+        expected,
+        ...(observed ? { observed } : {}),
+      });
+      await this.audit({ action: 'browser_environment_diagnostics', outcome: 'success', consistency: result.consistency });
+      return result;
+    }, { allowPaused: true, allowUserControl: true, requireReady: false });
+  }
   public getStatus(): BrowserSessionStatus {
     return this.status();
   }
@@ -758,8 +840,8 @@ export class BrowserSession {
 
   public async resume(humanConfirmed: boolean): Promise<BrowserSessionStatus> {
     if (!humanConfirmed) throw new BrowserSessionError('INVALID_ARGUMENT', 'humanConfirmed must be true');
-    if (this._state !== 'HUMAN_TAKEOVER') {
-      throw new BrowserSessionError('INVALID_STATE', 'Session must be in human takeover state before resume');
+    if (this._state !== 'HUMAN_TAKEOVER' && this._state !== 'PAUSED_CHALLENGE') {
+      throw new BrowserSessionError('INVALID_STATE', 'Session must be in human takeover or paused challenge state before resume');
     }
     return this.enqueue('resume', async () => {
       const detection = await this.scanChallenge(true);
@@ -773,6 +855,71 @@ export class BrowserSession {
       await this.audit({ action: 'browser_resume', outcome: 'success' });
       return this.status();
     }, { allowPaused: true, requireReady: false });
+  }
+
+  public async dispatchDirectMouse(
+    action: 'click' | 'move' | 'down' | 'up',
+    x: number,
+    y: number,
+    options: { button?: 'left' | 'right' | 'middle'; clickCount?: number } = {},
+  ): Promise<{ success: boolean; x: number; y: number }> {
+    return this.enqueue('direct_mouse', async () => {
+      const page = this.requirePage();
+      const button = options.button ?? 'left';
+      if (action === 'move') {
+        await page.mouse.move(x, y);
+      } else if (action === 'down') {
+        await page.mouse.move(x, y);
+        const mouseAny = page.mouse as unknown as { down?(opts: { button: string }): Promise<void> };
+        if (mouseAny.down) await mouseAny.down({ button });
+      } else if (action === 'up') {
+        await page.mouse.move(x, y);
+        const mouseAny = page.mouse as unknown as { up?(opts: { button: string }): Promise<void> };
+        if (mouseAny.up) await mouseAny.up({ button });
+      } else {
+        const mouseAny = page.mouse as unknown as { click?(x: number, y: number, opts: { button: string; clickCount: number }): Promise<void> };
+        if (mouseAny.click) {
+          await mouseAny.click(x, y, { button, clickCount: options.clickCount ?? 1 });
+        } else {
+          await page.mouse.move(x, y);
+        }
+      }
+      return { success: true, x, y };
+    }, { allowPaused: true, allowUserControl: true, requireReady: false });
+  }
+
+  public async dispatchDirectKeyboard(
+    action: 'type' | 'press' | 'down' | 'up',
+    keyOrText: string,
+  ): Promise<{ success: boolean }> {
+    return this.enqueue('direct_keyboard', async () => {
+      const page = this.requirePage();
+      if (!page.keyboard) throw new BrowserSessionError('TARGET_NOT_ACTIONABLE', 'Keyboard is not available on this page');
+      if (action === 'type') {
+        await page.keyboard.type(keyOrText);
+      } else if (action === 'press') {
+        if (page.keyboard.press) await page.keyboard.press(keyOrText);
+      } else if (action === 'down') {
+        const kbAny = page.keyboard as unknown as { down?(key: string): Promise<void> };
+        if (kbAny.down) await kbAny.down(keyOrText);
+      } else if (action === 'up') {
+        const kbAny = page.keyboard as unknown as { up?(key: string): Promise<void> };
+        if (kbAny.up) await kbAny.up(keyOrText);
+      }
+      return { success: true };
+    }, { allowPaused: true, allowUserControl: true, requireReady: false });
+  }
+
+  public async dispatchDirectScroll(
+    deltaX: number,
+    deltaY: number,
+  ): Promise<{ success: boolean; deltaX: number; deltaY: number }> {
+    return this.enqueue('direct_scroll', async () => {
+      const page = this.requirePage();
+      if (!page.mouse.wheel) throw new BrowserSessionError('TARGET_NOT_ACTIONABLE', 'Mouse wheel is not available on this page');
+      await page.mouse.wheel(deltaX, deltaY);
+      return { success: true, deltaX, deltaY };
+    }, { allowPaused: true, allowUserControl: true, requireReady: false });
   }
 
   /** Transfer the headed browser to a person and return a one-time lease token. */

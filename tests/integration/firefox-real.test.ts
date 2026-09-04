@@ -57,6 +57,12 @@ realFirefox('real Playwright Firefox smoke test', () => {
     const session = await manager.start({ headless: true, inputProfile: 'direct' });
     const profileDirectory = session.profileDirectory;
     try {
+      const diagnostics = await manager.environmentDiagnostics(session.sessionId);
+      expect(diagnostics.engine).toBe('firefox');
+      expect(diagnostics.observed?.userAgent).toBeTruthy();
+      expect(diagnostics.checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'webdriver-signal', status: expect.any(String) }),
+      ]));
       await manager.open(session.sessionId, `${origin}/normal`);
       const first = await manager.snapshot(session.sessionId, { includeText: true });
       const email = first.targets.find((target) => target.testId === 'email-input');
@@ -90,5 +96,7 @@ realFirefox('real Playwright Firefox smoke test', () => {
     }
     await expect(access(profileDirectory)).rejects.toBeDefined();
     await expect(access(join(workRoot, 'artifacts', session.sessionId))).rejects.toBeDefined();
+    const auditLog = await readFile(join(workRoot, 'audit.jsonl'), 'utf8');
+    expect(auditLog).toContain('browser_environment_diagnostics');
   }, 60_000);
 });
