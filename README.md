@@ -12,7 +12,9 @@
 
 检测到挑战时，自动化立即暂停。生产挑战的标准结果是 `CHALLENGE_DETECTED`/`SESSION_PAUSED_CHALLENGE`，等待受信任人员处理；服务不会刷新、重试、切换环境或与挑战控件交互。
 
-Service Worker 身份链路：Chromium 会通过仅绑定回环地址的浏览器级 CDP 通道，在网站代码执行前暂停目标，统一 UA、平台、Client Hints 与后续网络请求；Firefox 不依赖页面脚本注入，而是使用 Gecko 原生 Profile 首选项统一 Window、Worker、Service Worker 和 HTTP 通道中的 UA、平台、appVersion、语言、硬件并发数及相关请求头。stock Firefox 的 Playwright 时区覆盖不会进入 Service Worker，因此完整时区覆盖仍只在 `browser-core/firefox` 的版本锁定内核补丁中提供，产品能力接口对此保持 `false`，不会把部分覆盖冒充为全覆盖。
+Worker 身份链路：受管 Chromium 使用回环 CDP 通道和单一目标暂停所有者，在 URL、module、Blob、嵌套、SharedWorker 与 Service Worker 首段脚本执行前配置实际运行域；不改写应用消息。UA/UAData、语言、时区与 GPU/Canvas 需要用 Worker 内序列化的真实结果验证，而非页面回显。
+
+Firefox 使用 Gecko 原生首选项对齐可支持的身份字段；stock 内核的并发数受宿主上限约束，异地时区会话通过真实引擎设置禁用 Service Worker。当前已验证的定制补丁仅覆盖原生 CPU/时区，不包含首脚本 Worker Canvas bootstrap。因此 **Firefox 深层 Worker Canvas 全一致性验收仍为 NOT PASSED**，`workerBootstrapByEngine.firefox` 及完整 Service Worker 注入能力保持 `false`；自定义可执行文件路径本身不是完整支持证明。页面 Canvas 保护仍启用，诊断必须保留不支持项及实际像素差异。
 
 ## 安装
 
@@ -420,9 +422,21 @@ npm test
 npm run build
 ```
 
-MCP 契约测试覆盖 `tools/list` 的精确工具集合、严格 schema、注解、输入错误、截图路径隔离和 manager stub 调用。默认集成测试使用注入 launcher，不启动真实浏览器。安装项目锁定的 Firefox 后，可运行 `npm run test:firefox`，以本机真实 Firefox 访问本地 fixture；该测试不会访问、求解或统计真实 Cloudflare/CAPTCHA 页面。
+MCP 契约测试覆盖 `tools/list` 的精确工具集合、严格 schema、注解、输入错误、截图路径隔离和 manager stub 调用。集成目录同时包含注入 launcher 的契约测试与本机真实浏览器测试；安装项目锁定的内核后运行相应真实测试。`npm run test:firefox` 使用本机 Firefox 访问本地 fixture，不会访问、求解或统计真实 Cloudflare/CAPTCHA 页面。
 
 只有 `npm run test:firefox` 在部署宿主通过后，才可把该宿主标记为 Firefox 运行时就绪。单元测试、类型检查或 fake-launcher 集成测试通过，不等价于本机 Firefox 可启动。
+
+### 指纹运行时与线上验收（2026-09-05）
+
+本次修复保留原生非自动化 `navigator.webdriver === false` 属性、跨 realm 的原生函数外观与非法 receiver 异常；不伪造插件、媒体设备或消息载荷。Canvas 采用幂等像素投影，HTML/Offscreen 读取及无损导出保持一致，并仅移除已验证的非渲染 PNG `deBG` 随机元数据以保持同种子原始导出字节稳定。Audio 保留真实采样率、静音和可写 buffer 契约；普通 WebRTC offer/设置本地描述可执行，但这不证明实际 ICE/STUN 代理出口安全。
+
+- **网络契约**：默认 `Accept-Language` 与完整 Profile 语言列表一致；显式 locale 可收窄列表。Chromium 拒绝与 Profile 冲突的显式语言头，比较语言顺序时忽略大小写并允许合法权重。地理对齐不再向所有资源强塞 HTML `Accept`、`Sec-Fetch-*` 或 `Upgrade-Insecure-Requests`；文档、脚本、样式、fetch 与 Worker 的请求语义由浏览器原生生成。Client Hints 必须在文档及实际携带它们的请求上自洽，不要求浏览器原本不发送 hints 的 Worker 请求伪造这些头。
+- **诊断边界**：缺少证据、Service Worker 未实际执行、网络出口未验证时保留 `warning`，真实不一致为 `fail`。headed 原生合成器可能有亚像素舍入，CSS viewport 检查采用 ±0.5 CSS px，有限正 DPR 采用相对 `2^-23` 容差；原始测量值仍保留，明显尺寸/比例差异不会因此放行。
+- **本地验收**：`npm run test:fingerprint-runtime` 显式启用真实内核回归，覆盖原始 Worker 身份、请求头、公开 SessionManager 子资源执行、Canvas/Audio/WebRTC 与跨 realm 契约。Firefox 执行同样的像素探针，但将不支持的严格 Worker Canvas 验收单独记录为 `NOT PASSED`，不以单元测试或页面检测通过代替。完整修复需要匹配的 Gecko 源码、首脚本 Worker bootstrap 原生补丁及 MozillaBuild/Rust/Cargo/编译工具链；本次宿主缺少这些构建前提，现有 CPU/时区补丁不能代替。
+- **线上证据**：`npm run test:benchmarks` 保存实际选项、观测历史、截图和错误。通过 `BENCHMARK_ENGINE`、`BENCHMARK_HEADLESS`、`BENCHMARK_COUNTRY`、`BENCHMARK_RESULT_TIMEOUT_MS` 等环境变量选择条件；比较前须保持 engine、headed/headless、种子、OS、地区与出口条件一致。占位零分、未完成脚本、超时或挑战不能算通过；CreepJS 百分比只是站点启发式，不是封禁概率或全局通过率。
+- **退出码与独立结论**：结果 JSON 分开记录站点 `status` 与 `runtimeAssessment`。站点通过但运行时明确不一致，仍保留站点通过并将套件判失败；`warning` 仅表示未验证，不冒充失败或一致。退出码 `0` 表示站点验收完成且无已证明的运行时失败，`1` 表示站点/运行时明确失败或执行错误，`2` 表示无明确失败但验收未完成或无可验证的二元结论。即使退出 `0`，仍须阅读未验证警告。
+
+本次证据保存在 `artifacts/fingerprint-repair-20260905/`，此前审计保留于 `artifacts/fingerprint-audit-20260905/`。本地支持项通过不代表 Firefox 原生阻塞项已修复，也不承诺第三方站点评分、挑战绕过或账号安全。
 
 ## 故障排查
 
