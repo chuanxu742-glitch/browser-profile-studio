@@ -138,6 +138,7 @@ export interface BrowserCapabilities {
   forbiddenCapabilities: readonly string[];
   managedBrowserVersions: Readonly<Record<'firefox' | 'chromium', string>>;
   serviceWorkerFingerprintInjectionByEngine: Readonly<Record<'firefox' | 'chromium', boolean>>;
+  workerBootstrapByEngine: Readonly<Record<'firefox' | 'chromium', boolean>>;
 }
 
 export const DEFAULT_HANDOFF_TTL_MS = 5 * 60_000;
@@ -470,9 +471,10 @@ export class SessionManager {
       ...(geoAlignment ? {
         timezoneId: geoAlignment.timezoneId,
         locale: geoAlignment.locale,
+        languages: geoAlignment.languages,
         geolocation: geoAlignment.geolocation,
         permissions: ['geolocation'],
-        extraHTTPHeaders: geoAlignment.extraHeaders,
+        extraHTTPHeaders: { ...geoAlignment.extraHeaders, ...this.options.extraHTTPHeaders },
       } : {}),
       ...(effectiveUserAgent !== undefined ? { userAgent: effectiveUserAgent } : {}),
       ...(effectiveFingerprint !== undefined ? { fingerprint: effectiveFingerprint } : {}),
@@ -667,7 +669,8 @@ export class SessionManager {
         firefox: managedBrowserIdentity('firefox').fullVersion,
         chromium: managedBrowserIdentity('chromium').fullVersion,
       },
-      serviceWorkerFingerprintInjectionByEngine: { firefox: true, chromium: true },
+      serviceWorkerFingerprintInjectionByEngine: { firefox: false, chromium: true },
+      workerBootstrapByEngine: { firefox: false, chromium: true },
     };
   }
 

@@ -265,10 +265,12 @@ export class RestApiServer {
             chromium: managedBrowserIdentity('chromium').fullVersion,
             firefox: managedBrowserIdentity('firefox').fullVersion,
           },
-          serviceWorkerFingerprintInjection: true,
-          serviceWorkerFingerprintInjectionByEngine: { chromium: true, firefox: true },
-          firefoxNativeServiceWorkerIdentity: true,
-          serviceWorkerReason: 'Chromium aligns via CDP background target injection; Firefox aligns via native user preferences and cross-channel shadow proxy alignment (MessagePort, BroadcastChannel, ServiceWorkerContainer)',
+          serviceWorkerFingerprintInjection: false,
+          serviceWorkerFingerprintInjectionByEngine: { chromium: true, firefox: false },
+          workerBootstrapByEngine: { chromium: true, firefox: false },
+          workerCanvasReason: 'Chromium injects URL, module, Blob, nested, shared and service worker realms. Firefox page Canvas protection remains enabled, but stock and currently verified custom cores have no first-script worker Canvas bootstrap; diagnostics report this contract as unsupported rather than claiming alignment.',
+          firefoxNativeServiceWorkerIdentity: false,
+          serviceWorkerReason: 'Chromium injects actual worker realms before execution. Stock Firefox cannot guarantee complete Service Worker identity; a verified custom Firefox core is required for native timezone and concurrency alignment. Global capability flags are conservative, not a runtime attestation.',
           externalRuntimes: this.options.externalRuntimes?.list() ?? [],
         }, timestamp: Date.now() }); return;
       }

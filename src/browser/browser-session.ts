@@ -56,6 +56,7 @@ import {
   type EnvironmentDiagnostics,
   type EnvironmentSurfaceSnapshot,
 } from './environment-diagnostics.js';
+import { ENVIRONMENT_PROBE } from './environment-probe.js';
 import type { CookieRecord, BrowserStorageState } from '../profile/types.js';
 
 export type BrowserSessionState =
@@ -182,6 +183,8 @@ export interface BrowserSessionOptions {
   timezoneId?: string;
   /** Explicit or GeoIP-derived locale, e.g. en-US */
   locale?: string;
+  /** Resolved preferred language list; locale alone does not encode fallbacks. */
+  languages?: readonly string[];
   /** Geolocation coordinates */
   geolocation?: { latitude: number; longitude: number; accuracy?: number };
   /** Granted browser permissions, e.g. ['geolocation'] */
@@ -253,53 +256,6 @@ export interface BrowserTabStatus {
   url?: string;
   title?: string;
 }
-const ENVIRONMENT_PROBE = `(() => {
-  const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-  const debugInfo = gl && gl.getExtension('WEBGL_debug_renderer_info');
-
-  // 原生对象完整性检验
-  const suspectedProps = ['userAgent', 'platform', 'hardwareConcurrency', 'deviceMemory', 'webdriver', 'languages', 'language'];
-  const ownProps = Object.getOwnPropertyNames(navigator);
-  const pollutedNavigatorProps = suspectedProps.filter(p => ownProps.includes(p));
-
-  const fnToStringStr = Function.prototype.toString.toString();
-  const isFunctionToStringNative = fnToStringStr.includes('[native code]') && Function.prototype.toString.name === 'toString';
-  const isNavigatorToStringNative = Object.prototype.toString.call(navigator) === '[object Navigator]';
-  const isWebglNative = !gl || !gl.getParameter || gl.getParameter.toString().includes('[native code]');
-
-  return {
-    userAgent: navigator.userAgent,
-    platform: navigator.platform,
-    language: navigator.language,
-    languages: Array.from(navigator.languages || []),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    viewport: { width: window.innerWidth, height: window.innerHeight },
-    screen: {
-      width: screen.width,
-      height: screen.height,
-      availWidth: screen.availWidth,
-      availHeight: screen.availHeight,
-      colorDepth: screen.colorDepth,
-      pixelDepth: screen.pixelDepth,
-      devicePixelRatio: window.devicePixelRatio,
-    },
-    hardwareConcurrency: navigator.hardwareConcurrency,
-    deviceMemory: navigator.deviceMemory,
-    webdriver: navigator.webdriver === true,
-    webgl: gl ? {
-      vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : undefined,
-      renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : undefined,
-    } : undefined,
-    integrity: {
-      hasNavigatorInstancePollution: pollutedNavigatorProps.length > 0,
-      pollutedNavigatorProps,
-      isNavigatorToStringNative,
-      isFunctionToStringNative,
-      isWebglNative,
-    },
-  };
-})()`;
 interface ManagedTab {
   tabId: string;
   page: BrowserPageLike;
@@ -1428,9 +1384,9 @@ export class BrowserSession {
       );
     }
     const locale = this.options.locale ?? profile.geo.locale;
-    const languages = this.options.locale
-      ? [this.options.locale]
-      : [...profile.geo.languages];
+    const languages = this.options.languages
+      ? [...this.options.languages]
+      : this.options.locale ? [this.options.locale] : [...profile.geo.languages];
     const timezoneId = this.options.timezoneId ?? profile.geo.timezoneId;
     const geolocation = this.options.geolocation ?? profile.geo.geolocation;
     return {
@@ -1460,23 +1416,7 @@ export class BrowserSession {
     if (this.engine === 'chromium' && this.options.cdpEndpoint && this.options.managedExtensions?.length) {
       throw new BrowserSessionError('INVALID_STATE', 'Managed extensions cannot be injected into an already-running CDP browser');
     }
-    const resolvedFingerprint = this.resolveFingerprintProfile();
-    const hostTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const mustBlockUnalignedServiceWorkers = Boolean(
-      resolvedFingerprint
-      && this.engine === 'firefox'
-      && resolvedFingerprint.geo.timezoneId !== hostTimezone
-      && !process.env.ABS_FIREFOX_EXECUTABLE_PATH,
-    );
-    const fpConfig = resolvedFingerprint && mustBlockUnalignedServiceWorkers
-      ? {
-          ...resolvedFingerprint,
-          stealth: {
-            ...resolvedFingerprint.stealth,
-            blockServiceWorkers: true,
-          },
-        }
-      : resolvedFingerprint;
+    const fpConfig = this.resolveFingerprintProfile();
     if (this.options.userAgent && !fpConfig) {
       throw new BrowserSessionError(
         'INVALID_STATE',

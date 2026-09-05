@@ -167,7 +167,7 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
               canvasPixelHash |= 0;
             }
           } catch {}
-          self.postMessage({
+          self.postMessage(JSON.stringify({
             userAgent: navigator.userAgent,
             language: navigator.language,
             languages: Array.from(navigator.languages || []),
@@ -177,7 +177,7 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
             hardwareConcurrency: navigator.hardwareConcurrency,
             renderer,
             canvasPixelHash,
-          });`);
+          }));`);
         return;
       }
       if (new URL(req.url || '/', 'http://127.0.0.1').pathname === '/service-worker.js') {
@@ -256,8 +256,8 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
       
       const metrics = await (session as any).page?.evaluate('window.__COLLECT_METRICS__()') as Record<string, any>;
 
-      // 1. Webdriver 必须抹除
-      expect(metrics.webdriver).toBeUndefined();
+      // Preserve the native non-automation value.
+      expect(metrics.webdriver).toBe(false);
 
       // 2. Firefox 会话保持原生纯净，无 Chrome 污染
       expect(metrics.hasChromeRuntime).toBe(false);
@@ -442,41 +442,28 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         };
         document.body.appendChild(frame);
         const iframe = await within(iframeDeferred.promise, 'iframe load', 5000);
-        let worker;
-        try {
-          const workerDeferred = Promise.withResolvers();
-          const source = 'self.postMessage((' + readContext.toString() + ')(self));';
-          const instance = new Worker(new Blob([source], { type: 'application/javascript' }));
-          const timer = setTimeout(() => workerDeferred.reject(new Error('worker profile probe timed out')), 3000);
+        const workerUrl = URL.createObjectURL(new Blob([
+          'self.postMessage(JSON.stringify((' + readContext.toString() + ')(self)));',
+        ], { type: 'application/javascript' }));
+        const readWorker = async (url, serialized) => {
+          const deferred = Promise.withResolvers();
+          const instance = new Worker(url);
           instance.onmessage = (event) => {
-            clearTimeout(timer);
-            instance.terminate();
-            workerDeferred.resolve(event.data);
+            try { deferred.resolve(serialized ? JSON.parse(event.data) : event.data); }
+            catch (error) { deferred.reject(error); }
           };
-          instance.onerror = () => {
-            clearTimeout(timer);
-            instance.terminate();
-            workerDeferred.resolve(undefined);
-          };
-          worker = await workerDeferred.promise;
-        } catch {
-          worker = undefined;
-        }
+          instance.onerror = (event) => deferred.reject(new Error(event.message || 'worker probe failed'));
+          try { return await within(deferred.promise, 'worker first-script probe', 5000); }
+          finally { instance.terminate(); }
+        };
+        let worker;
         let urlWorker;
         try {
-          const workerDeferred = Promise.withResolvers();
-          const instance = new Worker('/worker.js');
-          instance.onmessage = (event) => {
-            instance.terminate();
-            workerDeferred.resolve(event.data);
-          };
-          instance.onerror = () => {
-            instance.terminate();
-            workerDeferred.reject(new Error('URL worker profile probe failed'));
-          };
-          urlWorker = await within(workerDeferred.promise, 'URL worker profile probe', 3000);
-        } catch {
-          urlWorker = undefined;
+          worker = await readWorker(workerUrl, true);
+          urlWorker = await readWorker('/worker.js', true);
+        } finally {
+          URL.revokeObjectURL(workerUrl);
+          frame.remove();
         }
         const messageDeferred = Promise.withResolvers();
         const messageChannel = new MessageChannel();
@@ -532,45 +519,47 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
       }
       expect(metrics.top.timezone).toBe('Asia/Tokyo');
       expect(metrics.top.language).toBe('ja-JP');
-      expect(metrics.top.webdriver).toBeUndefined();
-      expect(metrics.top.webdriverPresent).toBe(false);
+      expect(metrics.top.webdriver).toBe(false);
+      expect(metrics.top.webdriverPresent).toBe(true);
       expect(metrics.iframe).toMatchObject({
         userAgent: metrics.top.userAgent,
         language: metrics.top.language,
         languages: metrics.top.languages,
         timezone: metrics.top.timezone,
-        webdriver: undefined,
-        webdriverPresent: false,
+        webdriver: false,
+        webdriverPresent: true,
         canvasPixelHash: metrics.top.canvasPixelHash,
         hardwareConcurrency: metrics.top.hardwareConcurrency,
         renderer: metrics.top.renderer,
         canvasDataUrl: metrics.top.canvasDataUrl,
       });
-      if (metrics.worker) {
+      expect(metrics.worker).toBeDefined();
         expect(metrics.worker).toMatchObject({
           userAgent: metrics.top.userAgent,
           language: metrics.top.language,
           languages: metrics.top.languages,
           timezone: metrics.top.timezone,
-          webdriver: undefined,
           webdriverPresent: false,
           hardwareConcurrency: metrics.top.hardwareConcurrency,
           renderer: metrics.top.renderer,
-          canvasPixelHash: metrics.top.canvasPixelHash,
         });
-      }
+
       expect(metrics.urlWorker).toBeDefined();
       expect(metrics.urlWorker).toMatchObject({
         userAgent: metrics.top.userAgent,
         language: metrics.top.language,
         languages: metrics.top.languages,
         timezone: metrics.top.timezone,
-        webdriver: undefined,
         webdriverPresent: false,
         hardwareConcurrency: metrics.top.hardwareConcurrency,
         renderer: metrics.top.renderer,
-        canvasPixelHash: metrics.top.canvasPixelHash,
       });
+      // Keep collecting worker pixels, but do not mislabel unsupported Firefox
+      // Canvas parity as repaired. The opt-in runtime suite persists raw evidence.
+      expect(manager.capabilities().workerBootstrapByEngine.firefox).toBe(false);
+      const diagnostics = await manager.environmentDiagnostics(session.sessionId);
+      expect(diagnostics.checks).toContainEqual(expect.objectContaining({ id: 'worker-bootstrap-support', status: 'fail' }));
+      expect(diagnostics.consistency).toBe('inconsistent');
       expect(metrics.workerConstructorAligned).toBe(true);
       expect(metrics.messagePayload).toEqual({
         timezone: 'application-value',

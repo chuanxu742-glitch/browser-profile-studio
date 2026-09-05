@@ -79,9 +79,10 @@ describe('Real Browser Stealth and Anti-Detect Benchmark Test', () => {
       expect(completedSnapshot.text).toContain('Action executed by human simulation: StealthOperator_007');
 
       // Verify the in-page benchmark results from snapshot text
-      expect(completedSnapshot.text).toContain('"webdriverRemoved": true');
+      expect(completedSnapshot.text).toContain('"webdriverNonAutomated": true');
       expect(completedSnapshot.text).toContain('"hasChromeRuntime": false');
       expect(completedSnapshot.text).toContain('"toStringProtected": true');
+      expect(completedSnapshot.text).toContain('"illegalReceiverRejected": true');
       expect(completedSnapshot.text).toContain('hardwareConcurrency');
       expect(completedSnapshot.text).not.toContain('"deviceMemory"');
     } finally {
