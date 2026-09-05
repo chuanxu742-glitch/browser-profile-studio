@@ -370,11 +370,19 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
 
   it('keeps locale, timezone, hardware, and WebGL aligned across frames and workers', async () => {
     const manager = createTestManager();
+    // Stock Firefox caps native worker CPUs at the host count; this fixture
+    // exercises supported parity rather than an unrealizable generated value.
+    const hardwareConcurrency = 2;
+    const profile = await manager.createProfile({
+      name: 'Supported Firefox cross-realm parity',
+      engine: 'firefox',
+      geo: { countryCode: 'JP' },
+      fingerprint: { seed: 31337, hardwareConcurrency },
+    });
     const session = await manager.start({
+      profileId: profile.profileId,
       headless: true,
       fingerprint: true,
-      fingerprintSeed: 31337,
-      countryCode: 'JP',
     });
 
     try {
@@ -519,6 +527,7 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
       }
       expect(metrics.top.timezone).toBe('Asia/Tokyo');
       expect(metrics.top.language).toBe('ja-JP');
+      expect(metrics.top.hardwareConcurrency).toBe(hardwareConcurrency);
       expect(metrics.top.webdriver).toBe(false);
       expect(metrics.top.webdriverPresent).toBe(true);
       expect(metrics.iframe).toMatchObject({
@@ -529,20 +538,18 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         webdriver: false,
         webdriverPresent: true,
         canvasPixelHash: metrics.top.canvasPixelHash,
-        hardwareConcurrency: metrics.top.hardwareConcurrency,
-        renderer: metrics.top.renderer,
+        hardwareConcurrency,
         canvasDataUrl: metrics.top.canvasDataUrl,
       });
       expect(metrics.worker).toBeDefined();
-        expect(metrics.worker).toMatchObject({
-          userAgent: metrics.top.userAgent,
-          language: metrics.top.language,
-          languages: metrics.top.languages,
-          timezone: metrics.top.timezone,
-          webdriverPresent: false,
-          hardwareConcurrency: metrics.top.hardwareConcurrency,
-          renderer: metrics.top.renderer,
-        });
+      expect(metrics.worker).toMatchObject({
+        userAgent: metrics.top.userAgent,
+        language: metrics.top.language,
+        languages: metrics.top.languages,
+        timezone: metrics.top.timezone,
+        webdriverPresent: false,
+        hardwareConcurrency,
+      });
 
       expect(metrics.urlWorker).toBeDefined();
       expect(metrics.urlWorker).toMatchObject({
@@ -551,9 +558,13 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         languages: metrics.top.languages,
         timezone: metrics.top.timezone,
         webdriverPresent: false,
-        hardwareConcurrency: metrics.top.hardwareConcurrency,
-        renderer: metrics.top.renderer,
+        hardwareConcurrency,
       });
+      // JSON omits unavailable renderer values; compare the observed value,
+      // retaining failures when only one realm exposes WebGL or values differ.
+      expect(metrics.iframe.renderer).toBe(metrics.top.renderer);
+      expect(metrics.worker?.renderer).toBe(metrics.top.renderer);
+      expect(metrics.urlWorker?.renderer).toBe(metrics.top.renderer);
       // Keep collecting worker pixels, but do not mislabel unsupported Firefox
       // Canvas parity as repaired. The opt-in runtime suite persists raw evidence.
       expect(manager.capabilities().workerBootstrapByEngine.firefox).toBe(false);
@@ -572,11 +583,10 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
           language: metrics.top.language,
           languages: metrics.top.languages,
           timezone: metrics.top.timezone,
-          webdriver: undefined,
           webdriverPresent: false,
-          hardwareConcurrency: metrics.top.hardwareConcurrency,
-          renderer: metrics.top.renderer,
+          hardwareConcurrency,
         });
+        expect(metrics.serviceWorker.renderer).toBe(metrics.top.renderer);
       }
     } finally {
       await manager.stop(session.sessionId, 'test_done');

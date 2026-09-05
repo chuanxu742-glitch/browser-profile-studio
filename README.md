@@ -438,6 +438,10 @@ MCP 契约测试覆盖 `tools/list` 的精确工具集合、严格 schema、注�
 
 本次证据保存在 `artifacts/fingerprint-repair-20260905/`，此前审计保留于 `artifacts/fingerprint-audit-20260905/`。本地支持项通过不代表 Firefox 原生阻塞项已修复，也不承诺第三方站点评分、挑战绕过或账号安全。
 
+### CI 跨 realm 回归修正（2026-09-06）
+
+Linux CI 的 Firefox 跨 realm 用例此前由种子生成 16 核配置，而 runner 原生 Worker 只能报告 4 核。该支持范围用例现使用明确的 2 核持久化 Profile，并逐个验证页面、iframe、Blob/URL Worker 的请求值；不修改生产配置、不按宿主静默钳制配置。不可用 WebGL renderer 按值比较，不要求 `undefined` 经 JSON 序列化后仍保留属性。真实超宿主核数探针仍报告 Worker CPU 不一致，Firefox 首脚本 Worker Canvas 仍为 **NOT PASSED**。诊断与验证证据保存在 `artifacts/ci-repair-20260906/`；本地通过不等于 GitHub CI 已通过。
+
 ## 故障排查
 
 - **启动立即失败**：检查 `BROWSER_ALLOWED_HOSTS` 是否设置、是否包含裸 `*`、URL/端口/空项；检查数据目录和审计路径是否为可写的绝对路径。
