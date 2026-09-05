@@ -1753,7 +1753,9 @@ export class BrowserSession {
     const detection = await this.detector.detectPage(this.page);
     if (detection.detected) {
       this.challengeDetection = detection;
-      if (this.challengePolicy.shouldPause(detection) && !preserveTakeover && this._state !== 'HUMAN_TAKEOVER' && this._state !== 'USER_CONTROLLED' && this._state !== 'STOPPING' && this._state !== 'STOPPED') {
+      // Only entering the pause aborts active automation; repeated page events
+      // must not cancel read-only actions that were admitted while paused.
+      if (this.challengePolicy.shouldPause(detection) && !preserveTakeover && this._state !== 'PAUSED_CHALLENGE' && this._state !== 'HUMAN_TAKEOVER' && this._state !== 'USER_CONTROLLED' && this._state !== 'STOPPING' && this._state !== 'STOPPED') {
         this._state = 'PAUSED_CHALLENGE';
         this.activeAbort?.abort();
       }

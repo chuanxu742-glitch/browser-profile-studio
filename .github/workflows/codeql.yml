@@ -23,6 +23,12 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    env:
+      # Disable overlays and independent version-cache probes; run full PR queries.
+      CODEQL_ACTION_OVERLAY_ANALYSIS: 'false'
+      CODEQL_ACTION_OVERLAY_ANALYSIS_MATCH_CODEQL_VERSION: 'false'
+      CODEQL_ACTION_OVERLAY_ANALYSIS_MATCH_CODEQL_VERSION_DRY_RUN: 'false'
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: 'false'
     steps:
       - uses: actions/checkout@v7
         with:
