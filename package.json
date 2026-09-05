@@ -5,11 +5,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chuanxu742-glitch/antigravity-browser.git"
+    "url": "git+https://github.com/chuanxu742-glitch/browser-profile-studio.git"
   },
-  "homepage": "https://github.com/chuanxu742-glitch/antigravity-browser#readme",
+  "homepage": "https://github.com/chuanxu742-glitch/browser-profile-studio#readme",
   "bugs": {
-    "url": "https://github.com/chuanxu742-glitch/antigravity-browser/issues"
+    "url": "https://github.com/chuanxu742-glitch/browser-profile-studio/issues"
   },
   "description": "Browser profile isolation and policy-gated Firefox automation MCP baseline",
   "files": [

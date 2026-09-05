@@ -211,7 +211,7 @@ npm run acceptance:egress
   "mcpServers": {
     "compliant-firefox": {
       "command": "node",
-      "args": ["C:\\path\\to\\antigravity-browser\\dist\\index.js"],
+      "args": ["C:\\path\\to\\browser-profile-studio\\dist\\index.js"],
       "env": {
         "BROWSER_ALLOWED_HOSTS": "test.example.com",
         "BROWSER_ALLOW_PRIVATE_NETWORK": "false"
