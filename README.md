@@ -12,7 +12,17 @@
 
 检测到挑战时，自动化立即暂停。生产挑战的标准结果是 `CHALLENGE_DETECTED`/`SESSION_PAUSED_CHALLENGE`，等待受信任人员处理；服务不会刷新、重试、切换环境或与挑战控件交互。
 
-Service Worker 身份链路：Chromium 会通过仅绑定回环地址的浏览器级 CDP 通道，在网站代码执行前暂停目标，统一 UA、平台、Client Hints 与后续网络请求；Firefox 不依赖页面脚本注入，而是使用 Gecko 原生 Profile 首选项统一 Window、Worker、Service Worker 和 HTTP 通道中的 UA、平台、appVersion、语言、硬件并发数及相关请求头。stock Firefox 的 Playwright 时区覆盖不会进入 Service Worker，因此完整时区覆盖仍只在 `browser-core/firefox` 的版本锁定内核补丁中提供，产品能力接口对此保持 `false`，不会把部分覆盖冒充为全覆盖。
+执行上下文身份链路：Chromium 通过仅绑定回环地址的受管 CDP 通道，在页面、子框架和 Worker 首段网站脚本执行前完成配置；Dedicated、Shared 和 Service Worker 使用同一身份来源，不改写业务消息。Firefox 使用 Gecko 原生 Profile 首选项统一 UA、平台、语言和硬件并发数。stock Firefox 不支持 Service Worker 的非宿主时区覆盖，也不能用页面级 locale 覆盖模拟 Service Worker 的格式化语言；这些配置分别以 `FIREFOX_CORE_REQUIRED`、`FIREFOX_LOCALE_UNSUPPORTED` 明确失败。自定义内核必须实际构建并通过运行验证，补丁文件存在不代表能力已经可用。
+
+当前宿主缺少原生 Firefox 源码入口 `mach.ps1`、MozillaBuild 和 `clang-cl`，因此自定义 Firefox 内核尚未构建/验证。stock Firefox 能明确拒绝不支持的配置，只能证明保护边界生效，不能证明自定义内核能力。
+
+环境能力边界：
+
+- 操作系统画像必须匹配宿主；硬件并发数不能超过宿主可用并发数，设备内存使用浏览器可表达的值。不会用 Windows 字符串冒充完整 macOS/Linux 字体与渲染环境。
+- WebGL 默认保留原生驱动信息；字体、WebGPU、音频采样率、媒体设备和通知权限保持原生能力，不伪造缺失设备或成功授权。
+- Canvas 的一致性处理发生在绘制阶段，不在 `getImageData`、PNG/Blob 导出等读取路径分别改写像素；音频缓冲区读取不再累计修改。
+- 非直连 WebRTC 策略使用 relay-only，需要真实 TURN 配置；不把改写 SDP、候选文本或业务消息当作防泄漏证明。诊断无法观测到的项目标记为未知/警告，不宣称第三方检测通过。
+- 经纬度仅在调用方明确提供时注入并授权；不根据国家或代理 IP 自动授予精确位置，也不额外覆盖浏览器原生生成的语言请求头。
 
 ## 安装
 
@@ -64,7 +74,10 @@ npm run import:local
 npm run import:local -- <sourceId> confirm-browser-closed
 ```
 
-代理状态分为 `unhealthy`、`reachable` 和 `verified`。`reachable` 只代表代理端口可达；只有请求确实通过代理并从出口服务取得 IP 时才是 `verified`。国家字段只在所配置的出口服务真实返回国家信息时出现，不使用默认国家填充。
+代理状态分为 `unhealthy`、`reachable`、`handshake` 和 `verified`：分别表示失败、TCP 可达、代理隧道握手成功、经隧道取得合法出口 IP。只有 `verified` 的启用代理可以进入健康轮换；TCP 或握手成功不清除隔离状态，也不冒充浏览器实际出口验收。国家字段只在出口服务真实返回时出现，不使用默认国家填充。
+代理认证边界：受管 Chromium 支持 HTTP 代理的 password-only（空用户名）和普通用户名/密码认证；不带受管指纹 Profile 的原生 Chromium 路径明确拒绝空用户名认证，这是 Playwright 原生 `username` truthiness 限制。Chromium 的带认证 SOCKS 代理返回 `PROXY_AUTH_UNSUPPORTED`，不会降级为未认证连接。
+
+浏览器会话打开结果包含 `navigationCompleted`，并在实际可观测时附带 `httpStatus`。容忍的部分加载返回 `navigationCompleted: false` 且不附带状态码；验收不得把部分加载或缺失状态当作成功。
 
 开发环境没有 `package-lock.json` 时可用 `npm install` 代替 `npm ci`。`npm run install:browsers` 下载项目锁定的 Firefox 与 Chromium；只使用单一引擎时可分别运行 `npm run install:firefox` 或 `npm run install:chromium`。启动前复制 `.env.example`，至少设置 `BROWSER_ALLOWED_HOSTS`：
 
@@ -85,6 +98,8 @@ npm start
 如果当前网络通过 Meta Tunnel 将已批准的公网域名解析到 `198.18.0.0/15` 的合成地址，管理员可显式设置 `BROWSER_ALLOW_SYNTHETIC_TUNNEL=true`。该开关只放行 `198.18.0.0/15`，仍然拒绝 RFC1918、回环、链路本地和云元数据地址；默认关闭，不应替代正常公网 DNS。
 
 当前版本的服务仍只从环境和 Studio 管理面读取管理员配置；MCP 调用不能传入 allowlist、浏览器可执行文件、扩展包、扩展路径或 profile 路径，但 `browser_start` 支持按会话传入代理、指纹、GeoIP、语言、时区、地理位置、UA、视口和种子。自定义 UA 的浏览器品牌与主版本必须匹配项目锁定的受管内核，并且只能与受管指纹同时使用；留空时服务会自动生成兼容值。Chromium 的 JS Client Hints 与网络 `Sec-CH-UA-*` 由同一版本/OS 模型配置，外部 CDP 浏览器禁止注入受管指纹。扩展只能由 Studio owner 导入受管仓库，并通过服务器生成的扩展 ID 分配给持久 Profile。
+
+新建环境使用画像 `generationVersion: 2`。旧档案的普通读取、整份回写、改名和克隆不运行新版画像生成器；Studio 显示“旧画像：需明确升级”，并在停止状态提供“升级画像”。升级通过 `PUT /api/v1/profiles/{id}` 提交 `{"fingerprint":{"generationVersion":2}}`，保留种子、Cookie 和存储，按宿主能力重新生成硬件/屏幕配置并清除旧版自动生成 UA。身份变化可能触发网站重新登录，升级前建议克隆备份；旧档案直接启动新版受管画像会返回 `PROFILE_MIGRATION_REQUIRED`，不会悄悄换身份。
 
 ### 受管扩展中心
 
@@ -200,7 +215,11 @@ $env:ACCEPTANCE_EGRESS_IP_URL = 'https://你的出口探针域名/ip'
 npm run acceptance:egress
 ```
 
-脚本只执行无登录 GET、策略预检和手动检查重定向，不跟随未授权重定向，不读取响应正文。未设置 `ACCEPTANCE_TARGET_URLS` 时仅执行应用层策略矩阵；未设置预期出口 IP 时出口检查标记为 `SKIP`，不会冒充生产网络验收。使用 `npm run acceptance:egress -- --fixture` 可在无生产域名时执行确定性的 allowlist、HTTPS、私网和元数据阻断验收。
+业务域名先执行无登录 Node GET、策略预检和手动检查重定向：只接受已观测 2xx；未跟随的重定向保持 `SKIP`，4xx/5xx 与未授权重定向不是成功。随后使用受相同 URL 策略约束的 Chromium 访问业务目标，要求 `navigationCompleted: true`、已观测 `httpStatus` 为 2xx、最终 URL 获批准且会话 READY；超时后的部分加载、未知状态或缺失观测都不能通过。Node GET 是直连观测，不能代替浏览器/代理路径。
+
+出口检查另外启动真实 Chromium，通过 `ACCEPTANCE_EGRESS_IP_URL` 读取未截断的 IP 文本或 `{"ip":"..."}`，同时要求完整导航和 2xx 响应；`ACCEPTANCE_PROXY_URL` 同时用于业务浏览器和出口浏览器。未设置目标域名或预期出口时相应项为 `SKIP`，报告 `complete: false`；只有生产模式所有检查均为 `PASS` 才能 `complete: true`，任一失败、未知或清理失败使生产命令返回非零退出码。这个结果只覆盖本次 HTTP/浏览器/出口检查，不证明登录业务、第三方反机器人检测或整个发布就绪。可设置 `ACCEPTANCE_REPORT_PATH` 保存分项原始 JSON。
+
+`npm run acceptance:egress -- --fixture` 只执行确定性的 allowlist、HTTPS、私网和元数据阻断矩阵，即使设置了生产 URL/代理/出口环境变量也不访问外网、不启动浏览器；矩阵通过可以退出 0，但始终 `complete: false`，不证明生产出口。
 
 ## MCP 配置
 
@@ -423,6 +442,10 @@ npm run build
 MCP 契约测试覆盖 `tools/list` 的精确工具集合、严格 schema、注解、输入错误、截图路径隔离和 manager stub 调用。默认集成测试使用注入 launcher，不启动真实浏览器。安装项目锁定的 Firefox 后，可运行 `npm run test:firefox`，以本机真实 Firefox 访问本地 fixture；该测试不会访问、求解或统计真实 Cloudflare/CAPTCHA 页面。
 
 只有 `npm run test:firefox` 在部署宿主通过后，才可把该宿主标记为 Firefox 运行时就绪。单元测试、类型检查或 fake-launcher 集成测试通过，不等价于本机 Firefox 可启动。
+
+仓库 `vitest.config.ts` 对所有 Vitest 入口统一设置 `maxWorkers=1`、`fileParallelism=false`、`maxConcurrency=1`，避免同一次运行并发启动浏览器；不要并行启动多个测试命令。当前留存证据及失败记录见[实现与验收报告](docs/implementation-report.md#4-验证状态)：`artifacts/benchmarks/2026-09-05T07-25-11.973Z/unit-mcp-results.json` 记录 322 项测试/53 个文件通过，不能替代本轮修改后的串行验证；包含集成测试的并发回归存在失败，不是最终发布证明。
+
+`scripts/run-score-benchmarks.ts` 只采集外部页面证据。`loadStatus` 表示导航可达性，`detectionResult` 始终为 `unverified`，没有自动推断的反机器人分数；已写出的正文/截图路径会保留在报告中，即使后续采集或关闭失败。当前 `artifacts/benchmarks/2026-09-05T07-25-11.973Z/report.json` 中 browserscan、whoer 均被 URL policy 拒绝（宿主 DNS 返回保留 `198.18.*` 地址），不能宣称检测通过。完整原始证据路径、策略 fixture 与真实生产验收必须分开保留。
 
 ## 故障排查
 

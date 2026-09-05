@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { describe, expect, it, vi } from 'vitest';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import type * as FileSystem from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,6 +12,12 @@ import type { FirefoxContextLike, FirefoxLauncherLike, FirefoxPageLike } from '.
 import { ChallengeDetector } from '../../src/challenge/detector.js';
 import { SessionManager } from '../../src/browser/session-manager.js';
 import { DirectScheduler } from '../../src/input/direct-scheduler.js';
+import { launchPersistentChromium } from '../../src/browser/chromium-launcher.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof FileSystem>();
+  return { ...actual, rm: vi.fn(actual.rm) };
+});
 
 class FakePage {
   private currentUrl = 'about:blank';
@@ -33,10 +40,11 @@ class FakePage {
     // fallback exercises its safe exception path.
     throw new Error('no locator in lifecycle fake');
   }
-  async goto(url: string): Promise<void> {
+  async goto(url: string): Promise<unknown> {
     this.gotoCalls += 1;
     this.currentUrl = url;
     this.emit('framenavigated');
+    return undefined;
   }
   async screenshot(): Promise<Buffer> { return Buffer.from('fixture-png'); }
   async close(): Promise<void> { return undefined; }
@@ -165,6 +173,45 @@ async function flushAsyncEvent(): Promise<void> {
 
 
 describe('BrowserSession lifecycle', () => {
+  it('reports a tolerated navigation timeout as incomplete without retaining earlier HTTP evidence', async () => {
+    const page = new FakePage();
+    const navigate = page.goto.bind(page);
+    vi.spyOn(page, 'goto')
+      .mockImplementationOnce(async (url) => {
+        await navigate(url);
+        return { status: () => 200 };
+      })
+      .mockImplementationOnce(async (url) => {
+        await navigate(url);
+        throw Object.assign(new Error('Navigation timeout'), { name: 'TimeoutError' });
+      });
+    const session = new BrowserSession({
+      headless: true,
+      launcher: { launchPersistentContext: async () => new FakeContext(page) },
+      scheduler: new DirectScheduler(),
+      urlPolicy: { assertAllowed: () => true },
+    });
+    try {
+      await session.start();
+      await expect(session.open('https://fixture.test/complete')).resolves.toMatchObject({
+        navigationCompleted: true,
+        httpStatus: 200,
+      });
+      const partial = await session.open('https://fixture.test/partial');
+      expect(partial).toMatchObject({ navigationCompleted: false, url: 'https://fixture.test/partial' });
+      expect(partial).not.toHaveProperty('httpStatus');
+    } finally {
+      await session.stop();
+    }
+  });
+
+  it.each(['socks5://127.0.0.1:1080', 'http://127.0.0.1:8080'])('rejects unsupported native password-only proxy authentication for %s', async (server) => {
+    await expect(launchPersistentChromium(join(tmpdir(), 'proxy-auth-unsupported'), {
+      headless: true,
+      proxy: { server, password: 'secret' },
+    })).rejects.toThrow('PROXY_AUTH_UNSUPPORTED');
+  });
+
   it('rejects managed fingerprint injection into an externally versioned CDP browser', async () => {
     const session = new BrowserSession({
       headless: true,
@@ -395,16 +442,17 @@ describe('BrowserSession lifecycle', () => {
     await session.stop();
   });
 
-  it('removes profile and artifact directories when launch fails', async () => {
+  it('preserves the Firefox capability rejection while removing owned profile and artifact directories', async () => {
     const workRoot = await mkdtemp(join(tmpdir(), 'browser-session-launch-failure-'));
     const profileRoot = join(workRoot, 'profiles');
     const artifactsRoot = join(workRoot, 'artifacts');
+    const capabilityError = new Error('FIREFOX_CORE_REQUIRED: Service Worker timezone overrides require the verified custom core');
     const session = new BrowserSession({
       headless: true,
       profileRoot,
       artifactsRoot,
       launcher: {
-        launchPersistentContext: async () => { throw new Error('spawn C:\\private\\firefox.exe UNKNOWN'); },
+        launchPersistentContext: async () => { throw capabilityError; },
       },
       scheduler: new DirectScheduler(),
       urlPolicy: { assertAllowed: () => true },
@@ -413,7 +461,7 @@ describe('BrowserSession lifecycle', () => {
     try {
       await expect(session.start()).rejects.toMatchObject({
         code: 'BROWSER_LAUNCH_FAILED',
-        message: 'Firefox could not be started',
+        message: capabilityError.message,
       });
       await expect(access(session.profileDirectory)).rejects.toBeDefined();
       await expect(access(join(artifactsRoot, session.sessionId))).rejects.toBeDefined();
@@ -422,11 +470,73 @@ describe('BrowserSession lifecycle', () => {
     }
   });
 
-  it('fails startup closed when the resource policy route cannot be installed', async () => {
+  it.each(['profile', 'artifacts'] as const)('never removes a pre-existing %s directory after rejected startup', async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'browser-session-ownership-'));
+    const artifactsRoot = join(root, 'artifacts');
+    const session = new BrowserSession({
+      profileRoot: join(root, 'profiles'),
+      artifactsRoot,
+      launcher: { launchPersistentContext: async () => new FakeContext(new FakePage()) },
+      scheduler: new DirectScheduler(),
+      urlPolicy: { assertAllowed: () => true },
+    });
+    const directory = kind === 'profile' ? session.profileDirectory : join(artifactsRoot, session.sessionId);
+    try {
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, 'sentinel'), 'not owned by this session');
+      await expect(session.start()).rejects.toMatchObject({ code: 'BROWSER_LAUNCH_FAILED' });
+      await session.stop();
+      expect(await readFile(join(directory, 'sentinel'), 'utf8')).toBe('not owned by this session');
+    } finally {
+      try { await session.stop(); }
+      finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    }
+  });
+
+  it.each(['close', 'profile cleanup'] as const)('reports %s failure while still cleaning the remaining owned directories', async (failure) => {
+    const root = await mkdtemp(join(tmpdir(), 'browser-session-stop-failure-'));
+    const artifactsRoot = join(root, 'artifacts');
+    const context = new FakeContext(new FakePage());
+    const cause = new Error(`${failure} failed`);
+    const manager = new SessionManager({
+      profileRoot: join(root, 'profiles'),
+      artifactsRoot,
+      launcher: { launchPersistentContext: async () => context },
+      scheduler: new DirectScheduler(),
+      urlPolicy: { assertAllowed: () => true },
+    });
+    try {
+      const session = await manager.start();
+      if (failure === 'close') context.close = async () => { throw cause; };
+      else vi.mocked(rm).mockRejectedValueOnce(cause);
+      await expect(manager.stop(session.sessionId)).rejects.toMatchObject({
+        code: 'INTERNAL',
+        cause: { errors: [cause] },
+      });
+      expect(manager.size).toBe(0);
+      expect(session.status()).toMatchObject({ state: 'STOPPED' });
+      expect(session.status().url).toBeUndefined();
+      expect(session.status().tabId).toBeUndefined();
+      await expect(access(join(artifactsRoot, session.sessionId))).rejects.toMatchObject({ code: 'ENOENT' });
+      if (failure === 'close') await expect(access(session.profileDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+      else await expect(access(session.profileDirectory)).resolves.toBeUndefined();
+    } finally {
+      vi.mocked(rm).mockReset();
+      const actual = await vi.importActual<typeof FileSystem>('node:fs/promises');
+      vi.mocked(rm).mockImplementation(actual.rm);
+      try { await manager.shutdown(); }
+      finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    }
+  });
+
+  it('preserves startup and close failures while cleaning directories after route registration fails', async () => {
     const workRoot = await mkdtemp(join(tmpdir(), 'browser-session-route-failure-'));
     const page = new FakePage();
     const context = new FakeContext(page);
-    context.route = async () => { throw new Error('route registration failed'); };
+    const routeError = new Error('route registration failed');
+    const closeError = new Error('context close failed');
+    context.route = async () => { throw routeError; };
+    context.close = async () => { throw closeError; };
     const session = new BrowserSession({
       headless: true,
       profileRoot: join(workRoot, 'profiles'),
@@ -439,7 +549,7 @@ describe('BrowserSession lifecycle', () => {
     try {
       await expect(session.start()).rejects.toMatchObject({
         code: 'BROWSER_LAUNCH_FAILED',
-        message: 'Firefox could not be started',
+        cause: { errors: [routeError, closeError] },
       });
       await expect(access(session.profileDirectory)).rejects.toBeDefined();
       await expect(access(join(workRoot, 'artifacts', session.sessionId))).rejects.toBeDefined();

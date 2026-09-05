@@ -266,7 +266,7 @@ const ENVIRONMENT_PROBE = `(() => {
   const fnToStringStr = Function.prototype.toString.toString();
   const isFunctionToStringNative = fnToStringStr.includes('[native code]') && Function.prototype.toString.name === 'toString';
   const isNavigatorToStringNative = Object.prototype.toString.call(navigator) === '[object Navigator]';
-  const isWebglNative = !gl || !gl.getParameter || gl.getParameter.toString().includes('[native code]');
+  const isWebglNative = gl && gl.getParameter ? gl.getParameter.toString().includes('[native code]') : undefined;
 
   return {
     userAgent: navigator.userAgent,
@@ -511,6 +511,8 @@ export class BrowserSession {
   private readonly engine: 'firefox' | 'chromium';
   private readonly artifactsRoot: string;
   private readonly artifactsDirectory: string;
+  private ownsProfileDirectory = false;
+  private ownsArtifactsDirectory = false;
   private readonly maxQueue: number;
   private readonly maxTabs: number;
   private readonly defaultTimeoutMs: number;
@@ -632,8 +634,16 @@ export class BrowserSession {
     this.startedAt = Date.now();
     const startPromise = (async (): Promise<BrowserSessionStatus> => {
       try {
-        await mkdir(this.profileDirectory, { recursive: true, mode: 0o700 });
-        await mkdir(this.artifactsDirectory, { recursive: true, mode: 0o700 });
+        if (this.persistentProfile) {
+          await mkdir(this.profileDirectory, { recursive: true, mode: 0o700 });
+        } else {
+          await mkdir(this.profileRoot, { recursive: true, mode: 0o700 });
+          await mkdir(this.profileDirectory, { mode: 0o700 });
+          this.ownsProfileDirectory = true;
+        }
+        await mkdir(this.artifactsRoot, { recursive: true, mode: 0o700 });
+        await mkdir(this.artifactsDirectory, { mode: 0o700 });
+        this.ownsArtifactsDirectory = true;
         await this.launchContext(this.headless);
         await this.loadInitialStorageState();
         await this.loadInitialCookies();
@@ -643,14 +653,27 @@ export class BrowserSession {
         return this.status();
       } catch (error) {
         this._state = 'ERROR';
-        await this.closeContext().catch(() => undefined);
-        await this.cleanupOwnedProfile().catch(() => undefined);
-        await this.cleanupOwnedArtifacts().catch(() => undefined);
-        throw error instanceof BrowserSessionError
+        const cleanupErrors: unknown[] = [];
+        await this.closeContext().catch((cleanupError) => cleanupErrors.push(cleanupError));
+        await this.cleanupOwnedProfile().catch((cleanupError) => cleanupErrors.push(cleanupError));
+        await this.cleanupOwnedArtifacts().catch((cleanupError) => cleanupErrors.push(cleanupError));
+        const launchError = error instanceof BrowserSessionError
           ? error
           : typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'AUDIT_UNAVAILABLE'
             ? browserErrorFromTarget(error)
-            : new BrowserSessionError('BROWSER_LAUNCH_FAILED', 'Firefox could not be started', { cause: error });
+            : new BrowserSessionError('BROWSER_LAUNCH_FAILED',
+              error instanceof Error && /^(?:FIREFOX_CORE_REQUIRED|FIREFOX_LOCALE_UNSUPPORTED|FINGERPRINT_OS_UNSUPPORTED|WEBRTC_REPLACE_UNSUPPORTED):/.test(error.message)
+                ? error.message
+                : `${this.engine} could not be started`,
+              { cause: error });
+        if (cleanupErrors.length) {
+          throw new BrowserSessionError(launchError.code, launchError.message, {
+            retryable: launchError.retryable,
+            ...(launchError.details ? { details: launchError.details } : {}),
+            cause: new AggregateError([error, ...cleanupErrors], 'Browser launch and cleanup failed'),
+          });
+        }
+        throw launchError;
       }
     })();
     this.startPromise = startPromise;
@@ -822,16 +845,25 @@ export class BrowserSession {
       } catch (error) {
         persistenceError ??= error;
       }
-      await this.closeContext().catch(() => undefined);
-      await this.cleanupOwnedProfile().catch(() => undefined);
-      await this.cleanupOwnedArtifacts().catch(() => undefined);
+      const cleanupErrors: unknown[] = [];
+      await this.closeContext().catch((error) => cleanupErrors.push(error));
+      await this.cleanupOwnedProfile().catch((error) => cleanupErrors.push(error));
+      await this.cleanupOwnedArtifacts().catch((error) => cleanupErrors.push(error));
       this.controlLease.dispose();
       this.actionCache.clear();
       this._state = 'STOPPED';
       if (persistenceError !== undefined) {
         await this.audit({ action: 'browser_stop', outcome: 'failure', reason: 'login_state_checkpoint_failed' });
         throw new BrowserSessionError('INTERNAL', 'Browser closed but the login state checkpoint failed', {
-          cause: persistenceError,
+          cause: cleanupErrors.length
+            ? new AggregateError([persistenceError, ...cleanupErrors], 'Checkpoint and browser cleanup failed')
+            : persistenceError,
+        });
+      }
+      if (cleanupErrors.length) {
+        await this.audit({ action: 'browser_stop', outcome: 'failure', reason: 'browser_cleanup_failed' });
+        throw new BrowserSessionError('INTERNAL', 'Browser cleanup failed', {
+          cause: new AggregateError(cleanupErrors, 'Browser cleanup failed'),
         });
       }
       await this.audit({ action: 'browser_stop', outcome: 'success', reason });
@@ -1000,6 +1032,8 @@ export class BrowserSession {
   public async open(url: string, options: ({ waitUntil?: 'domcontentloaded' | 'load'; timeoutMs?: number } & WriteGuardOptions) = {}): Promise<{
     url?: string;
     title?: string;
+    navigationCompleted: boolean;
+    httpStatus?: number;
     pageGeneration: number;
     state: BrowserSessionState;
   }> {
@@ -1016,11 +1050,18 @@ export class BrowserSession {
       try { await (page as any).bringToFront?.(); } catch (_) {}
       const beforeGeneration = this.pageGeneration;
       if (!page.goto) throw new BrowserSessionError('INTERNAL', 'Firefox page does not support navigation');
+      let navigationCompleted = false;
+      let httpStatus: number | undefined;
       try {
-        await page.goto(url, {
+        const response = await page.goto(url, {
           waitUntil: options.waitUntil ?? 'domcontentloaded',
           timeout: Math.max(1_000, Math.min(60_000, Math.floor(options.timeoutMs ?? this.defaultTimeoutMs))),
         });
+        navigationCompleted = true;
+        if (response !== null && typeof response === 'object' && 'status' in response && typeof response.status === 'function') {
+          const status: unknown = response.status();
+          if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) httpStatus = status;
+        }
       } catch (error: any) {
         if (this._state === 'PAUSED_CHALLENGE') throw new BrowserSessionError('SESSION_PAUSED_CHALLENGE', 'Challenge detected during navigation');
         const currentUrl = page.url?.();
@@ -1046,6 +1087,8 @@ export class BrowserSession {
       return {
         ...(finalUrl !== undefined ? { url: finalUrl } : {}),
         ...(title ? { title } : {}),
+        navigationCompleted,
+        ...(httpStatus !== undefined ? { httpStatus } : {}),
         pageGeneration: this.pageGeneration,
         state: this._state,
       };
@@ -1460,23 +1503,7 @@ export class BrowserSession {
     if (this.engine === 'chromium' && this.options.cdpEndpoint && this.options.managedExtensions?.length) {
       throw new BrowserSessionError('INVALID_STATE', 'Managed extensions cannot be injected into an already-running CDP browser');
     }
-    const resolvedFingerprint = this.resolveFingerprintProfile();
-    const hostTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const mustBlockUnalignedServiceWorkers = Boolean(
-      resolvedFingerprint
-      && this.engine === 'firefox'
-      && resolvedFingerprint.geo.timezoneId !== hostTimezone
-      && !process.env.ABS_FIREFOX_EXECUTABLE_PATH,
-    );
-    const fpConfig = resolvedFingerprint && mustBlockUnalignedServiceWorkers
-      ? {
-          ...resolvedFingerprint,
-          stealth: {
-            ...resolvedFingerprint.stealth,
-            blockServiceWorkers: true,
-          },
-        }
-      : resolvedFingerprint;
+    const fpConfig = this.resolveFingerprintProfile();
     if (this.options.userAgent && !fpConfig) {
       throw new BrowserSessionError(
         'INVALID_STATE',
@@ -1490,17 +1517,15 @@ export class BrowserSession {
       );
     }
     const initScript = fpConfig ? buildStealthInjectionScript(fpConfig) : undefined;
-    const extraHTTPHeaders = this.options.extraHTTPHeaders ?? (fpConfig
-      ? { 'Accept-Language': fpConfig.geo.languages.join(',') }
-      : undefined);
+    const extraHTTPHeaders = this.options.extraHTTPHeaders;
     const launchOptions: FirefoxLaunchOptions = {
       headless,
       viewport: this.options.viewport ?? (fpConfig ? fpConfig.viewport : undefined),
       ...(this.options.proxy ? { proxy: this.options.proxy } : {}),
       timezoneId: this.options.timezoneId ?? fpConfig?.geo.timezoneId,
       locale: this.options.locale ?? fpConfig?.geo.locale,
-      geolocation: this.options.geolocation ?? fpConfig?.geo.geolocation,
-      permissions: this.options.permissions ?? ['geolocation'],
+      geolocation: this.options.geolocation,
+      permissions: this.options.permissions ?? [],
       ...(extraHTTPHeaders ? { extraHTTPHeaders } : {}),
       userAgent: this.options.userAgent ?? fpConfig?.userAgent,
       ...(initScript ? { initScript } : {}),
@@ -2087,6 +2112,8 @@ export class BrowserSession {
   private async closeContext(): Promise<void> {
     const context = this.context;
     this.context = undefined;
+    this.page = undefined;
+    this.activeTabId = undefined;
     for (const tab of this.tabs.values()) {
       tab.registry.clear();
       tab.snapshotHistory.clear();
@@ -2154,12 +2181,15 @@ export class BrowserSession {
     });
   }
   private async cleanupOwnedProfile(): Promise<void> {
-    if (this.persistentProfile) return;
+    if (this.persistentProfile || !this.ownsProfileDirectory) return;
     await this.cleanupOwnedDirectory(this.profileRoot, this.profileDirectory);
+    this.ownsProfileDirectory = false;
   }
 
   private async cleanupOwnedArtifacts(): Promise<void> {
+    if (!this.ownsArtifactsDirectory) return;
     await this.cleanupOwnedDirectory(this.artifactsRoot, this.artifactsDirectory);
+    this.ownsArtifactsDirectory = false;
   }
 
   private async cleanupOwnedDirectory(rootValue: string, directoryValue: string): Promise<void> {
@@ -2167,7 +2197,7 @@ export class BrowserSession {
     const directory = resolve(directoryValue);
     const relativePath = relative(root, directory);
     if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) return;
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 
   private async audit(fields: Record<string, unknown>): Promise<void> {

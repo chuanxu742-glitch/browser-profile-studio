@@ -1,14 +1,21 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { AuditLogger, sanitizeAuditEvent } from '../../src/audit.js';
 
 describe('AuditLogger', () => {
+  const directories: string[] = [];
+  afterEach(async () => {
+    await Promise.all(directories.splice(0).map((directory) =>
+      rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })));
+  });
+
   it('appends JSONL while omitting sensitive text and URL queries', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'compliant-firefox-audit-'));
+    directories.push(directory);
     const path = join(directory, 'audit.jsonl');
     const logger = new AuditLogger({ path, now: () => new Date('2026-08-30T00:00:00.000Z') });
 
@@ -38,6 +45,7 @@ describe('AuditLogger', () => {
 
   it('serializes concurrent records as complete, parseable lines', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'compliant-firefox-audit-'));
+    directories.push(directory);
     const path = join(directory, 'nested', 'audit.jsonl');
     const logger = new AuditLogger(path);
     await Promise.all(
@@ -62,6 +70,7 @@ describe('AuditLogger', () => {
 
   it('records only low-sensitivity target structure, never accessible names', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'compliant-firefox-audit-'));
+    directories.push(directory);
     const path = join(directory, 'audit.jsonl');
     const logger = new AuditLogger(path);
 

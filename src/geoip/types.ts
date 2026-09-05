@@ -12,7 +12,7 @@ export interface GeoIpInfo {
 }
 
 export interface GeoAlignmentOptions {
-  /** Target IP address or hostname to match */
+  /** Informational only: no IP/hostname lookup is performed by the country preset aligner. */
   readonly ipOrHost?: string;
   /** Explicit ISO 2-letter country code override, e.g. "US", "JP" */
   readonly countryCode?: string;

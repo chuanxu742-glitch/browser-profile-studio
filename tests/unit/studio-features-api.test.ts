@@ -39,7 +39,7 @@ describe('Studio feature REST wiring', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('connects profile update/clone, healthy proxy rotation and scheduled RPA lifecycle', async () => {
+  it('preserves profile updates, refuses unverified proxy rotation and cancels scheduled RPA', async () => {
     const createProfile = await fetch(`${baseUrl}/profiles`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'source', twoFactorSecret: 'JBSWY3DPEHPK3PXP' }),
     }).then((response) => response.json()) as any;
@@ -59,9 +59,9 @@ describe('Studio feature REST wiring', () => {
     expect((await fetch(`${baseUrl}/proxies/${proxy.data.proxyId}/check`, { method: 'POST' })).status).toBe(200);
     const rotated = await fetch(`${baseUrl}/profiles/${profileId}/rotate-proxy`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tags: ['US'] }),
-    }).then((response) => response.json()) as any;
-    expect(rotated.data.proxy.proxyId).toBe(proxy.data.proxyId);
-    expect(rotated.data.profile.proxy.password).toBeUndefined();
+    });
+    expect(rotated.status).toBe(409);
+    expect(await rotated.json()).toMatchObject({ success: false, code: 'NO_PROXY_AVAILABLE' });
 
     const workflow = await fetch(`${baseUrl}/rpa/workflows`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'first', steps: [{ op: 'snapshot' }] }),

@@ -1,4 +1,5 @@
 import { SessionManager } from '../src/browser/session-manager.js';
+import type { EnvironmentDiagnostics } from '../src/browser/environment-diagnostics.js';
 import { UrlPolicy } from '../src/policy/url-policy.js';
 import { ChallengePolicy } from '../src/challenge/policy.js';
 import { join } from 'node:path';
@@ -85,7 +86,8 @@ async function runBenchmarks() {
   console.log('🧪 启动【公开测试靶场全量在线巡检】');
   console.log('===============================================================');
 
-  const artifactsDir = join(process.cwd(), 'artifacts', 'benchmarks');
+  const startedAt = new Date().toISOString();
+  const artifactsDir = join(process.cwd(), 'artifacts', 'benchmarks', startedAt.replaceAll(':', '-'));
   await mkdir(artifactsDir, { recursive: true });
 
   const manager = new SessionManager({
@@ -172,11 +174,12 @@ async function runBenchmarks() {
   const benchmarkLongitude = Number(process.env.BENCHMARK_LONGITUDE);
   const hasBenchmarkCoordinates = Number.isFinite(benchmarkLatitude) && Number.isFinite(benchmarkLongitude);
   const session = await manager.start({
+    engine: 'chromium',
     headless: process.env.BENCHMARK_HEADLESS !== 'false',
     inputProfile: 'paced',
     fingerprint: true,
     fingerprintSeed: 987654,
-    countryCode: process.env.BENCHMARK_COUNTRY?.trim() || 'US',
+    ...(process.env.BENCHMARK_COUNTRY?.trim() ? { countryCode: process.env.BENCHMARK_COUNTRY.trim() } : {}),
     ...(benchmarkTimezone ? { timezone: benchmarkTimezone } : {}),
     ...(hasBenchmarkCoordinates
       ? { geolocation: { latitude: benchmarkLatitude, longitude: benchmarkLongitude, accuracy: 25 } }
@@ -189,10 +192,16 @@ async function runBenchmarks() {
     category: string;
     focus: string;
     status: 'LOADED' | 'TIMEOUT' | 'NETWORK_ERROR';
+    detectionResult: 'unverified';
+    capturedAt: string;
+    textPath?: string;
+    textTruncated?: boolean;
+    diagnostics?: EnvironmentDiagnostics;
     details: string;
     screenshotPath?: string;
   }> = [];
 
+  try {
   for (const site of BENCHMARK_SITES) {
     console.log(`\n🔍 [${site.category}] 正在测试: ${site.name} (${site.url})...`);
     try {
@@ -200,7 +209,10 @@ async function runBenchmarks() {
       await manager.open(session.sessionId, site.url, { timeoutMs: 45_000, waitUntil: 'domcontentloaded' });
 
       // 提取页面快照文本
-      const snapshot = await manager.snapshot(session.sessionId, { includeText: true, maxChars: 3000 });
+      const snapshot = await manager.snapshot(session.sessionId, { includeText: true, maxChars: 100_000 });
+      const textPath = join(artifactsDir, `${site.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}.txt`);
+      await writeFile(textPath, snapshot.text ?? '', 'utf8');
+      const diagnostics = await manager.environmentDiagnostics(session.sessionId);
       
       // 截取页面屏幕证据
       const screenshot = await manager.screenshot(session.sessionId, { fullPage: false });
@@ -222,6 +234,11 @@ async function runBenchmarks() {
         category: site.category,
         focus: site.focus,
         status: 'LOADED',
+        detectionResult: 'unverified',
+        capturedAt: new Date().toISOString(),
+        textPath,
+        textTruncated: snapshot.textTruncated ?? false,
+        diagnostics,
         details: snippet,
         screenshotPath: imgFilePath,
       });
@@ -234,13 +251,17 @@ async function runBenchmarks() {
         category: site.category,
         focus: site.focus,
         status: msg.includes('timeout') ? 'TIMEOUT' : 'NETWORK_ERROR',
+        detectionResult: 'unverified',
+        capturedAt: new Date().toISOString(),
         details: `网络连接受限: ${msg}`,
       });
     }
   }
 
-  await manager.stop(session.sessionId, 'benchmark_finished');
-  await manager.shutdown();
+  } finally {
+    await manager.shutdown();
+    await writeFile(join(artifactsDir, 'report.json'), JSON.stringify({ startedAt, finishedAt: new Date().toISOString(), results }, null, 2));
+  }
 
   // 输出巡检汇总表格
   console.log('\n===============================================================');
@@ -252,6 +273,7 @@ async function runBenchmarks() {
       评级与分类: r.category.slice(0, 10),
       核心检测重点: r.focus,
       测试状态: r.status,
+      检测结论: r.detectionResult,
     }))
   );
 

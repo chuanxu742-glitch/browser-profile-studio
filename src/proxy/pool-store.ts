@@ -88,8 +88,9 @@ export class ProxyPoolStore {
       || candidate.username !== existing.username
       || candidate.password !== existing.password
       || candidate.bypass !== existing.bypass;
+    const { username: _username, password: _password, bypass: _bypass, ...base } = withoutProxyHealth(existing);
     const updated: ProxyPoolRecord = {
-      ...withoutProxyHealth(existing),
+      ...base,
       server: candidate.server,
       type: candidate.type,
       ...(candidate.username !== undefined ? { username: candidate.username } : {}),
@@ -123,13 +124,18 @@ export class ProxyPoolStore {
     if (!record) throw new Error('PROXY_NOT_FOUND');
 
     const result = await this.checker(record);
+    // A probe belongs to the exact snapshot it started with. Never resurrect a
+    // deleted proxy or overwrite a newer configuration/check with stale egress.
+    const current = this.records.get(proxyId);
+    if (!current) throw new Error('PROXY_NOT_FOUND');
+    if (current !== record) return cloneProxy(current);
     const now = this.clock();
 
     let failures = record.consecutiveFailures ?? 0;
     let successes = record.consecutiveSuccesses ?? 0;
     let quarantineUntil = record.quarantineUntil;
 
-    if (result.success) {
+    if (result.success && result.verified === true) {
       failures = 0;
       if (quarantineUntil !== undefined && now < quarantineUntil) {
         successes = 0;
@@ -139,7 +145,7 @@ export class ProxyPoolStore {
           quarantineUntil = undefined;
         }
       }
-    } else {
+    } else if (!result.success) {
       successes = 0;
       failures += 1;
       const threshold = 3;
@@ -149,6 +155,9 @@ export class ProxyPoolStore {
         const cooldown = Math.min(max, base * (2 ** (failures - threshold)));
         quarantineUntil = now + cooldown;
       }
+    } else {
+      // A reachable socket or completed handshake is not a recovery proof.
+      successes = 0;
     }
 
     const updated: ProxyPoolRecord = {
@@ -166,9 +175,9 @@ export class ProxyPoolStore {
   }
 
   public async next(tags: readonly string[] = []): Promise<ProxyPoolRecord | undefined> {
-    const now = this.clock();
     const records = (await this.list()).filter((record) => record.enabled
       && record.lastCheck?.success === true
+      && record.lastCheck.verified === true
       && record.quarantineUntil === undefined
       && tags.every((tag) => record.tags.includes(tag)));
     if (!records.length) return undefined;

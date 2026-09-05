@@ -28,7 +28,7 @@ const observed = {
 };
 
 describe('environment diagnostics', () => {
-  it('reports a consistent browser surface without exposing page content', () => {
+  it('does not certify network or native integrity from identity fields alone', () => {
     const result = buildEnvironmentDiagnostics({
       sessionId: 'ses_diagnostics_1234',
       engine: 'firefox',
@@ -37,8 +37,12 @@ describe('environment diagnostics', () => {
       observed,
     });
 
-    expect(result.consistency).toBe('consistent');
-    expect(result.checks.every((check) => check.status === 'pass')).toBe(true);
+    expect(result.consistency).toBe('warning');
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'webrtc-policy', status: 'warning' }),
+      expect.objectContaining({ id: 'native-integrity', status: 'warning' }),
+      expect.objectContaining({ id: 'user-agent', status: 'pass' }),
+    ]));
     expect(result).not.toHaveProperty('url');
     expect(result).not.toHaveProperty('cookies');
     expect(result).not.toHaveProperty('content');
@@ -85,7 +89,7 @@ describe('environment diagnostics', () => {
     ]));
   });
 
-  it('reports consistent when object integrity check passes cleanly', () => {
+  it('keeps network verification unknown even when measured object checks pass', () => {
     const result = buildEnvironmentDiagnostics({
       sessionId: 'ses_diagnostics_1234',
       engine: 'firefox',
@@ -103,7 +107,7 @@ describe('environment diagnostics', () => {
       },
     });
 
-    expect(result.consistency).toBe('consistent');
+    expect(result.consistency).toBe('warning');
     expect(result.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'navigator-prototype-integrity', status: 'pass' }),
       expect.objectContaining({ id: 'function-tostring-integrity', status: 'pass' }),
@@ -120,5 +124,48 @@ describe('environment diagnostics', () => {
 
     expect(result.consistency).toBe('warning');
     expect(result.checks).toEqual([expect.objectContaining({ id: 'runtime-surface', status: 'warning' })]);
+  });
+
+  it('does not pass expected identity fields when observations are missing', () => {
+    const result = buildEnvironmentDiagnostics({ sessionId: 'missing', engine: 'chromium', headless: true, expected, observed: {} });
+    expect(result.checks.some(check => check.status === 'pass')).toBe(false);
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'webgl', status: 'warning' }),
+      expect.objectContaining({ id: 'languages', status: 'warning' }),
+      expect.objectContaining({ id: 'hardware-concurrency', status: 'warning' }),
+    ]));
+  });
+
+  it('does not certify WebGL when no comparable vendor or renderer is configured', () => {
+    const result = buildEnvironmentDiagnostics({
+      sessionId: 'empty-webgl', engine: 'chromium', headless: true,
+      expected: { webgl: {} }, observed: {},
+    });
+    expect(result.checks).toContainEqual(expect.objectContaining({ id: 'webgl', status: 'warning' }));
+  });
+
+  it('keeps partial integrity probes unknown instead of certifying missing observations', () => {
+    const result = buildEnvironmentDiagnostics({
+      sessionId: 'partial-integrity', engine: 'chromium', headless: true,
+      expected: {}, observed: { integrity: { hasNavigatorInstancePollution: false } },
+    });
+    expect(result.consistency).toBe('warning');
+    expect(result.checks.filter(check => check.id.includes('integrity') || check.id === 'webgl-function-shape'))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'navigator-prototype-integrity', status: 'warning' }),
+        expect.objectContaining({ id: 'function-tostring-integrity', status: 'warning' }),
+        expect.objectContaining({ id: 'navigator-tostring-integrity', status: 'warning' }),
+        expect.objectContaining({ id: 'webgl-function-shape', status: 'warning' }),
+      ]));
+    expect(result.checks.some(check => check.status === 'pass' || check.status === 'fail')).toBe(false);
+  });
+
+  it('does not let a negative summary hide observed navigator pollution', () => {
+    const result = buildEnvironmentDiagnostics({
+      sessionId: 'contradictory-integrity', engine: 'chromium', headless: true,
+      expected: {}, observed: { integrity: { hasNavigatorInstancePollution: false, pollutedNavigatorProps: ['userAgent'] } },
+    });
+    expect(result.consistency).toBe('inconsistent');
+    expect(result.checks).toContainEqual(expect.objectContaining({ id: 'navigator-prototype-integrity', status: 'fail' }));
   });
 });

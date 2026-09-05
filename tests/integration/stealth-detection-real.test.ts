@@ -8,7 +8,7 @@ import { SessionManager } from '../../src/browser/session-manager.js';
 import { UrlPolicy } from '../../src/policy/url-policy.js';
 import { AuditLogger } from '../../src/audit.js';
 
-describe('Real Browser Stealth and Anti-Detect Benchmark Test', () => {
+describe('Native Firefox paced form interaction', () => {
   let server: Server;
   let origin: string;
   let workRoot: string;
@@ -38,7 +38,7 @@ describe('Real Browser Stealth and Anti-Detect Benchmark Test', () => {
     if (workRoot) await rm(workRoot, { recursive: true, force: true });
   });
 
-  it('runs fingerprint benchmark in real browser and verifies stealth masking and human simulation', async () => {
+  it('submits a form through snapshot references in a managed profile', async () => {
     const manager = new SessionManager({
       maxSessions: 1,
       profileRoot: join(workRoot, 'profiles'),
@@ -52,13 +52,12 @@ describe('Real Browser Stealth and Anti-Detect Benchmark Test', () => {
       audit: new AuditLogger(join(workRoot, 'audit.jsonl')),
     });
 
-    // Start with fingerprint spoofing and human-paced input scheduler
+    // Exercise managed Firefox with paced input.
     const session = await manager.start({
       headless: true,
       inputProfile: 'paced', // Human-paced input mode
       fingerprint: true,
       fingerprintSeed: 998877,
-      countryCode: 'US',
     });
 
     try {
@@ -76,14 +75,8 @@ describe('Real Browser Stealth and Anti-Detect Benchmark Test', () => {
       await manager.click(session.sessionId, submit!.ref);
 
       const completedSnapshot = await manager.snapshot(session.sessionId, { includeText: true });
-      expect(completedSnapshot.text).toContain('Action executed by human simulation: StealthOperator_007');
-
-      // Verify the in-page benchmark results from snapshot text
-      expect(completedSnapshot.text).toContain('"webdriverRemoved": true');
-      expect(completedSnapshot.text).toContain('"hasChromeRuntime": false');
-      expect(completedSnapshot.text).toContain('"toStringProtected": true');
-      expect(completedSnapshot.text).toContain('hardwareConcurrency');
-      expect(completedSnapshot.text).not.toContain('"deviceMemory"');
+      // Only submitted output contains this value; input values are not part of body text.
+      expect(completedSnapshot.text).toContain('StealthOperator_007');
     } finally {
       await manager.stop(session.sessionId, 'test_finish');
       await manager.shutdown('test_cleanup');

@@ -15,7 +15,7 @@ describe('Durable Saved-Account Login State', () => {
   });
 
   afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
+    await rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
 
   it('restores and atomically checkpoints storage state, with encryption and corrupt-primary backup recovery', async () => {
@@ -75,8 +75,11 @@ describe('Durable Saved-Account Login State', () => {
       onStorageStatePersist: resolvePersisted,
     });
 
-    await session1.start();
-    await session1.stop();
+    try {
+      await session1.start();
+    } finally {
+      await session1.stop();
+    }
 
     const persistedState = await persisted;
     expect(persistedState.cookies.find((cookie) => cookie.name === 'test_cookie')).toBeDefined();

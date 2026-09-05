@@ -399,6 +399,9 @@ export class SessionManager {
     }
 
     if (effectiveFingerprint === true && savedProfile) {
+      if (savedProfile.fingerprint?.generationVersion !== 2) {
+        throw new BrowserSessionError('BROWSER_LAUNCH_FAILED', 'PROFILE_MIGRATION_REQUIRED: explicitly upgrade this legacy profile to generationVersion 2 before launching the revised identity');
+      }
       effectiveFingerprint = fingerprintForSavedProfile(
         savedProfile,
         effectiveFingerprintSeed ?? stableProfileSeed(savedProfile.profileId),
@@ -418,7 +421,7 @@ export class SessionManager {
     if (effectiveProxy && effectiveFingerprint && !geoTimezone) {
       throw new BrowserSessionError(
         'INVALID_ARGUMENT',
-        'Proxy-backed fingerprint sessions require an explicit IANA timezone matching the verified proxy exit',
+        'Proxy-backed fingerprint sessions require an explicit IANA timezone; an explicit value is not proof of verified egress',
       );
     }
 
@@ -469,10 +472,8 @@ export class SessionManager {
       ...(geoCountry !== undefined ? { countryCode: geoCountry } : {}),
       ...(geoAlignment ? {
         timezoneId: geoAlignment.timezoneId,
-        locale: geoAlignment.locale,
-        geolocation: geoAlignment.geolocation,
-        permissions: ['geolocation'],
-        extraHTTPHeaders: geoAlignment.extraHeaders,
+        ...(geoLocale !== undefined ? { locale: geoAlignment.locale } : {}),
+        ...(geoLoc ? { geolocation: geoLoc, permissions: ['geolocation'] } : {}),
       } : {}),
       ...(effectiveUserAgent !== undefined ? { userAgent: effectiveUserAgent } : {}),
       ...(effectiveFingerprint !== undefined ? { fingerprint: effectiveFingerprint } : {}),
@@ -1311,9 +1312,14 @@ function fingerprintForSavedProfile(
   countryCode?: string,
 ): UnifiedFingerprintProfile {
   const settings = profile.fingerprint;
+  if (settings?.generationVersion !== 2) {
+    throw new BrowserSessionError('INVALID_STATE', 'FINGERPRINT_MIGRATION_REQUIRED: explicitly update this profile fingerprint to generationVersion=2 before launching; existing identity has not been changed');
+  }
   const generated = generateFingerprint({
     seed,
     engine,
+    hardwareConcurrency: settings.hardwareConcurrency,
+    deviceMemory: settings.deviceMemory,
     ...(settings?.os !== undefined ? { os: settings.os } : {}),
     ...(countryCode !== undefined ? { countryCode } : {}),
   });
@@ -1338,10 +1344,6 @@ function fingerprintForSavedProfile(
     },
     hardware: {
       ...generated.hardware,
-      ...(settings?.hardwareConcurrency !== undefined
-        ? { hardwareConcurrency: settings.hardwareConcurrency }
-        : {}),
-      ...(settings?.deviceMemory !== undefined ? { deviceMemory: settings.deviceMemory } : {}),
       screenWidth: screen.width,
       screenHeight: screen.height,
       availWidth: screen.availWidth,

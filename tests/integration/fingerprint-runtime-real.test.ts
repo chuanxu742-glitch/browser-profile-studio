@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { BrowserContext } from 'playwright';
 import { launchPersistentChromium } from '../../src/browser/chromium-launcher.js';
 import { launchPersistentFirefox } from '../../src/browser/firefox-launcher.js';
-import { generateFingerprint } from '../../src/fingerprint/generator.js';
+import { generateFingerprint, HOST_OS } from '../../src/fingerprint/generator.js';
 import { managedBrowserIdentity } from '../../src/fingerprint/runtime-identity.js';
 import { buildStealthInjectionScript } from '../../src/fingerprint/stealth-scripts.js';
 
@@ -64,22 +65,22 @@ realRuntime('real managed fingerprint runtime identity', () => {
   for (const engine of ['firefox', 'chromium'] as const) {
     it(`keeps ${engine} core version, UA and exposed capabilities aligned`, async () => {
       const root = await mkdtemp(join(tmpdir(), `fingerprint-${engine}-`));
-      const os = engine === 'chromium' ? 'linux' : 'windows';
-      const fingerprint = generateFingerprint({ seed: 20260901, engine, os, countryCode: 'US' });
+      const fingerprint = generateFingerprint({ seed: 20260901, engine, os: HOST_OS, countryCode: 'US', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+      const uaDataPlatform = HOST_OS === 'windows' ? 'Windows' : HOST_OS === 'macos' ? 'macOS' : 'Linux';
       const launch = engine === 'firefox' ? launchPersistentFirefox : launchPersistentChromium;
-      const context = await launch(join(root, 'profile'), {
-        headless: true,
-        viewport: fingerprint.viewport,
-        timezoneId: fingerprint.geo.timezoneId,
-        locale: fingerprint.geo.locale,
-        geolocation: fingerprint.geo.geolocation,
-        permissions: ['geolocation'],
-        userAgent: fingerprint.userAgent,
-        initScript: buildStealthInjectionScript(fingerprint),
-        fingerprintProfile: fingerprint,
-      }) as any;
-
+      let context: BrowserContext | undefined;
       try {
+        context = await launch(join(root, 'profile'), {
+          headless: true,
+          viewport: fingerprint.viewport,
+          timezoneId: fingerprint.geo.timezoneId,
+          locale: fingerprint.geo.locale,
+          geolocation: fingerprint.geo.geolocation,
+          permissions: ['geolocation'],
+          userAgent: fingerprint.userAgent,
+          initScript: buildStealthInjectionScript(fingerprint),
+          fingerprintProfile: fingerprint,
+        }) as unknown as BrowserContext;
         const page = await context.newPage();
         const insecureHasUserAgentData = await page.evaluate(() => 'userAgentData' in navigator);
         await page.goto(`${origin}/${engine}`);
@@ -128,26 +129,26 @@ realRuntime('real managed fingerprint runtime identity', () => {
         if (engine === 'chromium') {
           expect(insecureHasUserAgentData).toBe(false);
           expect(observed.hasUserAgentData).toBe(true);
-          expect(observed.uaDataPlatform).toBe('Linux');
+          expect(observed.uaDataPlatform).toBe(uaDataPlatform);
           expect(observed.brands).toContainEqual({ brand: 'Chromium', version: managedBrowserIdentity(engine).majorVersion });
           expect(observed.brands?.some((brand: { brand: string }) => brand.brand.includes('Headless'))).toBe(false);
           expect(observed.highEntropy).toMatchObject({ uaFullVersion: managedBrowserIdentity(engine).fullVersion });
           expect(observed.workerIdentity).toMatchObject({
             userAgent: fingerprint.userAgent,
             platform: fingerprint.platform,
-            uaDataPlatform: 'Linux',
+            uaDataPlatform,
             uaFullVersion: managedBrowserIdentity(engine).fullVersion,
           });
           expect(serviceWorkerIdentity).toMatchObject({
             userAgent: fingerprint.userAgent,
             platform: fingerprint.platform,
-            uaDataPlatform: 'Linux',
+            uaDataPlatform,
             highEntropy: { uaFullVersion: managedBrowserIdentity(engine).fullVersion },
           });
           const networkHeaders = requests.filter((request) => request.url === '/chromium').at(-1)?.headers;
           expect(networkHeaders?.['sec-ch-ua']).not.toContain('Headless');
           expect(networkHeaders?.['sec-ch-ua']).toContain(`"Chromium";v="${managedBrowserIdentity(engine).majorVersion}"`);
-          expect(networkHeaders?.['sec-ch-ua-platform']).toBe('"Linux"');
+          expect(networkHeaders?.['sec-ch-ua-platform']).toBe(JSON.stringify(uaDataPlatform));
           expect(networkHeaders?.['sec-ch-ua-full-version-list']).toContain(managedBrowserIdentity(engine).fullVersion);
           expect(requests.filter((request) => request.url === '/sw.js').at(-1)?.headers['user-agent']).toBe(fingerprint.userAgent);
           expect(requests.filter((request) => request.url === '/from-service-worker').at(-1)?.headers['user-agent']).toBe(fingerprint.userAgent);
@@ -159,14 +160,14 @@ realRuntime('real managed fingerprint runtime identity', () => {
             languages: fingerprint.geo.languages,
             hardwareConcurrency: fingerprint.hardware.hardwareConcurrency,
           });
-          expect(serviceWorkerIdentity.timezone).toEqual(expect.any(String));
+          expect(serviceWorkerIdentity.timezone).toBe(fingerprint.geo.timezoneId);
           expect(requests.filter((request) => request.url === '/sw.js').at(-1)?.headers['user-agent']).toBe(fingerprint.userAgent);
           expect(requests.filter((request) => request.url === '/from-service-worker').at(-1)?.headers['user-agent']).toBe(fingerprint.userAgent);
           expect(requests.filter((request) => request.url === '/from-service-worker').at(-1)?.headers['accept-language']).toContain('en-US');
         }
       } finally {
-        await context.close();
-        await rm(root, { recursive: true, force: true });
+        try { await context?.close(); }
+        finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
       }
     }, 45_000);
   }

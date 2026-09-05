@@ -1829,7 +1829,7 @@ function publicProfile(profile: unknown): Record<string, unknown> {
 }
 
 function publicProxy(proxy: any): Record<string, unknown> {
-  const health = proxy.lastCheck ? (proxy.lastCheck.verified ? 'verified' : proxy.lastCheck.success ? 'reachable' : 'unhealthy') : 'unknown';
+  const health = proxy.lastCheck ? (proxy.lastCheck.verified ? 'verified' : proxy.lastCheck.checkLevel === 'handshake' ? 'handshake' : proxy.lastCheck.success ? 'reachable' : 'unhealthy') : 'unknown';
   return { ...proxy, password: undefined, hasPassword: Boolean(proxy.password), health };
 }
 function optionalQueryTimestamp(raw: string | null): number | undefined {
