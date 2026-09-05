@@ -34,6 +34,52 @@ npm run studio
 
 首次启动会在 `data/` 创建本机主密钥和 owner token，并通过一次性启动链接写入 HttpOnly Cookie。Windows 上两个启动机密以当前用户 DPAPI 密文保存，旧明文启动文件会自动迁移；业务密文仍使用 AES-256-GCM。可用 `STUDIO_MASTER_KEY`、`STUDIO_ACCESS_TOKEN` 和 `STUDIO_USERS_JSON` 接入外部 KMS 或配置静态多角色凭据。`data/` 必须作为敏感目录备份与保护；主密钥丢失后已有密文无法恢复。
 
+### Windows 未签名 source+build 测试包
+
+仓库的 **Unsigned Windows test package** GitHub Actions 工作流只能从 `main` 手动触发，
+操作入口：**Actions → Unsigned Windows test package → Run workflow**，选择 `main`；
+成功后由维护者在 **Releases** 查看草稿与下载资产。
+在标准 Windows 托管 runner 上构建并解压验证后，创建 **draft + prerelease**；不会创建公开稳定版，
+也不会从 PR 发布。草稿仅对有权限的仓库维护者可见。所有工作流使用公开仓库标准托管 runner，
+不需要付费证书、自托管 runner 或外部部署。
+为避免 Actions artifact/cache 存储额度可能产生费用，所有工作流不使用 Actions artifact
+上传/下载或依赖缓存；运行证明通过日志/步骤摘要提供，分发与截图直接作为 GitHub Release assets 保存。
+
+此 ZIP 是 **源码 + `dist/` 开发者测试包，不是安装器、独立 EXE 或离线发行版**。
+需要 Windows x64、PATH 中的 Node.js 22 LTS/npm，以及访问 npm 和 Playwright 下载站点的网络。
+解压到可写目录后，在该目录运行：
+
+```powershell
+npm ci
+npm run install:browsers
+npm run studio
+```
+
+`npm ci` 必须包含开发依赖：现有 Studio 入口 `scripts/start-studio.ts` 通过 `tsx` 加载 `src/`。
+完成依赖与浏览器安装后，也可双击包内 `start-browser-studio.bat`；自动桌面窗口需要本机
+Edge/Chrome 或已配置的默认浏览器。不要只复制 `dist/` 后声称可以运行 Studio UI。
+首次启动的本地鉴权与 `data/` 保护要求同上；不要把运行后的目录重新打包上传。
+
+包内包含 `public/` UI、源码/脚本/测试/文档、构建产物、锁定的 npm 清单、浏览器桥接扩展、
+定制 Firefox 的源码补丁与 core lock，以及 `LICENSE`、`NOTICE`、第三方声明。
+不包含 Node、npm 依赖、浏览器二进制、`Launcher.exe`、自定义内核构建、用户 Profile 或凭据。
+`INSTALL-WINDOWS.txt` 记录首次运行步骤，`RELEASE-METADATA.json` 记录版本与源提交，
+`PACKAGE-CONTENTS.sha256` 列出文件摘要；使用 `Get-FileHash -Algorithm SHA256 <下载的ZIP>`
+与同一 Release 的 `SHA256SUMS.txt` 比较。摘要不是数字签名，不能代替发布者身份验证。
+
+默认下载项目锁定的 stock Playwright Firefox/Chromium；不能任意替换内核版本。
+**Firefox 深层 Worker Canvas 一致性仍为 NOT PASSED**；基本启动、UI、页面导航或 CI 成功
+不代表定制内核、完整指纹、生产网络、登录或长期稳定性已经验收。常规 integration 的 opt-in
+用例仍可能跳过；Windows CI 另显式运行 `test:firefox` 和 `test:fingerprint-runtime`，
+保留真实 Worker 诊断。手动发布会在独立解压目录执行首次安装，并验证真实 Studio UI、
+鉴权、两个引擎的 Profile 启动/导航/停止；脱敏运行 JSON 与 UI 截图同分发文件保存在 GitHub Release，
+不上传 Studio 日志、`data/` 或凭据。CI 的真实 Worker 诊断保存在运行日志与步骤摘要中。
+
+依赖维护采用每周 Dependabot npm / GitHub Actions PR，minor/patch 分组并限制并发 PR 数；
+Playwright 不加入普通 npm 分组，内核相关更新必须人工核对 core lock 和真实运行回归。
+不启用自动合并。CodeQL 使用独立 JS/TS 工作流，不能同时开启重复的 default setup；
+初次扫描结果需要人工分流，扫描完成不等于没有安全问题。
+
 ### Studio 产品 API
 
 Studio API 默认只监听 `127.0.0.1`，除 `/api/v1/health` 外均需认证。主要端点包括：

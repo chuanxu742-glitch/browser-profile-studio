@@ -102,10 +102,16 @@ realRuntime('real managed fingerprint runtime identity', () => {
     it(`keeps ${engine} first-script identities, transport and native API contracts aligned`, async () => {
       const root = await mkdtemp(join(tmpdir(), `fingerprint-${engine}-`));
       // Stock Firefox can expose native service workers only in the host timezone.
-      const fingerprint = generateFingerprint({
+      const generated = generateFingerprint({
         seed: 20260905, engine, os: engine === 'chromium' ? 'linux' : 'windows', countryCode: 'US',
         ...(engine === 'firefox' ? { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } : {}),
       });
+      // Stock Firefox's native worker CPU preference is capped by the host.
+      // Use a realizable two-core test profile on standard hosted runners,
+      // without changing the generator or weakening observed realm assertions.
+      const fingerprint = engine === 'firefox'
+        ? { ...generated, hardware: { ...generated.hardware, hardwareConcurrency: 2 } }
+        : generated;
       const launch = engine === 'firefox' ? launchPersistentFirefox : launchPersistentChromium;
       let context: BrowserContext | undefined;
       try {

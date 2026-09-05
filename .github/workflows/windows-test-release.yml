@@ -1,0 +1,74 @@
+name: Unsigned Windows test package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-windows-test-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run build
+      - name: Package committed source and built runtime
+        shell: pwsh
+        run: ./scripts/package-windows-test.ps1 -OutputDirectory "$env:RUNNER_TEMP/distribution"
+      - name: Extract and install as a first-time user
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem "$env:RUNNER_TEMP/distribution/*.zip"
+          if (@($zip).Count -ne 1) { throw 'Expected one distribution ZIP.' }
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath "$env:RUNNER_TEMP/extracted"
+          $package = Get-ChildItem "$env:RUNNER_TEMP/extracted" -Directory
+          if (@($package).Count -ne 1) { throw 'Expected one extracted package root.' }
+          "EXTRACTED_PACKAGE=$($package.FullName)" >> $env:GITHUB_ENV
+          Set-Location $package.FullName
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'First-run npm ci failed.' }
+          npm run install:browsers
+          if ($LASTEXITCODE -ne 0) { throw 'First-run browser installation failed.' }
+      - name: Exercise extracted Studio UI and both stock browsers
+        shell: pwsh
+        run: node scripts/smoke-windows-package.mjs "$env:EXTRACTED_PACKAGE" "$env:RUNNER_TEMP/package-smoke"
+      - name: Report sanitized runtime proof
+        shell: pwsh
+        run: |
+          $json = Get-Content "$env:RUNNER_TEMP/package-smoke/runtime-smoke.json" -Raw
+          Write-Output $json
+          $json >> $env:GITHUB_STEP_SUMMARY
+      - name: Create unsigned draft prerelease with direct assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: pwsh
+        run: |
+          $metadata = Get-Content "$env:RUNNER_TEMP/distribution/RELEASE-METADATA.json" -Raw | ConvertFrom-Json
+          $tag = "test/windows-unsigned-$env:RUN_ID-$env:RUN_ATTEMPT"
+          $assets = @((Get-ChildItem "$env:RUNNER_TEMP/distribution" -File).FullName)
+          $assets += "$env:RUNNER_TEMP/package-smoke/runtime-smoke.json"
+          $assets += "$env:RUNNER_TEMP/package-smoke/studio-dashboard.png"
+          $assets += "$env:RUNNER_TEMP/package-smoke/studio-ui.png"
+          gh release create $tag @assets --target "$env:SOURCE_COMMIT" --draft --prerelease --title "UNSIGNED Windows source+build test package $($metadata.applicationVersion) ($env:RUN_ID.$env:RUN_ATTEMPT)" --notes-file "$env:RUNNER_TEMP/distribution/INSTALL-WINDOWS.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'Draft prerelease creation failed.' }
+          "Created draft prerelease: $tag (unsigned source+build test package; no Actions artifact/cache storage)" >> $env:GITHUB_STEP_SUMMARY
