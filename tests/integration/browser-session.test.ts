@@ -267,6 +267,52 @@ describe('BrowserSession lifecycle', () => {
     expect(session.status().state).toBe('STOPPED');
     expect((await session.stop()).state).toBe('STOPPED');
   });
+
+  it('aborts the first unsafe action but keeps paused screenshots readable during repeated challenge events', async () => {
+    const workRoot = await mkdtemp(join(tmpdir(), 'browser-session-challenge-events-'));
+    let wheelCalls = 0;
+    class ChallengeEventPage extends FakePage {
+      public mouse = { wheel: async () => { wheelCalls += 1; } };
+      public override async screenshot(): Promise<Buffer> {
+        for (const event of ['domcontentloaded', 'load', 'frameattached']) {
+          this.emit(event);
+          await flushAsyncEvent();
+        }
+        return super.screenshot();
+      }
+    }
+    const page = new ChallengeEventPage();
+    const scheduler = new DirectScheduler();
+    const pauseBefore = scheduler.pauseBefore.bind(scheduler);
+    scheduler.pauseBefore = async (action, signal) => {
+      await page.goto('https://challenges.cloudflare.com/fixture');
+      page.emit('load');
+      await flushAsyncEvent();
+      return pauseBefore(action, signal);
+    };
+    const session = new BrowserSession({
+      headless: true,
+      profileRoot: join(workRoot, 'profiles'),
+      artifactsRoot: join(workRoot, 'artifacts'),
+      launcher: { launchPersistentContext: async () => new FakeContext(page) },
+      scheduler,
+      urlPolicy: { assertAllowed: () => true },
+    });
+    try {
+      await session.start();
+      await expect(session.scroll('down', 1)).rejects.toMatchObject({ code: 'SESSION_PAUSED_CHALLENGE' });
+      expect(wheelCalls).toBe(0);
+      expect(session.status().state).toBe('PAUSED_CHALLENGE');
+
+      const screenshot = await session.screenshot();
+      expect(screenshot.image).toEqual({ mimeType: 'image/png', data: Buffer.from('fixture-png').toString('base64') });
+      expect(session.status().state).toBe('PAUSED_CHALLENGE');
+    } finally {
+      await session.stop();
+      await rm(workRoot, { recursive: true, force: true });
+    }
+  });
+
   it('brings headed pages to the foreground after launch', async () => {
     const page = new FakePage();
     const session = new BrowserSession({

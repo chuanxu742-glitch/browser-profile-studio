@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +32,7 @@ describe('Local REST API Server Unit Tests', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await server.stop();
     await manager.shutdown();
     await rm(tempDir, { recursive: true, force: true });
@@ -43,6 +44,34 @@ describe('Local REST API Server Unit Tests', () => {
     const json = await res.json();
     expect(json.success).toBe(true);
     expect(json.data.status).toBe('healthy');
+  });
+
+  it('keeps internal exceptions out of live-view, interaction, and resume responses', async () => {
+    const privateTrace = 'Error: secret-token at C:\\private\\browser-profile\\session.js:42:7';
+    vi.spyOn(manager, 'status').mockImplementation(() => { throw new Error(privateTrace); });
+    vi.spyOn(manager, 'dispatchDirectMouse').mockRejectedValue(privateTrace);
+    vi.spyOn(manager, 'resume').mockRejectedValue({ toString: () => privateTrace });
+    const routes = [
+      { path: 'live-view', method: 'GET', status: 500, code: 'SCREENSHOT_FAILED' },
+      { path: 'interact', method: 'POST', status: 500, code: 'INTERACTION_FAILED' },
+      { path: 'resume', method: 'POST', status: 400, code: 'RESUME_FAILED' },
+    ];
+
+    for (const route of routes) {
+      const response = await fetch(`${baseUrl}/api/v1/sessions/private-session/${route.path}`, {
+        method: route.method,
+        ...(route.method === 'POST' ? {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'mouse', humanConfirmed: true }),
+        } : {}),
+      });
+      expect(response.status).toBe(route.status);
+      const text = await response.text();
+      expect(JSON.parse(text)).toMatchObject({ success: false, code: route.code });
+      for (const secret of ['secret-token', 'browser-profile', 'session.js', '42:7']) {
+        expect.soft(text).not.toContain(secret);
+      }
+    }
   });
 
   it('should create, get, list and delete profiles via REST API', async () => {
