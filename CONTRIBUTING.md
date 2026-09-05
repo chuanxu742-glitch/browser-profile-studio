@@ -23,3 +23,17 @@ npm run test:fingerprint-runtime
 ```
 
 Keep runtime profiles, cookies, credentials, screenshots, browser binaries and signing material outside Git. The repository `.gitignore` excludes the standard local locations, but contributors remain responsible for reviewing every staged file before committing.
+
+## Main branch and pull requests
+
+After the initial hosted CI and unsigned-package verification, `main` is protected.
+Create a branch and open a pull request; do not push directly or force-push to `main`.
+Before merging, update the branch to the current `main`, resolve all review conversations,
+and wait for the required `verify`, `firefox`, and `windows` checks to pass.
+The solo-maintainer policy requires a pull request but zero approving reviews.
+CodeQL results still require security triage; they are not an initial required-check lockout.
+
+Windows CI explicitly runs both `test:firefox` and `test:fingerprint-runtime` in addition
+to the normal integration suite. Skipped opt-in cases and Firefox Worker Canvas
+`NOT PASSED` diagnostics are not production acceptance. Playwright and custom-core
+updates require manual runtime compatibility review; Dependabot PRs are not auto-merged.
