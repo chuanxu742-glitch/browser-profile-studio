@@ -45,6 +45,9 @@ export interface DistributedTaskDefinition {
   extractionSchema?: ExtractionSchema | undefined;
   maxRetries?: number | undefined;
   timeoutMs?: number | undefined;
+  profileId?: string | undefined;
+  proxyId?: string | undefined;
+  accountGroup?: string | undefined;
 }
 
 export interface DistributedTaskRecord {
@@ -72,6 +75,11 @@ export interface DistributedTaskRecord {
   errorCode?: string | undefined;
   durationMs?: number | undefined;
   events?: TaskEvent[] | undefined;
+  profileId?: string | undefined;
+  proxyId?: string | undefined;
+  accountGroup?: string | undefined;
+  targetWorkerId?: string | undefined;
+  placementGeneration?: number | undefined;
 }
 
 export interface TaskListFilter {
@@ -99,6 +107,7 @@ export interface WorkerNodeInfo {
   activeTasks: number;
   healthy: boolean;
   lastHeartbeat: number;
+  storageNamespace?: string | undefined;
 }
 
 export interface ClusterStatus {

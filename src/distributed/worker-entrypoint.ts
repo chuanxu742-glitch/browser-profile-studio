@@ -1,5 +1,6 @@
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Cluster, Redis } from 'ioredis';
 
 import { AuditLogger } from '../audit.js';
 import { loadConfig } from '../config.js';
@@ -8,6 +9,15 @@ import { RedisQueueAdapter } from './redis-adapter.js';
 import { WorkerDaemon } from './worker-daemon.js';
 import { UrlPolicy } from '../policy/url-policy.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from './tenant.js';
+import { AccountAdmissionController } from '../operations/account-admission.js';
+import { AccountMetrics, DefaultClock } from '../operations/account-metrics.js';
+import { ProfileStore } from '../profile/profile-store.js';
+import { VersionedCheckpointStore } from '../profile/versioned-checkpoint-store.js';
+import { AccountHealthStore } from '../account/account-health-store.js';
+import { SecretVault } from '../security/secret-vault.js';
+import { loadOrCreatePlatformSecret } from '../security/platform-secret.js';
+import { RedisLeaseManager } from './profile-lease.js';
+import { RedisSharedAccountStateStore, type AccountPlacementRecord } from './account-placement.js';
 
 function boundedConcurrency(raw: string | undefined): number {
   if (raw === undefined || !/^\d+$/.test(raw)) return 1;
@@ -24,25 +34,57 @@ function configuredTenants(raw: string | undefined): readonly string[] {
 export async function startWorker(): Promise<WorkerDaemon> {
   const config = loadConfig();
   const urlPolicy = new UrlPolicy(config);
+  const metrics = new AccountMetrics();
+  metrics.addAlertRule({ id: 'high_checkpoint_failures', metric: 'checkpoint_failures', threshold: 5, windowMs: 15 * 60_000 });
+  metrics.addAlertRule({ id: 'high_proxy_quarantine', metric: 'proxy_quarantine', threshold: 10, windowMs: 15 * 60_000 });
+  const profileRoot = join(config.dataDir, 'profiles');
+  const secret = process.env.BROWSER_MASTER_KEY
+    ?? process.env.STUDIO_MASTER_KEY
+    ?? await loadOrCreatePlatformSecret(join(config.dataDir, '.worker-master-key'));
+  const vault = new SecretVault(secret);
+  const profileStore = new ProfileStore(profileRoot, { vault });
+  await profileStore.init();
+  const checkpointStore = new VersionedCheckpointStore(join(config.dataDir, 'checkpoints'), { vault });
+  const accountHealthStore = new AccountHealthStore(profileStore);
+  const adapter = new RedisQueueAdapter({ redisUrl: process.env.REDIS_URL });
+  const placementStore = new RedisSharedAccountStateStore<AccountPlacementRecord>(
+    adapter.underlyingRedisClient as Redis | Cluster,
+  );
   const sessionManager = new SessionManager({
     maxSessions: config.maxSessions,
     ...(config.sessionTtlMs !== undefined ? { sessionTtlMs: config.sessionTtlMs } : {}),
     ...(config.workspaceTtlMs !== undefined ? { workspaceTtlMs: config.workspaceTtlMs } : {}),
     policyProfile: config.automationPolicy,
-    profileRoot: join(config.dataDir, 'profiles'),
+    persistentProfile: config.persistentProfiles,
+    profileRoot,
     artifactsRoot: join(config.dataDir, 'artifacts'),
+    profileStore,
+    checkpointStore,
+    checkpointIntervalMs: config.checkpointIntervalMs,
+    accountHealthStore,
+    accountMetrics: metrics,
+    profileLeaseManager: new RedisLeaseManager(adapter.underlyingRedisClient as Redis | Cluster),
     urlPolicy,
     audit: new AuditLogger(config.auditPath),
     defaultTimeoutMs: config.timeoutMs,
+    cluster: false,
   });
-  const adapter = new RedisQueueAdapter({ redisUrl: process.env.REDIS_URL });
+  const admissionController = new AccountAdmissionController(DefaultClock, {
+    concurrency: { tenant: 100, account: 5, domain: 10, proxy: 50 },
+    rateLimit: { burst: 200, ratePerSecond: 10 },
+  });
+
   const worker = new WorkerDaemon({
     workerId: process.env.WORKER_ID,
     concurrency: boundedConcurrency(process.env.WORKER_CONCURRENCY),
     allowedTenants: configuredTenants(process.env.WORKER_TENANTS),
+    storageNamespace: process.env.WORKER_STORAGE_NAMESPACE,
     adapter,
     sessionManager,
     urlPolicy,
+    admissionController,
+    metrics,
+    accountPlacementStore: placementStore,
   });
 
   await worker.start();

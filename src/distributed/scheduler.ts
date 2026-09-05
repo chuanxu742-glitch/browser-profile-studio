@@ -1,3 +1,4 @@
+import type { Cluster, Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { BrowserToolError } from '../domain.js';
 import type { SessionManager } from '../browser/session-manager.js';
@@ -15,7 +16,14 @@ import type {
   TaskListFilter,
   TaskUrlPreflight,
   WorkerNodeInfo,
+  TaskExecutionMode,
 } from './types.js';
+import {
+  AccountPlacementRegistry,
+  InMemorySharedStateStore,
+  RedisSharedAccountStateStore
+} from './account-placement.js';
+import type { SharedAccountStateStore, AccountPlacementRecord } from './account-placement.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from './tenant.js';
 
 export interface MasterSchedulerOptions {
@@ -28,6 +36,7 @@ export interface MasterSchedulerOptions {
   redisShardCount?: number | undefined;
   urlPolicy?: FetchUrlPolicy | undefined;
   startLocalWorker?: boolean | undefined; // 是否在本机启动内建 Worker
+  accountStateStore?: SharedAccountStateStore<AccountPlacementRecord> | undefined;
 }
 
 /**
@@ -38,6 +47,8 @@ export class DistributedMasterScheduler {
   private readonly adapter: TaskQueueAdapter;
   private readonly localWorker?: WorkerDaemon | undefined;
   private readonly urlPolicy?: FetchUrlPolicy | undefined;
+  private readonly placementRegistry: AccountPlacementRegistry;
+  private localWorkerReady: Promise<void> | undefined;
 
   public constructor(options: MasterSchedulerOptions = {}) {
     this.urlPolicy = options.urlPolicy;
@@ -45,7 +56,7 @@ export class DistributedMasterScheduler {
       this.adapter = options.adapter;
     } else if (options.redisUrl || options.redisClusterNodes !== undefined || options.redisMode !== undefined || process.env.REDIS_URL || process.env.REDIS_CLUSTER_NODES) {
       this.adapter = new RedisQueueAdapter({
-        redisUrl: options.redisUrl,
+        ...(options.redisUrl !== undefined ? { redisUrl: options.redisUrl } : {}),
         ...(options.redisMode !== undefined ? { redisMode: options.redisMode } : {}),
         ...(options.redisClusterNodes !== undefined ? { redisClusterNodes: options.redisClusterNodes } : {}),
         ...(options.redisShardCount !== undefined ? { shardCount: options.redisShardCount } : {}),
@@ -54,16 +65,59 @@ export class DistributedMasterScheduler {
       this.adapter = new MemoryQueueAdapter();
     }
 
-    // 默认在本机启动内建处理节点（支持开箱即用，免配置 Redis 也能直接运行）
+    const stateStore = options.accountStateStore
+      ?? (this.adapter instanceof RedisQueueAdapter
+        ? new RedisSharedAccountStateStore<AccountPlacementRecord>(
+          this.adapter.underlyingRedisClient as Redis | Cluster,
+        )
+        : new InMemorySharedStateStore<AccountPlacementRecord>());
+    this.placementRegistry = new AccountPlacementRegistry(stateStore, Date.now, 60_000);
+
     if (options.startLocalWorker !== false) {
+      const workerId = 'master-local-worker';
+      const capacity = options.maxConcurrency ?? 16;
+      const storageNamespace = `local:${workerId}`;
       this.localWorker = new WorkerDaemon({
-        workerId: 'master-local-worker',
-        concurrency: options.maxConcurrency ?? 16,
+        workerId,
+        concurrency: capacity,
         adapter: this.adapter,
         sessionManager: options.sessionManager,
         urlPolicy: options.urlPolicy,
+        storageNamespace,
+        accountPlacementStore: stateStore,
+      });
+      this.localWorkerReady = this.adapter.updateWorkerHeartbeat({
+        workerId,
+        tenantId: DEFAULT_TENANT_ID,
+        hostname: 'localhost',
+        capacity,
+        activeTasks: 0,
+        healthy: true,
+        lastHeartbeat: Date.now(),
+        storageNamespace,
       });
       void this.localWorker.start();
+    }
+  }
+
+  private async resolvePlacement(
+    tenantId: string,
+    mode: TaskExecutionMode,
+    profileId: string | undefined,
+  ): Promise<{ workerId: string; generation: number } | undefined> {
+    if (mode !== 'browser' || profileId === undefined) return undefined;
+    if (this.localWorkerReady) {
+      await this.localWorkerReady.catch(() => undefined);
+      this.localWorkerReady = undefined;
+    }
+    this.placementRegistry.syncWorkers(await this.adapter.listWorkers(tenantId));
+    try {
+      return await this.placementRegistry.acquirePlacement(tenantId, profileId);
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.startsWith('CAS conflict:')) {
+        return this.placementRegistry.acquirePlacement(tenantId, profileId);
+      }
+      throw error;
     }
   }
 
@@ -72,7 +126,15 @@ export class DistributedMasterScheduler {
   }
 
   public async registerWorker(worker: WorkerNodeInfo): Promise<void> {
-    await this.adapter.updateWorkerHeartbeat({ ...worker, tenantId: normalizeTenantId(worker.tenantId) });
+    const tenantId = normalizeTenantId(worker.tenantId);
+    this.placementRegistry.registerWorker(
+      worker.workerId,
+      worker.capacity,
+      worker.storageNamespace ?? `local:${worker.workerId}`,
+      tenantId,
+    );
+    this.placementRegistry.updateLoad(worker.workerId, worker.activeTasks);
+    await this.adapter.updateWorkerHeartbeat({ ...worker, tenantId });
   }
 
   /**
@@ -87,6 +149,18 @@ export class DistributedMasterScheduler {
     const priority = this.taskPriority(def.priority);
     const maxRetries = this.maxRetries(def.maxRetries);
     const timeoutMs = this.timeoutMs(def.timeoutMs);
+    const profileId = this.taskLabel(def.profileId, 'profileId');
+    const proxyId = this.taskLabel(def.proxyId, 'proxyId');
+    const accountGroup = this.taskLabel(def.accountGroup, 'accountGroup');
+    let targetWorkerId: string | undefined = undefined;
+    let placementGeneration: number | undefined = undefined;
+
+    const placement = await this.resolvePlacement(normalizedTenantId, mode, profileId);
+    if (placement) {
+      targetWorkerId = placement.workerId;
+      placementGeneration = placement.generation;
+    }
+
     const url = await this.assertTaskUrl(def.url);
     await this.claimUrls([url], normalizedTenantId);
     const record: DistributedTaskRecord = {
@@ -97,6 +171,11 @@ export class DistributedMasterScheduler {
       url,
       mode,
       priority,
+      ...(profileId ? { profileId } : {}),
+      ...(proxyId ? { proxyId } : {}),
+      ...(accountGroup ? { accountGroup } : {}),
+      ...(targetWorkerId ? { targetWorkerId } : {}),
+      ...(placementGeneration !== undefined ? { placementGeneration } : {}),
       state: 'PENDING',
       retries: 0,
       maxRetries,
@@ -117,62 +196,78 @@ export class DistributedMasterScheduler {
   /**
    * 批量提交任务
    */
-  public async submitBatch(defs: readonly DistributedTaskDefinition[], tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord[]> {
+  public async submitBatch(definitions: readonly DistributedTaskDefinition[], tenantId = DEFAULT_TENANT_ID): Promise<DistributedTaskRecord[]> {
     const normalizedTenantId = normalizeTenantId(tenantId);
-    if (defs.length < 1 || defs.length > 500) {
+    if (definitions.length < 1 || definitions.length > 500) {
       throw new BrowserToolError('INVALID_ARGUMENT', 'A task batch must contain between 1 and 500 tasks.', {
         details: { reason: 'batch-size-out-of-range' },
         retryable: false,
       });
     }
-    const normalized = defs.map((def) => ({
-      id: this.taskId(def.taskId),
-      projectId: this.taskLabel(def.projectId, 'projectId'),
-      runId: this.taskLabel(def.runId, 'runId'),
-      mode: this.taskMode(def.mode),
-      priority: this.taskPriority(def.priority),
-      maxRetries: this.maxRetries(def.maxRetries),
-      timeoutMs: this.timeoutMs(def.timeoutMs),
+
+    const normalized = definitions.map((definition) => ({
+      definition,
+      id: this.taskId(definition.taskId),
+      projectId: this.taskLabel(definition.projectId, 'projectId'),
+      runId: this.taskLabel(definition.runId, 'runId'),
+      mode: this.taskMode(definition.mode),
+      priority: this.taskPriority(definition.priority),
+      maxRetries: this.maxRetries(definition.maxRetries),
+      timeoutMs: this.timeoutMs(definition.timeoutMs),
+      profileId: this.taskLabel(definition.profileId, 'profileId'),
+      proxyId: this.taskLabel(definition.proxyId, 'proxyId'),
+      accountGroup: this.taskLabel(definition.accountGroup, 'accountGroup'),
     }));
     const ids = new Set<string>();
-    for (const { id } of normalized) {
-      if (ids.has(id)) {
+    for (const task of normalized) {
+      if (ids.has(task.id)) {
         throw new BrowserToolError('INVALID_ARGUMENT', 'A batch contains duplicate task IDs.', {
           details: { reason: 'duplicate-task-id-in-batch' },
           retryable: false,
         });
       }
-      ids.add(id);
+      ids.add(task.id);
     }
-    const approvedUrls = await Promise.all(defs.map((def) => this.assertTaskUrl(def.url)));
-    const urls = new Set<string>();
-    for (const url of approvedUrls) {
-      if (urls.has(url)) {
-        throw new BrowserToolError('INVALID_ARGUMENT', 'A batch contains duplicate URLs.', {
-          details: { reason: 'duplicate-url-in-batch' },
-          retryable: false,
-        });
-      }
-      urls.add(url);
+
+    const approvedUrls = await Promise.all(definitions.map((definition) => this.assertTaskUrl(definition.url)));
+    if (new Set(approvedUrls).size !== approvedUrls.length) {
+      throw new BrowserToolError('INVALID_ARGUMENT', 'A batch contains duplicate URLs.', {
+        details: { reason: 'duplicate-url-in-batch' },
+        retryable: false,
+      });
     }
+    const placements = await Promise.all(normalized.map((task) => (
+      this.resolvePlacement(normalizedTenantId, task.mode, task.profileId)
+    )));
     await this.claimUrls(approvedUrls, normalizedTenantId);
-    const records: DistributedTaskRecord[] = defs.map((def, index) => {
-      const normalizedTask = normalized[index];
+
+    const createdAt = Date.now();
+    const records = normalized.map((task, index): DistributedTaskRecord => {
+      const placement = placements[index];
       return {
-        id: normalizedTask?.id ?? this.taskId(def.taskId),
+        id: task.id,
         tenantId: normalizedTenantId,
-        ...(normalizedTask?.projectId ? { projectId: normalizedTask.projectId } : {}),
-        ...(normalizedTask?.runId ? { runId: normalizedTask.runId } : {}),
-        url: approvedUrls[index] ?? def.url,
-        mode: normalizedTask?.mode ?? 'fetch',
-        priority: normalizedTask?.priority ?? 'NORMAL',
+        ...(task.projectId !== undefined ? { projectId: task.projectId } : {}),
+        ...(task.runId !== undefined ? { runId: task.runId } : {}),
+        url: approvedUrls[index]!,
+        mode: task.mode,
+        priority: task.priority,
+        ...(task.profileId !== undefined ? { profileId: task.profileId } : {}),
+        ...(task.proxyId !== undefined ? { proxyId: task.proxyId } : {}),
+        ...(task.accountGroup !== undefined ? { accountGroup: task.accountGroup } : {}),
+        ...(placement !== undefined ? {
+          targetWorkerId: placement.workerId,
+          placementGeneration: placement.generation,
+        } : {}),
         state: 'PENDING',
         retries: 0,
-        maxRetries: normalizedTask?.maxRetries ?? 3,
-        extractionSchema: def.extractionSchema,
-        timeoutMs: normalizedTask?.timeoutMs ?? 30_000,
-        createdAt: Date.now(),
-        events: [{ at: Date.now(), state: 'PENDING', phase: 'queued', message: '任务已排队' }],
+        maxRetries: task.maxRetries,
+        ...(task.definition.extractionSchema !== undefined
+          ? { extractionSchema: task.definition.extractionSchema }
+          : {}),
+        timeoutMs: task.timeoutMs,
+        createdAt,
+        events: [{ at: createdAt, state: 'PENDING', phase: 'queued', message: '任务已排队' }],
       };
     });
 
@@ -251,6 +346,7 @@ export class DistributedMasterScheduler {
     const task = await this.getTask(taskId, tenantId);
     if (!task) throw new Error('TASK_NOT_FOUND');
     if (task.state !== 'FAILED' && task.state !== 'CANCELLED') throw new Error('TASK_NOT_RETRYABLE');
+    const placement = await this.resolvePlacement(task.tenantId, task.mode, task.profileId);
     const updated: DistributedTaskRecord = {
       ...task,
       state: 'RETRYING',
@@ -258,6 +354,8 @@ export class DistributedMasterScheduler {
       completedAt: undefined,
       error: undefined,
       errorCode: undefined,
+      targetWorkerId: placement?.workerId,
+      placementGeneration: placement?.generation,
       events: appendTaskEvent(task, 'retrying', '任务已重新排队'),
     };
     await this.adapter.enqueueTask(updated);

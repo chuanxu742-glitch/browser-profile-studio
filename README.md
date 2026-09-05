@@ -38,6 +38,8 @@ Studio API 默认只监听 `127.0.0.1`，除 `/api/v1/health` 外均需认证。
 
 - `/api/v1/openapi.json`：OpenAPI 3.1 入口；Profile 列表支持 `q`、`name`、`tag`、`country`、`engine`、`cursor`、`limit`，响应为 `{ items, nextCursor, total }`，总数同时返回在 `X-Total-Count`。
 - `/api/v1/profiles/trash`、`/profiles/{id}/restore`、`/profiles/{id}/purge`：回收站、恢复与仅 owner 可用的永久清除。
+- `/api/v1/profiles/{id}/health`：仅 manager 和 owner 可用的读写接口，维护 Profile 的健康快照。
+- `/api/v1/profiles/{id}/backups`、`/api/v1/profiles/{id}/backups/{backupId}/restore`：仅 owner 可用；备份只返回不含服务器路径的 opaque `backupId`，恢复会停止该 Profile 的活动会话并校验清单中的 Profile ID。
 - `/api/v1/team/*`：工作区、成员、资源 grants 以及只在创建时返回明文的可撤销 API Key。
 - `/api/v1/extensions`、`/extensions/import`、`/profiles/{id}/extensions`：仅 owner 可导入的受管 ZIP/XPI 仓库，以及按 Profile 分配扩展。
 - `/api/v1/migration/local-browsers`、`/migration/import-local`：仅 owner 可用的本机 Chrome、Edge、Firefox Profile 扫描与网站会话迁移。
@@ -45,9 +47,9 @@ Studio API 默认只监听 `127.0.0.1`，除 `/api/v1/health` 外均需认证。
 - `/api/v1/synchronizer/captures`：显式启停主窗口动作捕获。只同步可解析的语义目标，密码字段被排除。
 - `/api/v1/product/capabilities`、`/product/runtime-health`、`/metrics`：真实能力边界、外部云运行时适配器状态和本机运行指标。
 
-受管 Profile 在安全停止时原子保存 cookies、localStorage、IndexedDB 与虚拟 WebAuthn 凭据；Studio 主密钥启用时检查点整体使用 AES-256-GCM 加密，并可从 `.bak` 恢复上一份有效状态。服务端失效、验证码和站点主动登出仍会使登录态失效。
+受管 Profile 在安全停止时原子保存 cookies、localStorage、IndexedDB 与虚拟 WebAuthn 凭据；最新登录态还会按版本写入有界检查点。配置主密钥后，检查点和备份均使用 AES-256-GCM 认证加密；损坏的最新检查点会回退到更早的有效版本。服务端失效、验证码和站点主动登出仍会使登录态失效。
 
-小状态文件使用同目录临时文件、`fsync`、原子替换和 `.bak` 上一版本恢复。该方案为单 Studio 进程设计，不等于支持多个进程同时写入，也不等于已经提供云数据库。云浏览器与 Android 云手机提供标准 provider 适配边界，以及经过鉴权的创建、停止和健康检查 API；未注册并配置真实供应商与凭据时，能力接口会返回未配置，不会创建模拟设备或伪造连接地址。
+小状态文件使用同目录临时文件、`fsync`、原子替换和 `.bak` 上一版本恢复。多进程写同一 Profile 时必须启用共享 Redis Profile lease；版本化登录检查点另有 CAS 冲突检测。云浏览器与 Android 云手机只提供标准 provider 适配边界，以及经过鉴权的创建、停止和健康检查 API；未注册并配置真实供应商与凭据时，能力接口会返回未配置，不会创建模拟设备或伪造连接地址。
 
 ### 本机浏览器数据导入
 
@@ -360,18 +362,27 @@ popup、原生 dialog 和 download 仍默认关闭、dismiss 或 cancel，不会
 
 ## 集群运行
 
-Master 仍是本地 stdio MCP 进程；集群模式只把任务队列放到 Redis。先启动 Redis 和 Worker：
+Master 仍是本地 stdio MCP 进程；集群模式依赖 Redis 共享任务队列、Profile lease 与节点位置（placement/CAS scope）。Worker 未配置 `WORKER_STORAGE_NAMESPACE` 时使用节点唯一的本地 namespace，不会把本地磁盘误判成共享盘。只有确实挂载同一 Profile/检查点存储、配置相同 `BROWSER_MASTER_KEY`，并显式设置相同 namespace 的 Worker 才能进行账号任务故障转移。generation fence 会拒绝旧位置任务；当前版本仍不支持正在运行的浏览器工作区热迁移。
 
 ```sh
 docker compose -f docker-compose.cluster.yml up --build
 ```
 
+## 生产环境运维 (Production Operations)
+
+- **容量释放闸口**：先执行 `npm run capacity:release -- calibrate capacity-baseline.json` 生成同机基线，再执行 `npm run capacity:release -- gate capacity-baseline.json`。闸口比较五类延迟、RSS、任务失败及隔离不变量；`high_checkpoint_failures`、`high_proxy_quarantine` 是可观测告警，**不会自动修改准入阈值**。
+- **外置依赖限制**：仓库不内置托管 Redis Cluster、KMS、共享文件系统、生产凭据或告警通知通道；多机发布必须由运维提供这些依赖，并确保共享存储 namespace 与主密钥一致。
+- **24–72 小时浸泡**：默认 `npm run soak` 只运行 5 秒烟测。长期释放验证需显式执行 `$env:LONG_MODE='true'; $env:SOAK_DURATION_MS='86400000'; npm run soak`（最长 `259200000` 毫秒），并保存最终 NDJSON 指标。短时运行不能证明长期稳定性。
+- **登录提供方矩阵**：`npm run acceptance:login -- login-acceptance.json` 只验证授权方提供的凭据/授权标记及人工采集证据，不会登录真实站点。缺凭据、缺授权或缺证据返回 `blocked` 和退出码 2；观察失败返回退出码 1。
+- **备份与密钥轮换**：
+  - 创建与恢复：Studio API `POST /api/v1/profiles/{id}/backups` 和 `POST /api/v1/profiles/{id}/backups/{backupId}/restore`。
+  - 轮换：设置 `OLD_STUDIO_MASTER_KEY`、`NEW_STUDIO_MASTER_KEY` 和可选 `BACKUP_DIR` 后运行 `npm run rekey:backups`。脚本先校验每个文件摘要，再以内存明文、磁盘密文方式原子替换；任一文件失败即返回非零退出码。
+
 这个 compose 文件提供的是单实例 Redis 开发环境；原生 Redis Cluster 通常连接已有的托管/运维集群，不要把该 compose 的单实例地址直接当作 Cluster 启动节点。
 
-启动前必须设置 `BROWSER_ALLOWED_HOSTS`。本地 MCP 配置还需要设置 `REDIS_URL`，Worker 使用 `npm run start:worker` 对 Redis 队列进行消费。当前集群 Worker 的 HTTP 模式只支持受策略约束的 GET/HEAD；浏览器模式使用服务端受控 Firefox 会话。调高 `WORKER_CONCURRENCY` 时应同步调高 `BROWSER_MAX_SESSIONS`。
+启动 compose 前必须设置 `BROWSER_ALLOWED_HOSTS`、32 字符以上的 `CONTROL_PLANE_TOKEN` 和 16 字节以上的 `BROWSER_MASTER_KEY`；两个 Worker 共享 compose 命名卷、storage namespace 和主密钥。本地 MCP 配置还需要设置 `REDIS_URL`，Worker 使用 `npm run start:worker` 对 Redis 队列进行消费。当前集群 Worker 的 HTTP 模式只支持受策略约束的 GET/HEAD；浏览器模式使用服务端受控 Firefox 会话。调高 `WORKER_CONCURRENCY` 时应同步调高 `BROWSER_MAX_SESSIONS`。
 
-Worker 与 MCP 进程都读取相同的 `BROWSER_SESSION_TTL_MS`，浏览器-only Worker 不会
-创建控制面 Redis 连接；请在所有 Worker 上保持会话 TTL、并发和 URL 策略配置一致。
+Worker 与 MCP 进程都读取相同的 `BROWSER_SESSION_TTL_MS`。Worker 的 `SessionManager` 禁用内置队列连接，并复用 entrypoint 创建的 Redis adapter 完成任务队列、Profile lease 和 placement fencing；请在所有 Worker 上保持会话 TTL、并发和 URL 策略配置一致。
 
 适配器支持两种 Redis 形态：
 

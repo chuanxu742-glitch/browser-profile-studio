@@ -90,14 +90,19 @@ export class MemoryQueueAdapter implements TaskQueueAdapter {
     let queueIndex = this.pendingQueue.findIndex((key) => key.startsWith(prefix));
     if (queueIndex < 0) return null;
     while (queueIndex >= 0) {
-      const [key] = this.pendingQueue.splice(queueIndex, 1);
+      const key = this.pendingQueue[queueIndex];
       if (!key) return null;
       const task = this.tasks.get(key);
       if (!task || (task.state !== 'PENDING' && task.state !== 'RETRYING')) {
+        this.pendingQueue.splice(queueIndex, 1);
         queueIndex = this.pendingQueue.findIndex((candidate) => candidate.startsWith(prefix));
-        if (queueIndex < 0) return null;
         continue;
       }
+      if (task.targetWorkerId && task.targetWorkerId !== workerId) {
+        queueIndex = this.pendingQueue.findIndex((candidate, i) => i > queueIndex && candidate.startsWith(prefix));
+        continue;
+      }
+      this.pendingQueue.splice(queueIndex, 1);
       const leasedTask: DistributedTaskRecord = {
         ...task,
         state: 'RUNNING',
