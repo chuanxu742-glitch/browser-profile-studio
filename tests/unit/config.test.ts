@@ -29,6 +29,7 @@ describe('loadConfig', () => {
     expect(config.dataDir).toBe(resolve(process.cwd(), '.browser-data'));
     expect(config.persistentProfiles).toBe(false);
     expect(config.auditPath).toBe(resolve(process.cwd(), '.browser-data', 'audit.jsonl'));
+    expect(config.checkpointIntervalMs).toBe(CONFIG_LIMITS.checkpointIntervalMs.default);
   });
 
   it('rejects a missing, empty, or bare wildcard allowlist', () => {
@@ -102,6 +103,10 @@ describe('loadConfig', () => {
     expect(() => loadConfig(baseEnv({ MCP_BURST: '10001' }))).toThrow(BrowserToolError);
     expect(() => loadConfig(baseEnv({ BROWSER_DATA_DIR: 'relative-data' }))).toThrow(BrowserToolError);
     expect(() => loadConfig(baseEnv({ BROWSER_AUDIT_PATH: 'relative-audit.jsonl' }))).toThrow(BrowserToolError);
+    expect(() => loadConfig(baseEnv({ BROWSER_CHECKPOINT_INTERVAL_MS: '999' }))).toThrow(BrowserToolError);
+    expect(() => loadConfig(baseEnv({ BROWSER_CHECKPOINT_INTERVAL_MS: '3600001' }))).toThrow(BrowserToolError);
+    expect(loadConfig(baseEnv({ BROWSER_CHECKPOINT_INTERVAL_MS: '0' })).checkpointIntervalMs).toBe(0);
+    expect(loadConfig(baseEnv({ BROWSER_CHECKPOINT_INTERVAL_MS: '1000' })).checkpointIntervalMs).toBe(1_000);
 
     const config = loadConfig(
       baseEnv({

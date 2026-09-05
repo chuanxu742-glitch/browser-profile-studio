@@ -204,6 +204,8 @@ export interface BrowserSessionOptions {
   onCookiesPersist?: (cookies: readonly CookieRecord[]) => Promise<void> | void;
   /** Server-owned callback used to persist the final profile storage state. */
   onStorageStatePersist?: (state: BrowserStorageState) => Promise<void> | void;
+  /** Server-owned callback for persisted account health transitions. */
+  onChallengeStateChange?: (detection: ChallengeDetection) => Promise<void> | void;
   /** Server-owned resource policy selected by SessionManager. */
   automationPolicy?: AutomationPolicy;
   /** Server-owned default action timeout, bounded to 1-60 seconds. */
@@ -1807,15 +1809,16 @@ export class BrowserSession {
 
   private async scanChallenge(preserveTakeover = false): Promise<ChallengeDetection> {
     if (!this.page) return { detected: false, signals: [], observedAt: new Date().toISOString() };
+    const wasDetected = this.challengeDetection?.detected === true;
     const detection = await this.detector.detectPage(this.page);
     if (detection.detected) {
-      const firstDetection = this.challengeDetection?.detected !== true;
       this.challengeDetection = detection;
       if (this.challengePolicy.shouldPause(detection) && !preserveTakeover && this._state !== 'HUMAN_TAKEOVER' && this._state !== 'USER_CONTROLLED' && this._state !== 'STOPPING' && this._state !== 'STOPPED') {
         this._state = 'PAUSED_CHALLENGE';
         this.activeAbort?.abort();
       }
-      if (firstDetection) {
+      if (!wasDetected) {
+        await this.options.onChallengeStateChange?.(detection);
         await this.audit({
           action: 'challenge_detected',
           outcome: 'paused',
@@ -1824,6 +1827,7 @@ export class BrowserSession {
       }
     } else {
       this.challengeDetection = undefined;
+      if (wasDetected) await this.options.onChallengeStateChange?.(detection);
     }
     return detection;
   }
@@ -2140,6 +2144,14 @@ export class BrowserSession {
       indexedDB: true,
       credentials: true,
     }));
+  }
+  /**
+   * Forces a login state checkpoint through the serial queue.
+   */
+  public async checkpointStorageState(): Promise<void> {
+    return this.enqueue('browser_checkpoint', async () => {
+      await this.persistContextStorageState();
+    });
   }
   private async cleanupOwnedProfile(): Promise<void> {
     if (this.persistentProfile) return;

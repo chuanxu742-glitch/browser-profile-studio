@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 分布式消息队列与集群状态中心
   redis:
@@ -36,6 +34,8 @@ services:
       - BROWSER_TIMEOUT_MS=${BROWSER_TIMEOUT_MS:-15000}
       - BROWSER_DATA_DIR=/var/lib/compliant-firefox
       - BROWSER_PERSIST_PROFILES=${BROWSER_PERSIST_PROFILES:-false}
+      - BROWSER_MASTER_KEY=${BROWSER_MASTER_KEY:?set one shared 16+ byte BROWSER_MASTER_KEY}
+      - BROWSER_CHECKPOINT_INTERVAL_MS=${BROWSER_CHECKPOINT_INTERVAL_MS:-300000}
     command: ["node", "dist/control-plane-entrypoint.js"]
     ports:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-8081}:8081"
@@ -61,6 +61,7 @@ services:
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
       - WORKER_ID=worker-1
       - WORKER_TENANTS=${WORKER_TENANTS:-default}
+      - WORKER_STORAGE_NAMESPACE=compose-shared-profiles
       - NODE_ENV=production
       - BROWSER_ALLOWED_HOSTS=${BROWSER_ALLOWED_HOSTS:?set BROWSER_ALLOWED_HOSTS to approved hosts}
       - BROWSER_ALLOW_HTTP=${BROWSER_ALLOW_HTTP:-false}
@@ -69,10 +70,12 @@ services:
       - BROWSER_TIMEOUT_MS=${BROWSER_TIMEOUT_MS:-15000}
       - BROWSER_DATA_DIR=/var/lib/compliant-firefox
       - BROWSER_PERSIST_PROFILES=${BROWSER_PERSIST_PROFILES:-false}
+      - BROWSER_MASTER_KEY=${BROWSER_MASTER_KEY:?set one shared 16+ byte BROWSER_MASTER_KEY}
+      - BROWSER_CHECKPOINT_INTERVAL_MS=${BROWSER_CHECKPOINT_INTERVAL_MS:-300000}
     command: ["node", "dist/distributed/worker-entrypoint.js"]
     restart: unless-stopped
     volumes:
-      - worker-1-browser-data:/var/lib/compliant-firefox
+      - worker-browser-data:/var/lib/compliant-firefox
 
   # Worker 节点 2
   crawler-worker-2:
@@ -90,6 +93,7 @@ services:
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
       - WORKER_ID=worker-2
       - WORKER_TENANTS=${WORKER_TENANTS:-default}
+      - WORKER_STORAGE_NAMESPACE=compose-shared-profiles
       - NODE_ENV=production
       - BROWSER_ALLOWED_HOSTS=${BROWSER_ALLOWED_HOSTS:?set BROWSER_ALLOWED_HOSTS to approved hosts}
       - BROWSER_ALLOW_HTTP=${BROWSER_ALLOW_HTTP:-false}
@@ -98,13 +102,14 @@ services:
       - BROWSER_TIMEOUT_MS=${BROWSER_TIMEOUT_MS:-15000}
       - BROWSER_DATA_DIR=/var/lib/compliant-firefox
       - BROWSER_PERSIST_PROFILES=${BROWSER_PERSIST_PROFILES:-false}
+      - BROWSER_MASTER_KEY=${BROWSER_MASTER_KEY:?set one shared 16+ byte BROWSER_MASTER_KEY}
+      - BROWSER_CHECKPOINT_INTERVAL_MS=${BROWSER_CHECKPOINT_INTERVAL_MS:-300000}
     command: ["node", "dist/distributed/worker-entrypoint.js"]
     restart: unless-stopped
     volumes:
-      - worker-2-browser-data:/var/lib/compliant-firefox
+      - worker-browser-data:/var/lib/compliant-firefox
 
 volumes:
   redis-data:
-  worker-1-browser-data:
-  worker-2-browser-data:
+  worker-browser-data:
   control-plane-browser-data:

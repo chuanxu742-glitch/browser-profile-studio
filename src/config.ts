@@ -20,6 +20,8 @@ export const CONFIG_LIMITS = Object.freeze({
   workspaceTtlMs: Object.freeze({ min: 60_000, max: 7 * 24 * 60 * 60_000, default: 7 * 24 * 60 * 60_000 }),
   mcpRatePerSecond: Object.freeze({ min: 1, max: 1_000, default: 20 }),
   mcpBurst: Object.freeze({ min: 1, max: 10_000, default: 40 }),
+  /** Milliseconds between periodic profile checkpoints. 0 disables checkpoints. */
+  checkpointIntervalMs: Object.freeze({ min: 0, max: 3_600_000, default: 300_000 }),
   maxPathLength: 4_096,
 });
 
@@ -49,6 +51,8 @@ export interface AppConfig {
   readonly persistentProfiles: boolean;
   /** Server-owned absolute append-only audit file. */
   readonly auditPath: string;
+  /** Milliseconds between periodic profile checkpoints. */
+  readonly checkpointIntervalMs: number;
 }
 
 export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
@@ -210,6 +214,16 @@ export function loadConfig(env: ConfigEnvironment = process.env): AppConfig {
     join(dataDir, 'audit.jsonl'),
     'BROWSER_AUDIT_PATH',
   );
+  const checkpointIntervalMs = parseBoundedInteger(
+    env.BROWSER_CHECKPOINT_INTERVAL_MS,
+    CONFIG_LIMITS.checkpointIntervalMs.default,
+    CONFIG_LIMITS.checkpointIntervalMs.min,
+    CONFIG_LIMITS.checkpointIntervalMs.max,
+    'BROWSER_CHECKPOINT_INTERVAL_MS',
+  );
+  if (checkpointIntervalMs !== 0 && checkpointIntervalMs < 1_000) {
+    throw configError('BROWSER_CHECKPOINT_INTERVAL_MS', 'must be 0 or between 1000 and 3600000');
+  }
 
   return Object.freeze({
     allowedHosts,
@@ -227,6 +241,7 @@ export function loadConfig(env: ConfigEnvironment = process.env): AppConfig {
     dataDir,
     persistentProfiles,
     auditPath,
+    checkpointIntervalMs,
   });
 }
 

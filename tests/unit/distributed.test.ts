@@ -5,6 +5,7 @@ import { WorkerDaemon } from '../../src/distributed/worker-daemon.js';
 import type { DistributedTaskRecord } from '../../src/distributed/types.js';
 import type { FetchOptions, FetchResult } from '../../src/fetcher/types.js';
 import { UrlPolicy } from '../../src/policy/url-policy.js';
+import type { SessionManager } from '../../src/browser/session-manager.js';
 
 class FailFirstEnqueueAdapter extends MemoryQueueAdapter {
   public failuresRemaining = 1;
@@ -535,5 +536,45 @@ describe('分布式队列与主调度器 (Master Scheduler & Queue)', () => {
       await worker.stop();
       vi.useRealTimers();
     }
+  });
+
+  it('fences stale account generations before a browser session starts', async () => {
+    const adapter = new MemoryQueueAdapter();
+    const pending = taskRecord({
+      id: 'stale-placement',
+      mode: 'browser',
+      profileId: 'profile-a',
+      targetWorkerId: 'worker-a',
+      placementGeneration: 1,
+      maxRetries: 3,
+    });
+    await adapter.enqueueTask(pending);
+    const leased = await adapter.dequeueTask('worker-a');
+    const sessionManager = { start: vi.fn() } as unknown as SessionManager;
+    const worker = new WorkerDaemon({
+      workerId: 'worker-a',
+      storageNamespace: 'shared-volume',
+      adapter,
+      sessionManager,
+      accountPlacementStore: {
+        get: vi.fn().mockResolvedValue({
+          version: 2,
+          data: { workerId: 'worker-b', storageNamespace: 'shared-volume', generation: 2 },
+        }),
+        compareAndSet: vi.fn(),
+      },
+    });
+
+    await (worker as unknown as {
+      executeTask(task: DistributedTaskRecord): Promise<void>;
+    }).executeTask(leased!);
+
+    expect(sessionManager.start).not.toHaveBeenCalled();
+    expect(await adapter.getTask(pending.id)).toMatchObject({
+      state: 'FAILED',
+      retries: 0,
+      errorCode: 'TASK_PLACEMENT_STALE',
+    });
+    await adapter.close();
   });
 });

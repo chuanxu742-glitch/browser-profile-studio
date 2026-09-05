@@ -10,9 +10,21 @@ import type { FetchOptions, FetchResult, FetchUrlPolicy } from '../fetcher/types
 import { isTaskLeaseLostError } from './types.js';
 import type { DistributedTaskRecord, TaskEvent, WorkerNodeInfo } from './types.js';
 import { DEFAULT_TENANT_ID, normalizeTenantId } from './tenant.js';
+import type { AccountAdmissionController } from '../operations/account-admission.js';
+import type { AccountMetrics } from '../operations/account-metrics.js';
+import type { AccountPlacementRecord, SharedAccountStateStore } from './account-placement.js';
 
 const QUEUE_RECOVERY_DELAY_MS = 1_000;
 const RECOVERY_DRAIN_TIMEOUT_MS = 5_000;
+
+class StaleAccountPlacementError extends Error {
+  public readonly code = 'TASK_PLACEMENT_STALE';
+
+  public constructor() {
+    super('Task account placement is stale');
+    this.name = 'StaleAccountPlacementError';
+  }
+}
 
 type RecoveryKind = 'enqueue' | 'persist';
 type WorkerFetcher = (options: FetchOptions) => Promise<FetchResult>;
@@ -38,6 +50,10 @@ export interface WorkerDaemonOptions {
   pollIntervalMs?: number | undefined;
   /** Tenants this trusted worker is allowed to consume. */
   allowedTenants?: readonly string[] | undefined;
+  storageNamespace?: string | undefined;
+  admissionController?: AccountAdmissionController | undefined;
+  metrics?: AccountMetrics | undefined;
+  accountPlacementStore?: SharedAccountStateStore<AccountPlacementRecord> | undefined;
 }
 
 /**
@@ -54,6 +70,10 @@ export class WorkerDaemon {
   private readonly fetcher: WorkerFetcher;
   private readonly pollIntervalMs: number;
   private readonly allowedTenants: readonly string[];
+  private readonly storageNamespace: string;
+  private readonly admissionController?: AccountAdmissionController | undefined;
+  private readonly metrics?: AccountMetrics | undefined;
+  private readonly accountPlacementStore?: SharedAccountStateStore<AccountPlacementRecord> | undefined;
   private activeTasksCount = 0;
   private isRunning = false;
   private closed = false;
@@ -77,6 +97,10 @@ export class WorkerDaemon {
     this.pollIntervalMs = boundedInteger(options.pollIntervalMs ?? 200, 50, 5_000, 200);
     const configuredTenants = options.allowedTenants ?? [DEFAULT_TENANT_ID];
     this.allowedTenants = Object.freeze([...new Set(configuredTenants.map(normalizeTenantId))]);
+    this.storageNamespace = validStorageNamespace(options.storageNamespace ?? `local:${this.workerId}`);
+    this.admissionController = options.admissionController;
+    this.metrics = options.metrics;
+    this.accountPlacementStore = options.accountPlacementStore;
 
     if (options.adapter) {
       this.adapter = options.adapter;
@@ -207,6 +231,7 @@ export class WorkerDaemon {
         activeTasks: this.activeTasksCount,
         healthy: true,
         lastHeartbeat: Date.now(),
+        storageNamespace: this.storageNamespace,
       };
       await this.adapter.updateWorkerHeartbeat(info);
     } catch {}
@@ -269,7 +294,40 @@ export class WorkerDaemon {
     const leaseTimer = this.startLeaseRenewal(task, controller);
 
     appendTaskEvent(task, 'running', 'Worker 已领取任务');
+
+    let permit: { token: string } | null = null;
+    let domainKey = 'unknown';
     try {
+      await this.assertCurrentAccountPlacement(task);
+      try {
+        domainKey = new URL(task.url).hostname;
+      } catch {}
+
+      if (this.admissionController) {
+        const admission = this.admissionController.acquire({
+          tenantId: task.tenantId,
+          accountId: task.profileId ?? task.accountGroup ?? 'default',
+          domainKey,
+          proxyId: task.proxyId ?? 'default',
+        });
+
+        if (!admission.allowed) {
+          this.metrics?.increment('admission_rejection', {
+            tenant: task.tenantId,
+            ...(task.accountGroup !== undefined ? { accountGroup: task.accountGroup } : {}),
+            domain: domainKey,
+          });
+          throw new Error(`Admission rejected: ${admission.reason} (retry after ${admission.retryAfterMs}ms)`);
+        }
+        permit = admission.permit;
+      }
+
+      this.metrics?.increment('starts', {
+        tenant: task.tenantId,
+        ...(task.accountGroup !== undefined ? { accountGroup: task.accountGroup } : {}),
+        domain: domainKey,
+      });
+
       let resultData: unknown;
 
       if (task.mode === 'fetch') {
@@ -294,6 +352,8 @@ export class WorkerDaemon {
 
         const session = (await sm.start({
           headless: true,
+          tenantId: task.tenantId,
+          ...(task.profileId !== undefined ? { profileId: task.profileId } : {}),
         })) as { sessionId: string };
         task.sessionId = session.sessionId;
         appendTaskEvent(task, 'running', '已创建浏览器会话');
@@ -330,7 +390,7 @@ export class WorkerDaemon {
     } catch (err: unknown) {
       const errorMsg = safeTaskError(err);
       task.errorCode = taskErrorCode(err);
-      if (task.retries < task.maxRetries) {
+      if (!(err instanceof StaleAccountPlacementError) && task.retries < task.maxRetries) {
         task.retries += 1;
         task.state = 'RETRYING';
         task.error = errorMsg;
@@ -376,10 +436,38 @@ export class WorkerDaemon {
         }
       }
     } finally {
+      if (permit && this.admissionController) {
+        this.admissionController.release(permit);
+      }
+      if (this.metrics && permit) {
+        this.metrics.increment('stops', {
+          tenant: task.tenantId,
+          ...(task.accountGroup !== undefined ? { accountGroup: task.accountGroup } : {}),
+          domain: domainKey,
+        });
+      }
       if (leaseTimer) clearInterval(leaseTimer);
       this.activeControllers.delete(controllerKey);
       this.activeTasksCount--;
       void Promise.all(this.allowedTenants.map((tenantId) => this.sendHeartbeat(tenantId)));
+    }
+  }
+
+  private async assertCurrentAccountPlacement(task: DistributedTaskRecord): Promise<void> {
+    if (task.mode !== 'browser' || task.profileId === undefined || !this.accountPlacementStore) return;
+    if (task.targetWorkerId === undefined || task.placementGeneration === undefined) {
+      throw new StaleAccountPlacementError();
+    }
+    const current = await this.accountPlacementStore.get(task.tenantId, task.profileId);
+    const placement = current?.data;
+    if (
+      !placement
+      || placement.workerId !== this.workerId
+      || placement.workerId !== task.targetWorkerId
+      || placement.storageNamespace !== this.storageNamespace
+      || placement.generation !== task.placementGeneration
+    ) {
+      throw new StaleAccountPlacementError();
     }
   }
 
@@ -576,4 +664,12 @@ function taskErrorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
   const code = (error as { code?: unknown }).code;
   return typeof code === 'string' && /^[A-Z][A-Z0-9_-]{1,63}$/.test(code) ? code : undefined;
+}
+
+function validStorageNamespace(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalized)) {
+    throw new Error('Worker storage namespace is invalid');
+  }
+  return normalized;
 }
