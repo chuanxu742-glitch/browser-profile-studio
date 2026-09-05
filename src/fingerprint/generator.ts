@@ -1,3 +1,4 @@
+import { availableParallelism } from 'node:os';
 import type {
   UnifiedFingerprintProfile,
   OSPlatform,
@@ -205,6 +206,8 @@ function createSeededRandom(seed: number) {
   };
 }
 
+export const HOST_OS: OSPlatform = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux';
+
 export interface GenerateFingerprintOptions {
   seed?: number | undefined;
   engine?: BrowserEngineType | undefined;
@@ -216,6 +219,8 @@ export interface GenerateFingerprintOptions {
   languages?: string[] | undefined;
   latitude?: number | undefined;
   longitude?: number | undefined;
+  hardwareConcurrency?: number | undefined;
+  deviceMemory?: number | undefined;
 }
 
 export function generateFingerprint(
@@ -224,7 +229,7 @@ export function generateFingerprint(
 ): UnifiedFingerprintProfile {
   let seed: number;
   let engine: BrowserEngineType = 'firefox';
-  let os: OSPlatform = legacyOs || 'windows';
+  let os: OSPlatform = legacyOs ?? HOST_OS;
   let countryCode = 'US';
   let requestedBrowserVersion: string | undefined;
   let explicitTimezone: string | undefined;
@@ -232,13 +237,15 @@ export function generateFingerprint(
   let explicitLanguages: string[] | undefined;
   let explicitLatitude: number | undefined;
   let explicitLongitude: number | undefined;
+  let requestedHardwareConcurrency: number | undefined;
+  let requestedDeviceMemory: number | undefined;
 
   if (typeof seedOrOptions === 'number') {
     seed = seedOrOptions;
   } else {
     seed = seedOrOptions.seed ?? 123456;
     engine = seedOrOptions.engine ?? 'firefox';
-    os = seedOrOptions.os ?? 'windows';
+    os = seedOrOptions.os ?? HOST_OS;
     countryCode = seedOrOptions.countryCode ?? 'US';
     requestedBrowserVersion = seedOrOptions.browserVersion;
     explicitTimezone = seedOrOptions.timezone;
@@ -246,6 +253,9 @@ export function generateFingerprint(
     explicitLanguages = seedOrOptions.languages;
     explicitLatitude = seedOrOptions.latitude;
     explicitLongitude = seedOrOptions.longitude;
+    requestedHardwareConcurrency = seedOrOptions.hardwareConcurrency;
+    requestedDeviceMemory = seedOrOptions.deviceMemory;
+    if (!seedOrOptions.countryCode && !explicitTimezone) explicitTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   }
 
   const browserIdentity = managedBrowserIdentity(engine);
@@ -261,12 +271,11 @@ export function generateFingerprint(
     : COMMON_GPUS.filter((g) => !g.unmaskedVendor.includes('Apple'));
   const chosenGpu = gpuPool[Math.floor(rng() * gpuPool.length)] ?? COMMON_GPUS[0]!;
 
-  // WebGL 基础供应商与渲染器必须与浏览器内核真实行为严格一致：
-  // 在 Windows/Linux 下 Firefox 为 Mozilla，Chromium 为 WebKit；macOS 下保持 Apple 硬件特征
-  const defaultVendor = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : chosenGpu.vendor;
-  const defaultRenderer = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : chosenGpu.renderer;
+  const defaultVendor = engine === 'firefox' ? 'Mozilla' : 'WebKit';
+  const defaultRenderer = engine === 'firefox' ? 'Mozilla' : 'WebKit WebGL';
 
   const webgl: WebGLFingerprint = {
+    mode: 'native',
     vendor: defaultVendor,
     renderer: defaultRenderer,
     unmaskedVendor: chosenGpu.unmaskedVendor,
@@ -280,19 +289,8 @@ export function generateFingerprint(
     noiseEnabled: true,
   };
 
-  const webgpu: WebGPUFingerprint = {
-    // Firefox does not expose navigator.gpu in the managed runtime. Do not
-    // advertise a capability that the selected engine cannot provide.
-    supported: engine === 'chromium',
-    ...(engine === 'chromium' ? {
-      adapterInfo: {
-        vendor: chosenGpu.unmaskedVendor,
-        architecture: 'common-3d',
-        device: chosenGpu.unmaskedRenderer,
-        description: chosenGpu.unmaskedRenderer,
-      },
-    } : {}),
-  };
+  // Availability and adapter information must be measured, not generated.
+  const webgpu: WebGPUFingerprint = {};
 
   // 2. Screen & Viewport Coherence
   const screen = COMMON_RESOLUTIONS[Math.floor(rng() * COMMON_RESOLUTIONS.length)] ?? COMMON_RESOLUTIONS[0]!;
@@ -302,10 +300,16 @@ export function generateFingerprint(
   };
 
   // 3. Hardware concurrency & memory
-  const concurrencyChoices = [4, 6, 8, 12, 16, 20, 24, 32];
-  const memoryChoices = [4, 8, 16, 24, 32, 64];
-  const hardwareConcurrency = concurrencyChoices[Math.floor(rng() * concurrencyChoices.length)] ?? 8;
-  const deviceMemory = memoryChoices[Math.floor(rng() * memoryChoices.length)] ?? 16;
+  const availableCores = availableParallelism();
+  const concurrencyChoices = [4, 6, 8, 12, 16, 20, 24, 32].filter(value => value <= availableCores);
+  const memoryChoices = [4, 8];
+  const selectedConcurrency = concurrencyChoices[Math.floor(rng() * concurrencyChoices.length)] ?? 1;
+  const selectedMemory = memoryChoices[Math.floor(rng() * memoryChoices.length)] ?? 8;
+  const hardwareConcurrency = requestedHardwareConcurrency ?? selectedConcurrency;
+  const deviceMemory = requestedDeviceMemory ?? selectedMemory;
+  if (!Number.isInteger(hardwareConcurrency) || hardwareConcurrency < 1 || hardwareConcurrency > 256) throw new Error('HARDWARE_CONCURRENCY_INVALID');
+  if (hardwareConcurrency > availableCores) throw new Error('HARDWARE_CONCURRENCY_UNSUPPORTED: requested logical cores exceed the host');
+  if (![0.25, 0.5, 1, 2, 4, 8].includes(deviceMemory)) throw new Error('DEVICE_MEMORY_INVALID');
 
   let platform = 'Win32';
   let oscpu: string | undefined = 'Windows NT 10.0; Win64; x64';
@@ -439,17 +443,17 @@ export function generateFingerprint(
       seed: Math.floor(rng() * 65535) + 1,
     },
     audio: {
-      enabled: true,
+      enabled: false,
       seed: Math.floor(rng() * 65535) + 1,
     },
     webrtc: 'block_leak',
     plugins,
     stealth: {
       removeWebdriver: true,
-      mockChromeRuntime: engine === 'chromium',
-      mockNotificationPermission: true,
-      mockPlugins: true,
-      protectToString: true,
+      mockChromeRuntime: false,
+      mockNotificationPermission: false,
+      mockPlugins: false,
+      protectToString: false,
       blockServiceWorkers: false,
     },
   };

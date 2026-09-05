@@ -14,7 +14,7 @@ export interface ProxyCheckResult {
   readonly success: boolean;
   /** True only after a request actually traversed the proxy and returned an egress IP. */
   readonly verified?: boolean;
-  readonly checkLevel?: 'none' | 'connectivity' | 'egress';
+  readonly checkLevel?: 'none' | 'connectivity' | 'handshake' | 'egress';
   readonly server: string;
   readonly proxyType: ProxyType;
   readonly latencyMs?: number;

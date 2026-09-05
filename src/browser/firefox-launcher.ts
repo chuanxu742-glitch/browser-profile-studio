@@ -79,6 +79,7 @@ export interface FirefoxLauncherLike {
 }
 
 import { join } from 'node:path';
+import { cpus } from 'node:os';
 import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { atomicWriteFile } from '../storage/atomic-file.js';
 import { managedBrowserIdentity } from '../fingerprint/runtime-identity.js';
@@ -98,12 +99,15 @@ export function firefoxFingerprintUserPrefs(profile?: UnifiedFingerprintProfile)
     'general.platform.override': profile.platform,
     ...(profile.oscpu ? { 'general.oscpu.override': profile.oscpu } : {}),
     'intl.accept_languages': profile.geo.languages.join(', '),
+    'intl.locale.requested': profile.geo.locale,
     'dom.maxHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintTimezone': profile.geo.timezoneId,
-    'webgl.sanitize-unmasked-renderer': false,
-    'webgl.override-unmasked-vendor': profile.webgl.unmaskedVendor || profile.webgl.vendor,
-    'webgl.override-unmasked-renderer': profile.webgl.unmaskedRenderer || profile.webgl.renderer,
+    ...(profile.webgl.mode === 'native' ? {} : {
+      'webgl.sanitize-unmasked-renderer': false,
+      'webgl.override-unmasked-vendor': profile.webgl.unmaskedVendor || profile.webgl.vendor,
+      'webgl.override-unmasked-renderer': profile.webgl.unmaskedRenderer || profile.webgl.renderer,
+    }),
   };
 }
 
@@ -118,13 +122,31 @@ export async function launchPersistentFirefox(
   };
   await installManagedFirefoxExtensions(profileDirectory, options.managedExtensions ?? []);
   const customCore = await resolveVerifiedFirefoxCore();
+  const profile = options.fingerprintProfile;
+  const hostOs = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux';
+  if (profile && profile.os !== hostOs) {
+    throw new Error('FINGERPRINT_OS_UNSUPPORTED: native fonts and graphics require a profile matching the host OS');
+  }
+  if (profile && !customCore && profile.hardware.hardwareConcurrency > cpus().length) {
+    throw new Error('FIREFOX_CORE_REQUIRED: exact hardware concurrency above the host requires the verified custom core');
+  }
+  if (profile && !customCore && profile.geo.timezoneId !== Intl.DateTimeFormat().resolvedOptions().timeZone) {
+    throw new Error('FIREFOX_CORE_REQUIRED: Service Worker timezone overrides require the verified custom core');
+  }
+  if (profile?.webrtc === 'replace') throw new Error('WEBRTC_REPLACE_UNSUPPORTED: configure relay-only protection with a real TURN service instead');
 
   const launchConfig = {
     headless: options.headless,
     ...(options.viewport ? { viewport: options.viewport } : {}),
+    ...(profile ? {
+      screen: { width: profile.screen.width, height: profile.screen.height },
+      deviceScaleFactor: profile.screen.devicePixelRatio,
+    } : {}),
     ...(options.proxy ? { proxy: options.proxy } : {}),
     ...(options.timezoneId ? { timezoneId: options.timezoneId } : {}),
-    ...(options.locale ? { locale: options.locale } : {}),
+    // Juggler locale overrides collapse navigator.languages to one entry and
+    // do not reach Service Workers. Native preferences own profiled locales.
+    ...(!profile && options.locale ? { locale: options.locale } : {}),
     ...(options.geolocation ? { geolocation: options.geolocation } : {}),
     ...(options.permissions ? { permissions: options.permissions } : {}),
     ...(options.extraHTTPHeaders ? { extraHTTPHeaders: options.extraHTTPHeaders } : {}),
@@ -141,10 +163,17 @@ export async function launchPersistentFirefox(
     firefoxUserPrefs: {
       'dom.webdriver.enabled': false,
       'privacy.resistFingerprinting': false,
-      'media.peerconnection.ice.default_address_only': true,
-      'webgl.force-enabled': true,
-      'layers.acceleration.force-enabled': true,
-      'gfx.font_rendering.cleartype_params.rendering_mode': 5,
+      ...(options.proxy ? {
+        'network.proxy.no_proxies_on': '',
+        'network.proxy.allow_hijacking_localhost': true,
+        'network.proxy.socks_remote_dns': true,
+        'media.peerconnection.ice.proxy_only': true,
+      } : {}),
+      ...(profile?.webrtc === 'disable' ? { 'media.peerconnection.enabled': false } : {}),
+      ...(profile && profile.webrtc !== 'direct' ? {
+        'media.peerconnection.ice.relay_only': true,
+        'media.peerconnection.ice.no_host': true,
+      } : {}),
       ...(options.managedExtensions?.length ? {
         'extensions.autoDisableScopes': 0,
         'extensions.enabledScopes': 15,
@@ -156,13 +185,24 @@ export async function launchPersistentFirefox(
   };
 
   const context = await firefox.launchPersistentContext(profileDirectory, launchConfig);
-  await assertManagedRuntimeVersion(context, 'firefox');
-
-  if (options.initScript && typeof context?.addInitScript === 'function') {
-    await context.addInitScript(options.initScript);
+  try {
+    await assertManagedRuntimeVersion(context, 'firefox');
+    if (profile) {
+      const page = context.pages?.()[0] ?? await context.newPage?.();
+      const locale = await page?.evaluate?.('Intl.DateTimeFormat().resolvedOptions().locale');
+      if (typeof locale !== 'string'
+        || new Intl.Locale(locale).maximize().baseName !== new Intl.Locale(profile.geo.locale).maximize().baseName) {
+        throw new Error(`FIREFOX_LOCALE_UNSUPPORTED: requested ${profile.geo.locale}, native formatting locale ${String(locale)}; page-only locale overrides do not reach Service Workers`);
+      }
+    }
+    if (options.initScript && typeof context.addInitScript === 'function') {
+      await context.addInitScript(options.initScript);
+    }
+    return context;
+  } catch (error) {
+    await context.close().catch(() => undefined);
+    throw error;
   }
-
-  return context;
 }
 
 export async function assertManagedRuntimeVersion(

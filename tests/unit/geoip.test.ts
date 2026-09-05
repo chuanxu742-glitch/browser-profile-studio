@@ -52,5 +52,29 @@ describe('GeoIP Module Unit Tests', () => {
       expect(aligned.geolocation.latitude).toBeCloseTo(34.0522);
       expect(aligned.geolocation.longitude).toBeCloseTo(-118.2437);
     });
+
+    it('does not force a country language or coordinates when explicit choices differ', () => {
+      const aligned = alignGeoEnvironment({
+        countryCode: 'JP', ipOrHost: '203.0.113.9', timezone: 'America/Los_Angeles',
+        locale: 'en-GB', geolocation: { latitude: 34.0522, longitude: -118.2437, accuracy: 0 },
+      });
+      expect(aligned.timezoneId).toBe('America/Los_Angeles');
+      expect(aligned.locale).toBe('en-GB');
+      expect(aligned.extraHeaders['Accept-Language']).toBe('en-GB');
+      expect(aligned.geolocation).toEqual({ latitude: 34.0522, longitude: -118.2437, accuracy: 0 });
+    });
+
+    it('rejects invalid timezone and coordinate overrides rather than silently replacing them', () => {
+      expect(() => alignGeoEnvironment({ timezone: 'Not/A_Timezone' })).toThrow();
+      for (const geolocation of [
+        { latitude: Number.NaN, longitude: 0 },
+        { latitude: 91, longitude: 0 },
+        { latitude: 0, longitude: -181 },
+        { latitude: 0, longitude: 0, accuracy: -1 },
+        { latitude: 0, longitude: 0, accuracy: Number.POSITIVE_INFINITY },
+      ]) expect(() => alignGeoEnvironment({ geolocation })).toThrow('GEOLOCATION_INVALID');
+      expect(alignGeoEnvironment({ geolocation: { latitude: -90, longitude: 180, accuracy: 0 } }).geolocation)
+        .toEqual({ latitude: -90, longitude: 180, accuracy: 0 });
+    });
   });
 });

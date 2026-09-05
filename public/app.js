@@ -558,8 +558,8 @@ function renderProfilesTable(list, offset = 0) {
         <div style="font-size: 11px; color: var(--text-dim);">${p.country ? `🌐 ${escapeHtml(p.country)}` : '未验证出口'}</div>
       </td>
       <td>
-        <span class="tag-badge" style="color: #34d399;">Canvas微扰</span>
-        <span class="tag-badge" style="color: #38bdf8;">WebGL对齐</span>
+        <span class="tag-badge">${p.fingerprintGenerationVersion === 2 ? '画像 v2' : '旧画像：需明确升级'}</span>
+        <span class="tag-badge">原生字体与图形</span>
       </td>
       <td>
         <div style="display: flex; gap: 4px;">
@@ -579,6 +579,7 @@ function renderProfilesTable(list, offset = 0) {
           ` : `
             <button class="btn btn-sm btn-success btn-open-window" data-id="${escapeHtml(p.profileId)}">▶ 打开窗口</button>
           `}
+          ${!isRunning && p.fingerprintGenerationVersion !== 2 ? `<button class="btn btn-sm btn-outline btn-migrate-profile" data-id="${escapeHtml(p.profileId)}">升级画像</button>` : ''}
           <button class="btn btn-sm btn-outline btn-edit-profile" data-id="${escapeHtml(p.profileId)}" title="修改名称和标签">✏️</button>
           <button class="btn btn-sm btn-outline btn-clone-profile" data-id="${escapeHtml(p.profileId)}" title="克隆环境">📋</button>
           <button class="btn btn-sm btn-outline btn-rotate-proxy" data-id="${escapeHtml(p.profileId)}" title="从健康代理池轮换">🔄</button>
@@ -598,6 +599,23 @@ function updateTableStatusButtons() {
 
 // 绑定表格操作事件
 function attachTableEvents() {
+  document.querySelectorAll('.btn-migrate-profile').forEach(btn => {
+    btn.onclick = async () => {
+      const profileId = btn.getAttribute('data-id');
+      if (!confirm('升级会改变此环境的浏览器身份，网站可能要求重新登录。保留已有种子、Cookie 和存储，但按本机能力重新生成硬件及屏幕配置。旧配置不会自动升级；建议先克隆备份。是否明确升级到画像 v2？')) return;
+      btn.disabled = true;
+      try {
+        const response = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profileId)}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fingerprint: { generationVersion: 2 } }),
+        });
+        const result = await response.json();
+        if (!result.success) throw new Error(result.message || '升级失败');
+        showToast('已明确升级画像；已有 Cookie 和存储未清空', 'success');
+        await loadProfiles();
+      } catch (error) { showToast(error.message, 'error'); btn.disabled = false; }
+    };
+  });
   // 打开真实窗口
   document.querySelectorAll('.btn-open-window').forEach(btn => {
     btn.onclick = async () => {
@@ -852,10 +870,12 @@ async function testSingleProxy() {
     const json = await res.json();
     if (json.success && json.data?.success) {
       const verified = json.data.verified === true;
+      const level = verified ? '代理隧道出口已验证（不是浏览器出口验收）'
+        : json.data.checkLevel === 'handshake' ? '代理握手成功，出口尚未验证' : '仅 TCP 端口可达，握手与出口尚未验证';
       resultBox.innerHTML = `
-        <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 14px; color: #34d399;">
-          <strong>${verified ? '✅ 已验证真实代理出口' : '⚠️ 代理端口可达，出口尚未验证'}</strong><br>
-          • 真实出口 IP: <code>${escapeHtml(json.data.outboundIp || '未取得')}</code><br>
+        <div style="background: ${verified ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)'}; border: 1px solid ${verified ? '#34d399' : '#fbbf24'}; border-radius: 8px; padding: 14px; color: ${verified ? '#34d399' : '#fbbf24'};">
+          <strong>${level}</strong><br>
+          • 隧道观测 IP: <code>${escapeHtml(json.data.outboundIp || '未取得')}</code><br>
           • 归属国家/地区: <code>${escapeHtml(json.data.country || '未取得')}</code><br>
           • 检测耗时: <code>${Number.isFinite(json.data.latencyMs) ? json.data.latencyMs : '-'} ms</code>
           ${json.data.probeError ? `<br>• 出口探测说明: ${escapeHtml(json.data.probeError)}` : ''}

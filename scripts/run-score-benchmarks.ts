@@ -5,90 +5,66 @@ import { join } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 
 async function runScoreBenchmarks() {
-  console.log('===============================================================');
-  console.log('🧪 启动【BrowserScan & Whoer.net 量化评分专项实测】');
-  console.log('===============================================================');
-
-  const artifactsDir = join(process.cwd(), 'artifacts', 'benchmarks');
+  const startedAt = new Date().toISOString();
+  const artifactsDir = join(process.cwd(), 'artifacts', 'benchmarks', startedAt.replaceAll(':', '-'));
   await mkdir(artifactsDir, { recursive: true });
-
   const manager = new SessionManager({
     maxSessions: 1,
     urlPolicy: new UrlPolicy({
-      allowedHosts: [
-        '*.browserscan.net',
-        'browserscan.net',
-        '*.whoer.net',
-        'whoer.net',
-        '127.0.0.1',
-      ],
-      resourceHosts: [
-        '*.browserscan.net',
-        'browserscan.net',
-        '*.whoer.net',
-        'whoer.net',
-        '*.cloudflare.com',
-        '*.gstatic.com',
-        '*.googleapis.com',
-        '*.google.com',
-        '127.0.0.1',
-      ],
-      allowHttp: true,
-      allowPrivateNetwork: true,
+      allowedHosts: ['browserscan.net', '*.browserscan.net', 'whoer.net', '*.whoer.net'],
+      resourceHosts: ['browserscan.net', '*.browserscan.net', 'whoer.net', '*.whoer.net', '*.cloudflare.com', '*.gstatic.com', '*.googleapis.com', '*.google.com'],
     }),
     challengePolicy: new ChallengePolicy(),
   });
-
-  // 使用与当前出口 IP 吻合的自洽环境
-  const session = await manager.start({
-    headless: true,
-    inputProfile: 'paced',
-    fingerprint: true,
-    fingerprintSeed: 654321,
-    countryCode: 'NL', // 对齐当前欧洲出口 IP 时区环境
-  });
-
+  const results: Array<Record<string, unknown>> = [];
+  let runError: string | undefined;
   try {
-    // 1. 测试 BrowserScan (0~100% 综合伪装度评分)
-    console.log('\n🔍 [1/2] 正在访问并评测: BrowserScan (https://www.browserscan.net/)...');
-    await manager.open(session.sessionId, 'https://www.browserscan.net/', {
-      timeoutMs: 45_000,
-      waitUntil: 'domcontentloaded',
+    const session = await manager.start({
+      engine: 'chromium', headless: process.env.BENCHMARK_HEADLESS !== 'false',
+      fingerprint: true, fingerprintSeed: 654321,
+      ...(process.env.BENCHMARK_COUNTRY ? { countryCode: process.env.BENCHMARK_COUNTRY } : {}),
+      ...(process.env.BENCHMARK_TIMEZONE ? { timezone: process.env.BENCHMARK_TIMEZONE } : {}),
     });
-
-    console.log('⏳ 等待 BrowserScan 前端指纹渲染与综合评分计算...');
-    await new Promise((r) => setTimeout(r, 8000));
-
-    const scanSnapshot = await manager.snapshot(session.sessionId, { includeText: true });
-    const scanScreenshot = await manager.screenshot(session.sessionId, { fullPage: false });
-    const scanImgPath = join(artifactsDir, 'browserscan_score.png');
-    await writeFile(scanImgPath, Buffer.from(scanScreenshot.image.data, 'base64'));
-    console.log(`✅ BrowserScan 测试完成！截屏已保存至: ${scanImgPath}`);
-    console.log('📝 BrowserScan 页面摘要:', scanSnapshot.text ? scanSnapshot.text.slice(0, 400).replace(/\s+/g, ' ') : 'Loaded');
-
-    // 2. 测试 Whoer.net (0~100% 匿名度评分)
-    console.log('\n🔍 [2/2] 正在访问并评测: Whoer.net (https://whoer.net/)...');
-    await manager.open(session.sessionId, 'https://whoer.net/', {
-      timeoutMs: 45_000,
-      waitUntil: 'domcontentloaded',
-    });
-
-    console.log('⏳ 等待 Whoer.net 匿名度与 DNS 泄漏检测计算...');
-    await new Promise((r) => setTimeout(r, 6000));
-
-    const whoerSnapshot = await manager.snapshot(session.sessionId, { includeText: true });
-    const whoerScreenshot = await manager.screenshot(session.sessionId, { fullPage: false });
-    const whoerImgPath = join(artifactsDir, 'whoer_score.png');
-    await writeFile(whoerImgPath, Buffer.from(whoerScreenshot.image.data, 'base64'));
-    console.log(`✅ Whoer.net 测试完成！截屏已保存至: ${whoerImgPath}`);
-    console.log('📝 Whoer.net 页面摘要:', whoerSnapshot.text ? whoerSnapshot.text.slice(0, 400).replace(/\s+/g, ' ') : 'Loaded');
-
-  } catch (err: any) {
-    console.error('❌ 测试过程中发生异常:', err?.message || err);
+    for (const [name, url] of [['browserscan', 'https://www.browserscan.net/'], ['whoer', 'https://whoer.net/']]) {
+      const result: Record<string, unknown> = { name, url, loadStatus: 'ERROR', detectionResult: 'unverified' };
+      results.push(result);
+      try {
+        await manager.open(session.sessionId, url!, { timeoutMs: 45_000, waitUntil: 'domcontentloaded' });
+        // Retain each raw artifact as soon as it is captured, even when a later
+        // screenshot or diagnostic fails. Reachability never becomes a score.
+        result.loadStatus = 'LOADED';
+        const snapshot = await manager.snapshot(session.sessionId, { includeText: true, maxChars: 100_000 });
+        const textPath = join(artifactsDir, `${name}.txt`);
+        await writeFile(textPath, snapshot.text ?? '', 'utf8');
+        result.textPath = textPath;
+        result.textTruncated = snapshot.textTruncated ?? false;
+        const screenshot = await manager.screenshot(session.sessionId, { fullPage: false });
+        const screenshotPath = join(artifactsDir, `${name}.png`);
+        await writeFile(screenshotPath, Buffer.from(screenshot.image.data, 'base64'));
+        result.screenshotPath = screenshotPath;
+        result.diagnostics = await manager.environmentDiagnostics(session.sessionId);
+      } catch (error: unknown) {
+        result.error = error instanceof Error ? error.message : String(error);
+        process.exitCode = 1;
+      } finally {
+        result.capturedAt = new Date().toISOString();
+      }
+    }
+  } catch (error: unknown) {
+    runError = error instanceof Error ? error.message : String(error);
+    process.exitCode = 1;
   } finally {
-    await manager.stop(session.sessionId, 'score_benchmarks_finished');
-    await manager.shutdown();
+    try {
+      await manager.shutdown();
+    } catch (error: unknown) {
+      runError = [runError, `shutdown: ${error instanceof Error ? error.message : String(error)}`].filter(Boolean).join('; ');
+      process.exitCode = 1;
+    }
+    const reportPath = join(artifactsDir, 'report.json');
+    await writeFile(reportPath, JSON.stringify({ startedAt, finishedAt: new Date().toISOString(), detectionResult: 'unverified', ...(runError ? { error: runError } : {}), results }, null, 2));
+    console.log(`Evidence saved: ${reportPath}. Page loads are not detector passes; no scores were inferred.`);
+    console.table(results.map(({ name, loadStatus, detectionResult }) => ({ name, loadStatus, detectionResult })));
   }
 }
 
-void runScoreBenchmarks();
+runScoreBenchmarks().catch((error: unknown) => { console.error(error); process.exitCode = 1; });

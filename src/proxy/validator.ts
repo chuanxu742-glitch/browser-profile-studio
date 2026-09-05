@@ -66,21 +66,23 @@ export function normalizeProxyConfig(raw: ProxyConfig | string): NormalizedProxy
   const protocolType = parsed.protocol.replace(':', '') as ProxyType;
   const type = explicitType || protocolType;
 
-  const host = parsed.hostname;
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (!host) {
     throw new BrowserToolError('INVALID_ARGUMENT', 'Proxy server host is missing.');
   }
 
-  let port = parsed.port ? parseInt(parsed.port, 10) : 0;
-  if (!port || isNaN(port) || port < 1 || port > 65535) {
-    port = type.startsWith('socks') ? 1080 : 8080;
+  // URL drops explicit default ports (80/443); preserve what the caller supplied.
+  const explicitPort = serverStr.match(/^[a-z0-9]+:\/\/[^/?#]*:(\d+)(?:[/?#]|$)/i)?.[1];
+  const port = Number(explicitPort ?? (parsed.port || (type.startsWith('socks') ? 1080 : 8080)));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new BrowserToolError('INVALID_ARGUMENT', 'Proxy port must be between 1 and 65535.');
   }
 
   const username = explicitUser || (parsed.username ? decodeURIComponent(parsed.username) : undefined);
   const password = explicitPass !== undefined ? explicitPass : (parsed.password ? decodeURIComponent(parsed.password) : undefined);
 
   // Playwright expects server format: "protocol://host:port" without credentials in the URL
-  const server = `${type}://${host}:${port}`;
+  const server = `${type}://${host.includes(':') ? `[${host}]` : host}:${port}`;
 
   return Object.freeze({
     server,

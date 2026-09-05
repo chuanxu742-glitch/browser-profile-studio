@@ -24,11 +24,11 @@ export interface EnvironmentSurfaceSnapshot {
   readonly webdriver?: boolean;
   readonly webgl?: { readonly vendor?: string; readonly renderer?: string };
   readonly integrity?: {
-    readonly hasNavigatorInstancePollution: boolean;
-    readonly pollutedNavigatorProps: readonly string[];
-    readonly isNavigatorToStringNative: boolean;
-    readonly isFunctionToStringNative: boolean;
-    readonly isWebglNative: boolean;
+    readonly hasNavigatorInstancePollution?: boolean;
+    readonly pollutedNavigatorProps?: readonly string[];
+    readonly isNavigatorToStringNative?: boolean;
+    readonly isFunctionToStringNative?: boolean;
+    readonly isWebglNative?: boolean;
   };
 }
 
@@ -74,7 +74,7 @@ export function expectedEnvironment(profile: UnifiedFingerprintProfile | undefin
     timezone: profile.geo.timezoneId,
     viewport: profile.viewport,
     hardwareConcurrency: profile.hardware.hardwareConcurrency,
-    webgl: { vendor: profile.webgl.unmaskedVendor || profile.webgl.vendor, renderer: profile.webgl.unmaskedRenderer || profile.webgl.renderer },
+    ...(profile.webgl.mode === 'native' ? {} : { webgl: { vendor: profile.webgl.unmaskedVendor || profile.webgl.vendor, renderer: profile.webgl.unmaskedRenderer || profile.webgl.renderer } }),
     webrtc: profile.webrtc,
   };
 }
@@ -96,63 +96,69 @@ export function buildEnvironmentDiagnostics(input: {
     check('runtime-surface', 'warning', '无法读取浏览器运行时表面');
   } else {
     const actualMajor = browserMajor(observed.userAgent);
-    if (input.expected.browserMajor && actualMajor) {
+    if (input.expected.browserMajor) {
       check('browser-version', input.expected.browserMajor === actualMajor ? 'pass' : 'warning', input.expected.browserMajor === actualMajor ? '浏览器主版本一致' : '浏览器主版本与配置画像不一致');
     }
-    if (input.expected.os && observed.platform) {
-      const matches = platformMatches(input.expected.os, observed.platform);
+    if (input.expected.os) {
+      const matches = observed.platform !== undefined && platformMatches(input.expected.os, observed.platform);
       check('platform', matches ? 'pass' : 'warning', matches ? '平台表面一致' : '平台表面与配置画像不一致');
     }
-    if (input.expected.userAgent && observed.userAgent) {
+    if (input.expected.userAgent) {
       check('user-agent', input.expected.userAgent === observed.userAgent ? 'pass' : 'warning', input.expected.userAgent === observed.userAgent ? 'User-Agent 一致' : 'User-Agent 与配置画像不一致');
     }
-    if (input.expected.locale && observed.language) {
+    if (input.expected.locale) {
       const locale = input.expected.locale.toLowerCase();
-      const language = observed.language.toLowerCase();
+      const language = observed.language?.toLowerCase() ?? '';
       check('locale', language === locale || language.startsWith(`${locale}-`) ? 'pass' : 'warning', language === locale || language.startsWith(`${locale}-`) ? '语言区域一致' : '语言区域与配置画像不一致');
     }
-    if (input.expected.timezone && observed.timezone) {
+    if (input.expected.timezone) {
       check('timezone', input.expected.timezone === observed.timezone ? 'pass' : 'warning', input.expected.timezone === observed.timezone ? '时区一致' : '时区与配置画像不一致');
     }
-    if (input.expected.viewport && observed.viewport) {
-      const matches = input.expected.viewport.width === observed.viewport.width && input.expected.viewport.height === observed.viewport.height;
-      check('viewport', matches || !input.headless ? 'pass' : 'warning', matches ? 'Viewport 一致' : input.headless ? '无头模式 Viewport 与配置画像不一致' : '有头模式 Viewport 由真实窗口决定');
+    if (input.expected.viewport) {
+      const matches = input.expected.viewport.width === observed.viewport?.width && input.expected.viewport.height === observed.viewport?.height;
+      check('viewport', matches ? 'pass' : 'warning', matches ? 'Viewport 一致' : 'Viewport 与配置不同或未采集；有头窗口可被用户调整');
     }
-    if (input.expected.hardwareConcurrency !== undefined && observed.hardwareConcurrency !== undefined) {
+    if (input.expected.hardwareConcurrency !== undefined) {
       const matches = input.expected.hardwareConcurrency === observed.hardwareConcurrency;
       check('hardware-concurrency', matches ? 'pass' : 'warning', matches ? '硬件并发数一致' : '硬件并发数与配置画像不一致');
     }
-    if (input.expected.webgl && observed.webgl) {
-      const vendorMatches = !input.expected.webgl.vendor || !observed.webgl.vendor || input.expected.webgl.vendor === observed.webgl.vendor;
-      const rendererMatches = !input.expected.webgl.renderer || !observed.webgl.renderer || input.expected.webgl.renderer === observed.webgl.renderer;
-      check('webgl', vendorMatches && rendererMatches ? 'pass' : 'warning', vendorMatches && rendererMatches ? 'WebGL 表面一致' : 'WebGL 表面与配置画像不一致');
+    if (input.expected.webgl) {
+      const comparable = Boolean(input.expected.webgl.vendor || input.expected.webgl.renderer);
+      const vendorMatches = !input.expected.webgl.vendor || input.expected.webgl.vendor === observed.webgl?.vendor;
+      const rendererMatches = !input.expected.webgl.renderer || input.expected.webgl.renderer === observed.webgl?.renderer;
+      const matches = comparable && vendorMatches && rendererMatches;
+      check('webgl', matches ? 'pass' : 'warning', matches ? 'WebGL 表面一致' : 'WebGL 表面不一致或缺少可比较的配置/观测');
     }
-    check('webdriver-signal', observed.webdriver === true ? 'warning' : 'pass', observed.webdriver === true ? '检测到 navigator.webdriver 信号；不自动修改并记录警告' : '未检测到 navigator.webdriver=true');
+    if (input.expected.platform) check('platform-value', observed.platform === input.expected.platform ? 'pass' : 'warning', '比较已采集的平台值与配置');
+    if (input.expected.languages) check('languages', JSON.stringify(observed.languages) === JSON.stringify(input.expected.languages) ? 'pass' : 'warning', '比较语言列表及顺序；缺失不视为通过');
+    check('webdriver-signal', observed.webdriver === false ? 'pass' : 'warning', observed.webdriver === false ? '本次未观察到 webdriver=true' : '发现 webdriver 信号或未采集');
 
     if (observed.integrity) {
-      if (observed.integrity.hasNavigatorInstancePollution) {
-        check(
-          'navigator-prototype-integrity',
-          'fail',
-          `Navigator 实例被自有属性污染: [${observed.integrity.pollutedNavigatorProps.join(', ')}]，破坏了 WebIDL 原型链`
-        );
+      const integrity = observed.integrity;
+      const pollutedProps = integrity.pollutedNavigatorProps;
+      if (integrity.hasNavigatorInstancePollution === true || (pollutedProps && pollutedProps.length > 0)) {
+        check('navigator-prototype-integrity', 'fail', `Navigator 实例被自有属性污染: [${pollutedProps?.join(', ') ?? '属性列表未采集'}]，破坏了 WebIDL 原型链`);
+      } else if (integrity.hasNavigatorInstancePollution === false && pollutedProps?.length === 0) {
+        check('navigator-prototype-integrity', 'pass', '本次检查的 Navigator 实例属性无污染；未证明整个原型链完整');
       } else {
-        check('navigator-prototype-integrity', 'pass', 'Navigator 原型链与对象完整性良好');
+        check('navigator-prototype-integrity', 'warning', 'Navigator 实例属性检查未完整采集');
       }
 
-      if (!observed.integrity.isFunctionToStringNative) {
+      if (integrity.isFunctionToStringNative === false) {
         check('function-tostring-integrity', 'fail', 'Function.prototype.toString 原生行为完整性受损');
+      } else if (integrity.isFunctionToStringNative === true) {
+        check('function-tostring-integrity', 'pass', '本次函数源码呈原生样式；不代表跨上下文完整性已验证');
       } else {
-        check('function-tostring-integrity', 'pass', 'Function.prototype.toString 原生行为完整');
+        check('function-tostring-integrity', 'warning', '未采集 Function.prototype.toString 行为');
       }
 
-      if (!observed.integrity.isNavigatorToStringNative) {
-        check('navigator-tostring-integrity', 'warning', 'Object.prototype.toString(navigator) 异常');
-      }
+      check('navigator-tostring-integrity', integrity.isNavigatorToStringNative === true ? 'pass' : 'warning', integrity.isNavigatorToStringNative === true ? '本次 Navigator 对象标签符合预期；不证明整个原型链完整' : 'Navigator 对象标签异常或未采集');
+      check('webgl-function-shape', observed.integrity.isWebglNative === false ? 'fail' : observed.integrity.isWebglNative === true ? 'pass' : 'warning', '仅检查已取得的 WebGL 方法源码样式；无上下文则未验证');
     }
+    if (!observed.integrity) check('native-integrity', 'warning', '未采集原生对象完整性');
   }
 
-  if (input.expected.webrtc) check('webrtc-policy', input.expected.webrtc === 'block_leak' || input.expected.webrtc === 'disable' ? 'pass' : 'warning', `WebRTC 策略为 ${input.expected.webrtc}；实际出口地址需通过网络验收确认`);
+  if (input.expected.webrtc) check('webrtc-policy', 'warning', `已配置 ${input.expected.webrtc}；配置值不能证明 ICE、DNS 或实际出口无泄漏`);
   if (checks.length === 0) check('runtime-surface', 'warning', '没有可比较的运行时表面');
   const consistency: EnvironmentConsistency = checks.some((item) => item.status === 'fail')
     ? 'inconsistent'

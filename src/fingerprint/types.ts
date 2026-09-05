@@ -31,6 +31,8 @@ export interface HardwareFingerprint {
 }
 
 export interface WebGLFingerprint {
+  /** Native rendering is required unless a verified core implements an override. */
+  readonly mode?: 'native';
   readonly vendor: string;
   readonly renderer: string;
   readonly unmaskedVendor: string;
@@ -45,7 +47,8 @@ export interface WebGLFingerprint {
 }
 
 export interface WebGPUFingerprint {
-  readonly supported: boolean;
+  /** Undefined until measured in a real runtime. */
+  readonly supported?: boolean;
   readonly adapterInfo?: {
     vendor: string;
     architecture: string;

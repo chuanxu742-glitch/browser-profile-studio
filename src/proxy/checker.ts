@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
-import { createConnection, type Socket } from 'node:net';
-import { connect as connectTls, type TLSSocket } from 'node:tls';
+import { createConnection, isIP, type Socket } from 'node:net';
+import { checkServerIdentity, connect as connectTls, type TLSSocket } from 'node:tls';
 import type { ProxyConfig, ProxyCheckResult } from './types.js';
 import { normalizeProxyConfig } from './validator.js';
 
@@ -23,6 +23,7 @@ export async function checkProxy(rawConfig: ProxyConfig | string, options: Proxy
   const startedAt = Date.now();
   let socket: Socket | TLSSocket | undefined;
   let connectivityConfirmed = false;
+  let handshakeConfirmed = false;
   try {
     const service = options.ipCheckServiceUrl === undefined ? 'https://api.ipify.org?format=json' : options.ipCheckServiceUrl;
     if (service === false) {
@@ -33,8 +34,10 @@ export async function checkProxy(rawConfig: ProxyConfig | string, options: Proxy
     const target = new URL(service);
     if (!['http:', 'https:'].includes(target.protocol)) throw new Error('IP check service must use HTTP or HTTPS');
     const targetPort = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
-    socket = await openProxyTunnel(normalized, target.hostname, targetPort, timeoutMs, (connected) => { socket = connected; connectivityConfirmed = true; });
-    if (target.protocol === 'https:') socket = await upgradeTls(socket, target.hostname, timeoutMs);
+    const targetHost = target.hostname.replace(/^\[|\]$/g, '');
+    socket = await openProxyTunnel(normalized, targetHost, targetPort, timeoutMs, (connected) => { socket = connected; connectivityConfirmed = true; });
+    handshakeConfirmed = true;
+    if (target.protocol === 'https:') socket = await upgradeTls(socket, targetHost, timeoutMs);
     const requestTarget = `${target.pathname}${target.search}`;
     socket.write(`GET ${requestTarget} HTTP/1.1\r\nHost: ${target.host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n`);
     const raw = await readToEnd(socket, timeoutMs, 256 * 1024);
@@ -43,14 +46,18 @@ export async function checkProxy(rawConfig: ProxyConfig | string, options: Proxy
     const head = raw.slice(0, split);
     const status = Number(head.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i)?.[1] ?? 0);
     if (status < 200 || status >= 300) throw new Error(`Egress service returned HTTP ${status || 'unknown'}`);
-    const payload = JSON.parse(decodeHttpBody(head, raw.slice(split + 4))) as { ip?: unknown; country?: unknown; country_code?: unknown };
-    const outboundIp = typeof payload.ip === 'string' ? payload.ip.trim() : '';
-    if (!outboundIp) throw new Error('Egress service returned no IP address');
-    const country = typeof payload.country === 'string' ? payload.country : typeof payload.country_code === 'string' ? payload.country_code : undefined;
+    const payload: unknown = JSON.parse(decodeHttpBody(head, raw.slice(split + 4)));
+    if (!payload || typeof payload !== 'object' || !('ip' in payload) || typeof payload.ip !== 'string') {
+      throw new Error('Egress service returned no IP address');
+    }
+    const outboundIp = payload.ip.trim();
+    if (isIP(outboundIp) === 0) throw new Error('Egress service returned an invalid IP address');
+    const rawCountry = 'country' in payload ? payload.country : 'country_code' in payload ? payload.country_code : undefined;
+    const country = typeof rawCountry === 'string' && /^[a-z]{2}$/i.test(rawCountry) ? rawCountry.toUpperCase() : undefined;
     return { success: true, verified: true, checkLevel: 'egress', server: normalized.server, proxyType: normalized.type, latencyMs: Date.now() - startedAt, outboundIp, ...(country ? { country } : {}) };
   } catch (error: unknown) {
     if (connectivityConfirmed) {
-      return { success: true, verified: false, checkLevel: 'connectivity', server: normalized.server, proxyType: normalized.type, latencyMs: Date.now() - startedAt, probeError: `Egress verification failed: ${messageOf(error)}` };
+      return { success: true, verified: false, checkLevel: handshakeConfirmed ? 'handshake' : 'connectivity', server: normalized.server, proxyType: normalized.type, latencyMs: Date.now() - startedAt, probeError: `Egress verification failed: ${messageOf(error)}` };
     }
     return { success: false, verified: false, checkLevel: 'none', server: normalized.server, proxyType: normalized.type, latencyMs: Date.now() - startedAt, error: `Proxy verification failed: ${messageOf(error)}` };
   } finally {
@@ -61,12 +68,17 @@ export async function checkProxy(rawConfig: ProxyConfig | string, options: Proxy
 type NormalizedProxy = ReturnType<typeof normalizeProxyConfig>;
 
 async function openProxyTunnel(proxy: NormalizedProxy, host: string, port: number, timeoutMs: number, onConnected: (socket: Socket) => void): Promise<Socket> {
-  const socket = await connectTcp(proxy.host, proxy.port, timeoutMs);
+  let socket = await connectTcp(proxy.host, proxy.port, timeoutMs);
   onConnected(socket);
   try {
   await assertPeerOpen(socket);
+  if (proxy.type === 'https') {
+    socket = await upgradeTls(socket, proxy.host, timeoutMs);
+    onConnected(socket);
+  }
   if (proxy.type === 'http' || proxy.type === 'https') {
-    socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${proxyAuthorization(proxy.username, proxy.password)}Connection: keep-alive\r\n\r\n`);
+    const authority = `${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
+    socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${proxyAuthorization(proxy.username, proxy.password)}Connection: keep-alive\r\n\r\n`);
     const response = (await readUntil(socket, '\r\n\r\n', timeoutMs, 64 * 1024)).toString('latin1');
     const status = Number(response.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i)?.[1] ?? 0);
     if (status < 200 || status >= 300) throw new Error(`HTTP CONNECT failed with ${status || 'unknown status'}`);
@@ -76,24 +88,37 @@ async function openProxyTunnel(proxy: NormalizedProxy, host: string, port: numbe
     const hasCredentials = Boolean(proxy.username || proxy.password);
     socket.write(Buffer.from([5, hasCredentials ? 2 : 1, 0, ...(hasCredentials ? [2] : [])]));
     const hello = await readAtLeast(socket, 2, timeoutMs);
-    if (hello[0] !== 5 || hello[1] === 0xff) throw new Error('SOCKS5 authentication negotiation failed');
+    if (hello[0] !== 5 || (hello[1] !== 0 && !(hasCredentials && hello[1] === 2))) throw new Error('SOCKS5 authentication negotiation failed');
     if (hello[1] === 2) {
       const user = Buffer.from(proxy.username ?? '', 'utf8'); const pass = Buffer.from(proxy.password ?? '', 'utf8');
       if (user.length > 255 || pass.length > 255) throw new Error('SOCKS5 credentials are too long');
       socket.write(Buffer.concat([Buffer.from([1, user.length]), user, Buffer.from([pass.length]), pass]));
       const authenticated = await readAtLeast(socket, 2, timeoutMs);
-      if (authenticated[1] !== 0) throw new Error('SOCKS5 credentials were rejected');
+      if (authenticated[0] !== 1 || authenticated[1] !== 0) throw new Error('SOCKS5 credentials were rejected');
     }
-    const hostBytes = Buffer.from(host, 'utf8');
-    socket.write(Buffer.concat([Buffer.from([5, 1, 0, 3, hostBytes.length]), hostBytes, Buffer.from([port >> 8, port & 255])]));
-    const connected = await readAtLeast(socket, 5, timeoutMs);
-    if (connected[1] !== 0) throw new Error(`SOCKS5 connect failed (${connected[1]})`);
+    // Names are resolved by the proxy; literal addresses use their native ATYP.
+    socket.write(Buffer.concat([Buffer.from([5, 1, 0]), socks5Address(host), Buffer.from([port >> 8, port & 255])]));
+    const connected = await readBuffer(socket, timeoutMs, (buffer) => {
+      if (buffer.length < 4) return undefined;
+      if (buffer[0] !== 5 || buffer[1] !== 0 || buffer[2] !== 0) return 4;
+      if (buffer[3] === 1) return buffer.length >= 10 ? 10 : undefined;
+      if (buffer[3] === 4) return buffer.length >= 22 ? 22 : undefined;
+      if (buffer[3] === 3) {
+        const length = buffer.length >= 5 ? 7 + buffer[4]! : undefined;
+        return length !== undefined && buffer.length >= length ? length : undefined;
+      }
+      return 4;
+    });
+    if (connected[0] !== 5 || connected[1] !== 0 || connected[2] !== 0 || ![1, 3, 4].includes(connected[3]!)) {
+      throw new Error(`SOCKS5 connect failed (${connected[1]})`);
+    }
     return socket;
   }
+  if (isIP(host) === 6) throw new Error('SOCKS4 does not support IPv6 destinations');
   const hostBytes = Buffer.from(host, 'utf8');
   socket.write(Buffer.concat([Buffer.from([4, 1, port >> 8, port & 255, 0, 0, 0, 1]), Buffer.from(proxy.username ?? ''), Buffer.from([0]), hostBytes, Buffer.from([0])]));
   const connected = await readAtLeast(socket, 8, timeoutMs);
-  if (connected[1] !== 90) throw new Error(`SOCKS4 connect failed (${connected[1]})`);
+  if (connected[0] !== 0 || connected[1] !== 90) throw new Error(`SOCKS4 connect failed (${connected[1]})`);
   return socket;
   } catch (error) {
     closeSocket(socket);
@@ -113,7 +138,7 @@ function connectTcp(host: string, port: number, timeoutMs: number): Promise<Sock
 
 function upgradeTls(socket: Socket, servername: string, timeoutMs: number): Promise<TLSSocket> {
   return new Promise((resolve, reject) => {
-    const secure = connectTls({ socket, servername });
+    const secure = connectTls({ socket, servername: isIP(servername) ? '' : servername, checkServerIdentity: (_host, cert) => checkServerIdentity(servername, cert) });
     const timer = setTimeout(() => finish(new Error(`TLS handshake timed out after ${timeoutMs}ms`)), timeoutMs);
     const onError = (error: Error) => finish(error);
     const finish = (error?: Error) => { clearTimeout(timer); secure.removeListener('error', onError); if (error) { secure.destroy(); reject(error); } else resolve(secure); };
@@ -121,17 +146,29 @@ function upgradeTls(socket: Socket, servername: string, timeoutMs: number): Prom
   });
 }
 
-function readAtLeast(socket: Socket, minimum: number, timeoutMs: number): Promise<Buffer> { return readBuffer(socket, timeoutMs, (buffer) => buffer.length >= minimum); }
-function readUntil(socket: Socket, marker: string, timeoutMs: number, maximum: number): Promise<Buffer> { return readBuffer(socket, timeoutMs, (buffer) => buffer.includes(marker), maximum); }
+function readAtLeast(socket: Socket, minimum: number, timeoutMs: number): Promise<Buffer> { return readBuffer(socket, timeoutMs, (buffer) => buffer.length >= minimum ? minimum : undefined); }
+function readUntil(socket: Socket, marker: string, timeoutMs: number, maximum: number): Promise<Buffer> {
+  return readBuffer(socket, timeoutMs, (buffer) => { const end = buffer.indexOf(marker); return end < 0 ? undefined : end + Buffer.byteLength(marker); }, maximum);
+}
 
-function readBuffer(socket: Socket, timeoutMs: number, complete: (buffer: Buffer) => boolean, maximum = 64 * 1024): Promise<Buffer> {
+function readBuffer(socket: Socket, timeoutMs: number, complete: (buffer: Buffer) => number | undefined, maximum = 64 * 1024): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
     const timer = setTimeout(() => finish(new Error(`Proxy response timed out after ${timeoutMs}ms`)), timeoutMs);
-    const onData = (chunk: Buffer) => { buffer = Buffer.concat([buffer, chunk]); if (buffer.length > maximum) finish(new Error('Proxy response exceeded size limit')); else if (complete(buffer)) finish(); };
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length > maximum) { finish(new Error('Proxy response exceeded size limit')); return; }
+      const length = complete(buffer);
+      if (length !== undefined) {
+        socket.pause();
+        if (buffer.length > length) socket.unshift(buffer.subarray(length));
+        buffer = buffer.subarray(0, length);
+        finish();
+      }
+    };
     const onError = (error: Error) => finish(error); const onEnd = () => { closeSocket(socket); finish(new Error('Proxy closed the connection unexpectedly')); };
-    const finish = (error?: Error) => { clearTimeout(timer); socket.off('data', onData); socket.off('error', onError); socket.off('end', onEnd); if (error) reject(error); else resolve(buffer); };
-    socket.on('data', onData); socket.once('error', onError); socket.once('end', onEnd);
+    const finish = (error?: Error) => { clearTimeout(timer); socket.pause(); socket.off('data', onData); socket.off('error', onError); socket.off('end', onEnd); if (error) reject(error); else resolve(buffer); };
+    socket.on('data', onData); socket.once('error', onError); socket.once('end', onEnd); socket.resume();
   });
 }
 
@@ -142,10 +179,26 @@ function readToEnd(socket: Socket, timeoutMs: number, maximum: number): Promise<
     const onData = (chunk: Buffer) => { data += chunk.toString('utf8'); if (data.length > maximum) finish(new Error('HTTP response exceeded size limit')); };
     const onEnd = () => { closeSocket(socket); finish(); }; const onError = (error: Error) => finish(error);
     const finish = (error?: Error) => { clearTimeout(timer); socket.off('data', onData); socket.off('end', onEnd); socket.off('error', onError); if (error) reject(error); else resolve(data); };
-    socket.on('data', onData); socket.once('end', onEnd); socket.once('error', onError);
+    socket.on('data', onData); socket.once('end', onEnd); socket.once('error', onError); socket.resume();
   });
 }
 
+function socks5Address(host: string): Buffer {
+  if (isIP(host) === 4) return Buffer.from([1, ...host.split('.').map(Number)]);
+  if (isIP(host) === 6) {
+    const [left = '', right = ''] = host.split('::');
+    const prefix = left ? left.split(':') : [];
+    const suffix = right ? right.split(':') : [];
+    const groups = host.includes('::') ? [...prefix, ...Array<string>(8 - prefix.length - suffix.length).fill('0'), ...suffix] : prefix;
+    const address = Buffer.alloc(17);
+    address[0] = 4;
+    groups.forEach((group, index) => address.writeUInt16BE(Number.parseInt(group, 16), 1 + index * 2));
+    return address;
+  }
+  const name = Buffer.from(host, 'utf8');
+  if (name.length > 255) throw new Error('SOCKS5 destination name is too long');
+  return Buffer.concat([Buffer.from([3, name.length]), name]);
+}
 function proxyAuthorization(username?: string, password?: string): string { return username || password ? `Proxy-Authorization: Basic ${Buffer.from(`${username ?? ''}:${password ?? ''}`).toString('base64')}\r\n` : ''; }
 function decodeHttpBody(head: string, body: string): string {
   if (!/transfer-encoding:\s*chunked/i.test(head)) return body;

@@ -1,9 +1,9 @@
-import { findGeoByCountryCode, DEFAULT_GEO } from './database.js';
+import { findGeoByCountryCode } from './database.js';
 import type { GeoAlignmentOptions, GeoAlignmentResult } from './types.js';
 
 /**
- * Derives consistent timezone, locale, geolocation, and HTTP headers
- * according to proxy/IP information or manual overrides.
+ * Applies country presets and explicit overrides; this is not an IP lookup.
+ * Country defaults are suggestions, not measured egress language or coordinates.
  */
 export function alignGeoEnvironment(options: GeoAlignmentOptions = {}): GeoAlignmentResult {
   const countryCode = options.countryCode ? options.countryCode.toUpperCase() : 'US';
@@ -16,6 +16,14 @@ export function alignGeoEnvironment(options: GeoAlignmentOptions = {}): GeoAlign
   const latitude = options.geolocation?.latitude ?? defaults.latitude;
   const longitude = options.geolocation?.longitude ?? defaults.longitude;
   const accuracy = options.geolocation?.accuracy ?? 100;
+  // Validate caller overrides without deriving a language or exact position
+  // from an IP address. Countries can legitimately span several timezones.
+  new Intl.DateTimeFormat(locale, { timeZone: timezoneId });
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+      !Number.isFinite(longitude) || longitude < -180 || longitude > 180 ||
+      !Number.isFinite(accuracy) || accuracy < 0) {
+    throw new Error('GEOLOCATION_INVALID');
+  }
 
   // Build standard Accept-Language header matching preferred languages
   const acceptLanguageHeader = languages
@@ -28,12 +36,6 @@ export function alignGeoEnvironment(options: GeoAlignmentOptions = {}): GeoAlign
 
   const extraHeaders: Record<string, string> = {
     'Accept-Language': acceptLanguageHeader,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-User': '?1',
-    'Sec-Fetch-Dest': 'document',
-    'Upgrade-Insecure-Requests': '1',
   };
 
   return {

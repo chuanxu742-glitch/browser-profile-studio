@@ -18,6 +18,7 @@ import { BrowserToolError } from '../domain.js';
 import type { SecretVault } from '../security/secret-vault.js';
 import { atomicWriteFile, readJsonWithBackup } from '../storage/atomic-file.js';
 import { browserVersionFromUserAgent, managedBrowserIdentity } from '../fingerprint/runtime-identity.js';
+import { generateFingerprint, HOST_OS } from '../fingerprint/generator.js';
 
 export interface ProfileStoreOptions { readonly vault?: SecretVault; }
 export interface DeletedProfile { readonly profileId: string; readonly name: string; readonly deletedAt: number; }
@@ -76,7 +77,7 @@ export class ProfileStore {
     }
 
     const now = Date.now();
-    const fingerprint = normalizeFingerprintSettings(options.fingerprint);
+    const fingerprint = normalizeFingerprintSettings({ ...options.fingerprint, generationVersion: 2 });
     const metadata: ProfileMetadata = {
       profileId,
       name,
@@ -122,11 +123,10 @@ export class ProfileStore {
       const raw = await readFile(metaPath, 'utf-8');
       const persisted = JSON.parse(raw) as ProfileMetadata;
       const decrypted = this.decryptMetadata(persisted);
-      const migrated = removeLegacyGeneratedUserAgent(decrypted);
-      if (migrated !== decrypted || (this.options.vault && this.metadataNeedsMigration(persisted))) {
-        await this.writeMetadata(migrated).catch(() => undefined);
+      if (this.options.vault && this.metadataNeedsMigration(persisted)) {
+        await this.writeMetadata(decrypted);
       }
-      return migrated;
+      return decrypted;
     } catch {
       return null;
     }
@@ -149,6 +149,7 @@ export class ProfileStore {
             ...(meta.proxy?.server !== undefined ? { proxyServer: meta.proxy.server } : {}),
             ...(meta.geo?.countryCode !== undefined ? { country: meta.geo.countryCode } : {}),
             engine: meta.engine || 'firefox',
+            ...(meta.fingerprint?.generationVersion !== undefined ? { fingerprintGenerationVersion: meta.fingerprint.generationVersion } : {}),
             ...(meta.tags !== undefined ? { tags: [...meta.tags] } : {}),
             hasTwoFactorSecret: Boolean(meta.twoFactorSecret),
             ...(meta.proxyId !== undefined ? { proxyId: meta.proxyId } : {}),
@@ -166,15 +167,30 @@ export class ProfileStore {
     if (!existing) {
       throw new BrowserToolError('SESSION_NOT_FOUND', `Profile "${profileId}" not found.`);
     }
+    const previousFingerprint = existing.fingerprint?.generationVersion !== 2 && updates.fingerprint?.generationVersion === 2
+      ? (existing.fingerprint ? { seed: existing.fingerprint.seed } : undefined)
+      : existing.fingerprint;
+    const nextFingerprint = updates.fingerprint === undefined
+      ? undefined
+      : { ...previousFingerprint, ...updates.fingerprint };
 
-    const updated: ProfileMetadata = {
+    let updated: ProfileMetadata = {
       ...existing,
       ...updates,
+      ...(nextFingerprint ? {
+        fingerprint: nextFingerprint.generationVersion !== undefined
+          ? normalizeFingerprintSettings(nextFingerprint)
+          : nextFingerprint,
+      } : {}),
       profileId: existing.profileId,
       createdAt: existing.createdAt,
       updatedAt: Date.now(),
     };
-    assertManagedUserAgent(updated.userAgent, updated.engine ?? 'firefox');
+    const migratingIdentity = existing.fingerprint?.generationVersion !== 2 && updates.fingerprint?.generationVersion === 2;
+    if (migratingIdentity) updated = removeLegacyGeneratedUserAgent(updated);
+    if (migratingIdentity || updated.userAgent !== existing.userAgent || updated.engine !== existing.engine) {
+      assertManagedUserAgent(updated.userAgent, updated.engine ?? 'firefox');
+    }
     if (updates.extensionIds !== undefined) (updated as { extensionIds?: readonly string[] }).extensionIds = normalizeExtensionIds(updates.extensionIds);
 
     if (updates.proxy) {
@@ -447,15 +463,20 @@ function parseBrowserStorageState(serialized: string): BrowserStorageState {
 function normalizeFingerprintSettings(
   value: Partial<ProfileFingerprintSettings> | undefined,
 ): ProfileFingerprintSettings {
+  if (value?.generationVersion !== undefined && value.generationVersion !== 2) {
+    throw new BrowserToolError('INVALID_ARGUMENT', 'Unsupported fingerprint generation version.');
+  }
   const generatedSeed = Number.parseInt(randomUUID().replaceAll('-', '').slice(0, 8), 16) || 1;
   const seed = boundedInteger(value?.seed, 1, 0xffff_ffff, generatedSeed);
-  const hardwareConcurrency = value?.hardwareConcurrency === undefined
-    ? undefined
-    : boundedInteger(value.hardwareConcurrency, 1, 64, 8);
-  const deviceMemory = value?.deviceMemory === undefined
-    ? undefined
-    : boundedInteger(value.deviceMemory, 1, 128, 8);
-  const screen = value?.screen;
+  const generated = generateFingerprint({
+    seed,
+    os: value?.os ?? HOST_OS,
+    hardwareConcurrency: value?.hardwareConcurrency,
+    deviceMemory: value?.deviceMemory,
+  });
+  const hardwareConcurrency = generated.hardware.hardwareConcurrency;
+  const deviceMemory = generated.hardware.deviceMemory;
+  const screen = value?.screen ?? generated.screen;
   const normalizedScreen = screen === undefined ? undefined : {
     width: boundedInteger(screen.width, 320, 16_384, 1920),
     height: boundedInteger(screen.height, 240, 16_384, 1080),
@@ -475,7 +496,8 @@ function normalizeFingerprintSettings(
 
   return {
     seed,
-    ...(value?.os !== undefined ? { os: value.os } : {}),
+    ...(value?.generationVersion !== undefined ? { generationVersion: value.generationVersion } : {}),
+    os: value?.os ?? HOST_OS,
     ...(hardwareConcurrency !== undefined ? { hardwareConcurrency } : {}),
     ...(deviceMemory !== undefined ? { deviceMemory } : {}),
     ...(normalizedScreen !== undefined ? { screen: normalizedScreen } : {}),

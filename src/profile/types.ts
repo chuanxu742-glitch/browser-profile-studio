@@ -51,6 +51,8 @@ export type CookieFormat = 'json' | 'netscape';
 export interface ProfileFingerprintSettings {
   /** Stable per-profile seed used for all deterministic fingerprint surfaces. */
   readonly seed: number;
+  /** Missing on legacy profiles; setting 2 explicitly accepts the revised generator. */
+  readonly generationVersion?: 2;
   readonly os?: OSPlatform;
   readonly hardwareConcurrency?: number;
   readonly deviceMemory?: number;
@@ -109,6 +111,7 @@ export interface ProfileSummary {
   readonly proxyServer?: string;
   readonly country?: string;
   readonly engine: 'firefox' | 'chromium';
+  readonly fingerprintGenerationVersion?: 2;
   readonly tags?: readonly string[];
   readonly hasTwoFactorSecret: boolean;
   readonly proxyId?: string;
