@@ -27,7 +27,11 @@ describe('Studio feature REST wiring', () => {
     api = new RestApiServer(manager, { port: 0, host: '127.0.0.1', proxyPool, rpa });
     const address = await api.start();
     baseUrl = `http://${address.host}:${address.port}/api/v1`;
-    tcp = createTcpServer((socket) => socket.end());
+    tcp = createTcpServer((socket) => {
+      // Drain probe bytes so the peer's FIN is consumed and close can complete.
+      socket.resume();
+      socket.end();
+    });
     await new Promise<void>((resolve) => tcp.listen(0, '127.0.0.1', resolve));
   });
 

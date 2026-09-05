@@ -12,7 +12,7 @@ export interface BenchmarkSite {
 }
 
 type Outcome = 'passed' | 'failed' | 'inconclusive' | 'unavailable';
-type Row = Record<string, string | null>;
+type Row = Partial<Record<'name' | 'value' | 'id' | 'class', string | null>>;
 interface Assessment {
   status: Outcome;
   reason: string;
@@ -67,7 +67,7 @@ function assessSannysoft(rows: Row[], engine: 'firefox' | 'chromium'): Assessmen
   return { status: 'passed', reason: 'All completed, applicable Sannysoft checks report passed', ready: true, evidence };
 }
 
-function assess(site: BenchmarkSite, snapshot: SemanticSnapshot, rows: Row[], engine: 'firefox' | 'chromium'): Assessment {
+export function assessBenchmarkSnapshot(site: BenchmarkSite, snapshot: SemanticSnapshot, rows: Row[], engine: 'firefox' | 'chromium'): Assessment {
   const text = snapshot.text ?? '';
   const host = new URL(site.url).hostname;
   if (/^(?:Just a moment|Access denied|Service unavailable|Bad gateway|This site can.t be reached)/im.test(text.trim()) || /verify (?:that )?you are human/i.test(text)) {
@@ -76,7 +76,7 @@ function assess(site: BenchmarkSite, snapshot: SemanticSnapshot, rows: Row[], en
   if (snapshot.textTruncated) return pending('Snapshot text exceeds the public API limit; complete evidence is unavailable');
   if (!text.trim()) return pending('No readable result text yet');
   if (host === 'bot.sannysoft.com') return assessSannysoft(rows, engine);
-  if (host.endsWith('iphey.com')) {
+  if (host === 'iphey.com' || host.endsWith('.iphey.com')) {
     const score = text.match(/\b(\d+(?:\.\d+)?)\s*MX Score\b/i);
     const verdict = text.match(/Your Digital Identity Looks\s+(Trustworthy|Unreliable)\b/i);
     if (/Temporary value/i.test(text) || !score || Number(score[1]) === 0 || !verdict) {
@@ -88,17 +88,17 @@ function assess(site: BenchmarkSite, snapshot: SemanticSnapshot, rows: Row[], en
     if (/\bComputing\b/i.test(text) || !/FP ID:\s*[a-f\d]{8,}/i.test(text)) return pending('CreepJS is still computing or has no completed fingerprint');
     return { status: 'inconclusive', ready: true, reason: 'CreepJS fingerprint rendered; its percentages are heuristics, not ban probabilities or a pass/fail contract', evidence: { heuristicLabels: text.match(/(?:\d+(?:\.\d+)?%\s*(?:like headless|headless|stealth)|(?:like headless|headless|stealth)\s*:?\s*\d+(?:\.\d+)?%)/gi) ?? [] } };
   }
-  if (host.endsWith('whoer.net')) {
+  if (host === 'whoer.net' || host.endsWith('.whoer.net')) {
     const score = text.match(/Your disguise:\s*(\d+(?:\.\d+)?)\s*%/i);
     return score ? { status: 'inconclusive', ready: true, reason: 'Whoer disguise rating rendered; no validated pass threshold or independent IP alignment', evidence: { scoreText: score[0], interpretation: 'Site heuristic only' } } : pending('Whoer has not rendered a numeric Your disguise result');
   }
-  if (host.endsWith('browserscan.net')) {
+  if (host === 'browserscan.net' || host.endsWith('.browserscan.net')) {
     const score = text.match(/Browser fingerprint authenticity:\s*(\d+(?:\.\d+)?)\s*%/i);
     // BrowserScan's server-rendered shell already says 100% with a 0%-width
     // progress bar. A visible percentage alone cannot establish completion.
     return pending('BrowserScan completion is not established by its initially populated authenticity rating', { displayedRating: score?.[0] ?? null, interpretation: 'Unverified site heuristic; not a pass or ban probability' });
   }
-  if (host.endsWith('amiunique.org')) {
+  if (host === 'amiunique.org' || host.endsWith('.amiunique.org')) {
     const comparison = text.match(/Only\s+[\d,]+\s+browsers out of the\s+[\d,]+\s+observed browsers have exactly the same fingerprint as yours\s*\(\s*\d+(?:\.\d+)?\s*%\s*\)/i);
     if (!comparison || /\bNaN\b|No data available|Javascript is disabled/i.test(text) || !/Javascript attributes/i.test(text)) {
       return pending('AmIUnique has not rendered a populated browser fingerprint comparison');
@@ -120,7 +120,7 @@ function sessionOptions(seed: number): SessionStartOptions {
   const engine = process.env.BENCHMARK_ENGINE?.trim();
   if (engine && engine !== 'firefox' && engine !== 'chromium') throw new Error('BENCHMARK_ENGINE must be firefox or chromium');
   const options: SessionStartOptions = { headless: process.env.BENCHMARK_HEADLESS !== 'false', inputProfile: 'paced', fingerprint: true, fingerprintSeed: seed };
-  if (engine) options.engine = engine;
+  if (engine === 'firefox' || engine === 'chromium') options.engine = engine;
   const country = process.env.BENCHMARK_COUNTRY?.trim();
   const timezone = process.env.BENCHMARK_TIMEZONE?.trim();
   const locale = process.env.BENCHMARK_LOCALE?.trim();
@@ -188,7 +188,7 @@ export async function runBenchmarkSuite(manager: SessionManager, sites: readonly
             });
             resultRows = extracted.items;
           }
-          const assessment = assess(site, snapshot, resultRows, engine);
+          const assessment = assessBenchmarkSnapshot(site, snapshot, resultRows, engine);
           result.observations.push({ at: new Date().toISOString(), snapshot, resultRows, assessment });
           Object.assign(result, assessment);
           const status = manager.status(sessionId);

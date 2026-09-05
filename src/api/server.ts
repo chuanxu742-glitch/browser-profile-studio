@@ -691,11 +691,11 @@ export class RestApiServer {
             },
             timestamp: Date.now(),
           });
-        } catch (err) {
+        } catch {
           this.sendJson(res, 500, {
             success: false,
             code: 'SCREENSHOT_FAILED',
-            message: err instanceof Error ? err.message : String(err),
+            message: 'Unable to capture the session screenshot',
             timestamp: Date.now(),
           });
         }
@@ -735,8 +735,8 @@ export class RestApiServer {
             return;
           }
           this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
-        } catch (err) {
-          this.sendJson(res, 500, { success: false, code: 'INTERACTION_FAILED', message: err instanceof Error ? err.message : String(err), timestamp: Date.now() });
+        } catch {
+          this.sendJson(res, 500, { success: false, code: 'INTERACTION_FAILED', message: 'Unable to perform the session interaction', timestamp: Date.now() });
         }
         return;
       }
@@ -749,8 +749,8 @@ export class RestApiServer {
         try {
           const status = await this.manager.resume(sessionId, Boolean(body.humanConfirmed ?? true));
           this.sendJson(res, 200, { success: true, code: 'OK', data: status, timestamp: Date.now() });
-        } catch (err) {
-          this.sendJson(res, 400, { success: false, code: 'RESUME_FAILED', message: err instanceof Error ? err.message : String(err), timestamp: Date.now() });
+        } catch {
+          this.sendJson(res, 400, { success: false, code: 'RESUME_FAILED', message: 'Unable to resume the session', timestamp: Date.now() });
         }
         return;
       }
