@@ -419,6 +419,7 @@ docker compose -f docker-compose.cluster.yml up --build
 ## 生产环境运维 (Production Operations)
 
 - **容量释放闸口**：先执行 `npm run capacity:release -- calibrate capacity-baseline.json` 生成同机基线，再执行 `npm run capacity:release -- gate capacity-baseline.json`。闸口比较五类延迟、RSS、任务失败及隔离不变量；`high_checkpoint_failures`、`high_proxy_quarantine` 是可观测告警，**不会自动修改准入阈值**。
+- **容量闸口测试说明（2026-09-06）**：单元测试验证确定性的准入判定边界；集成测试在临时目录中运行真实 CLI 校准，并验证不一致账户计数会被闸口拒绝。测试样本不改变生产闸口的性能阈值。
 - **外置依赖限制**：仓库不内置托管 Redis Cluster、KMS、共享文件系统、生产凭据或告警通知通道；多机发布必须由运维提供这些依赖，并确保共享存储 namespace 与主密钥一致。
 - **24–72 小时浸泡**：默认 `npm run soak` 只运行 5 秒烟测。长期释放验证需显式执行 `$env:LONG_MODE='true'; $env:SOAK_DURATION_MS='86400000'; npm run soak`（最长 `259200000` 毫秒），并保存最终 NDJSON 指标。短时运行不能证明长期稳定性。
 - **登录提供方矩阵**：`npm run acceptance:login -- login-acceptance.json` 只验证授权方提供的凭据/授权标记及人工采集证据，不会登录真实站点。缺凭据、缺授权或缺证据返回 `blocked` 和退出码 2；观察失败返回退出码 1。
