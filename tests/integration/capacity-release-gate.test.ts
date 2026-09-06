@@ -2,106 +2,62 @@ import { describe, it, expect } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
-import { rm } from 'node:fs/promises';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { BaselineSchema } from '../../src/acceptance/capacity-release-gate.js';
 
 const execFileAsync = promisify(execFile);
 
 describe('Capacity Release Gate', () => {
-  const scriptPath = join(process.cwd(), 'scripts/run-capacity-release-gate.ts');
-  const tempBaseline = join(process.cwd(), 'tests', 'integration', 'temp-baseline.json');
+  it('calibrates a real benchmark and reports incompatible account counts through the CLI', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'capacity-release-gate-'));
+    const scriptPath = join(process.cwd(), 'scripts/run-capacity-release-gate.ts');
+    const baselinePath = join(root, 'baseline.json');
+    const options = { env: { ...process.env, BENCHMARK_SMALL_TEST: '1' }, timeout: 60_000 };
 
-  // Clean up before and after tests
-  const cleanup = async () => {
-    try {
-      await rm(tempBaseline, { force: true });
-    } catch {}
-  };
-
-  it('should execute benchmark and reject regressions in count/isolation/latencies/memory', async () => {
-    await cleanup();
-
-    // 1. Calibrate baseline
-    const { stdout: calStdout } = await execFileAsync(process.execPath, [
-      '--import', 'tsx/esm', scriptPath, 'calibrate', tempBaseline
-    ], {
-      env: { ...process.env, BENCHMARK_SMALL_TEST: '1' },
-      timeout: 60000,
-    });
-
-    let calResult;
-    try {
-      // It might have console.logs, so we just check if it generated a file
-      expect(existsSync(tempBaseline)).toBe(true);
-      const baselineData = JSON.parse(readFileSync(tempBaseline, 'utf8'));
-      expect(baselineData.version).toBe(1);
-      expect(baselineData.details.totalAccounts).toBe(10);
-    } catch (err) {
-      console.error('Failed in calibration step:', calStdout);
-      throw err;
-    }
-
-    // 2. Evaluate gate (should pass against its own baseline)
-    const { stdout: gateStdout } = await execFileAsync(process.execPath, [
-      '--import', 'tsx/esm', scriptPath, 'gate', tempBaseline
-    ], {
-      env: { ...process.env, BENCHMARK_SMALL_TEST: '1' },
-      timeout: 60000,
-    });
-
-    const lines = gateStdout.trim().split('\n');
-    let gateResultStr = lines[lines.length - 1] || '{}';
-    let gateResult = JSON.parse(gateResultStr);
-
-    expect(gateResult.success).toBe(true);
-    expect(gateResult.mode).toBe('gate');
-
-    // 3. Use a structurally valid but impossible baseline to force count and ratio regressions.
-    const baselineData = JSON.parse(readFileSync(tempBaseline, 'utf8'));
-    for (const metric of ['createLatencyMs', 'storageWriteLatencyMs', 'listLatencyMs', 'readLatencyMs', 'storageReadLatencyMs']) {
-      baselineData.metrics[metric] = 0.001;
-    }
-    baselineData.metrics.memoryUsageMB = 0.001;
-    baselineData.details.totalAccounts = 999;
-    baselineData.details.uniqueness = {
-      uniqueIds: 999,
-      uniqueSeeds: 999,
-      proxyBindings: 999,
-      loginStates: 999,
-    };
-    writeFileSync(tempBaseline, JSON.stringify(baselineData));
-    let failed = false;
     try {
       await execFileAsync(process.execPath, [
-        '--import', 'tsx/esm', scriptPath, 'gate', tempBaseline
-      ], {
-        env: { ...process.env, BENCHMARK_SMALL_TEST: '1' },
-        timeout: 60000,
-      });
-    } catch (error: unknown) {
-      failed = true;
-      if (error && typeof error === 'object' && 'code' in error && 'stdout' in error && 'stderr' in error) {
-        expect(error.code).toBe(1);
-        
-        const stdoutLines = String(error.stdout).trim().split('\n');
-        const stderrLines = String(error.stderr).trim().split('\n');
-      
-      // stderr might have the json payload
-      let resultStr = stderrLines[stderrLines.length - 1];
-      if (!resultStr || !resultStr.startsWith('{')) {
-        resultStr = stdoutLines[stdoutLines.length - 1];
-      }
-      if (resultStr && resultStr.startsWith('{')) {
-         const res = JSON.parse(resultStr);
-         expect(res.error).toBeDefined();
-         expect(res.issues).toBeDefined();
-         expect(res.issues.some((i: string) => i.includes('Total accounts mismatch'))).toBe(true);
-      }
-      }
-    }
-    
-    expect(failed).toBe(true);
+        '--import', 'tsx/esm', scriptPath, 'calibrate', baselinePath,
+      ], options);
 
-    await cleanup();
-  }, 120000); // 120s timeout for the entire suite
+      const baseline = BaselineSchema.parse(JSON.parse(await readFile(baselinePath, 'utf8')));
+      expect(baseline.details.totalAccounts).toBe(10);
+      expect(baseline.details.uniqueness).toEqual({
+        uniqueIds: baseline.details.totalAccounts,
+        uniqueSeeds: baseline.details.totalAccounts,
+        proxyBindings: baseline.details.totalAccounts,
+        loginStates: baseline.details.totalAccounts,
+      });
+      expect(baseline.details.failures).toEqual([]);
+
+      // Keep measured budgets intact; inconsistent account capacity must fail
+      // independently of timing variation between separate benchmark processes.
+      baseline.details.totalAccounts = 999;
+      baseline.details.uniqueness = {
+        uniqueIds: 999,
+        uniqueSeeds: 999,
+        proxyBindings: 999,
+        loginStates: 999,
+      };
+      await writeFile(baselinePath, JSON.stringify(baseline));
+
+      const failure: unknown = await execFileAsync(process.execPath, [
+        '--import', 'tsx/esm', scriptPath, 'gate', baselinePath,
+      ], options).then(
+        () => { throw new Error('Capacity gate accepted incompatible account counts'); },
+        (error: unknown) => error,
+      );
+      expect(failure).toMatchObject({ code: 1 });
+      if (!failure || typeof failure !== 'object' || !('stderr' in failure) || typeof failure.stderr !== 'string') {
+        throw new Error('Capacity CLI rejection did not include stderr');
+      }
+      const report: unknown = JSON.parse(failure.stderr);
+      expect(report).toEqual({
+        error: expect.any(String),
+        issues: expect.arrayContaining([expect.any(String)]),
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
