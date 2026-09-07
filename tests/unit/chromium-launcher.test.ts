@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { managedBrowserIdentity } from '../../src/fingerprint/runtime-identity.js';
 import { generateFingerprint } from '../../src/fingerprint/generator.js';
 
-const mocks = vi.hoisted(() => ({ launch: vi.fn(), connect: vi.fn() }));
+const mocks = vi.hoisted(() => ({ launch: vi.fn(), connect: vi.fn(), nativeCore: vi.fn() }));
 vi.mock('playwright', () => ({ chromium: { launchPersistentContext: mocks.launch } }));
 vi.mock('../../src/browser/raw-cdp-connection.js', () => ({ RawCdpConnection: { connect: mocks.connect } }));
+vi.mock('../../src/browser/custom-chromium-runtime.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/browser/custom-chromium-runtime.js')>(),
+  resolveVerifiedChromiumCore: mocks.nativeCore,
+}));
 import { launchPersistentChromium } from '../../src/browser/chromium-launcher.js';
 
 describe('managed Chromium startup', () => {
@@ -31,6 +35,16 @@ describe('managed Chromium startup', () => {
     await expect(launchPersistentChromium('fixture-profile', { headless: true, initScript: 'void 0' }))
       .rejects.toThrow('fixture injection failed');
     expect(context.close).toHaveBeenCalled();
+  });
+  it('uses the verified native executable and process-level locale/timezone flags', async () => {
+    fixture();
+    mocks.nativeCore.mockResolvedValue({ executablePath: '/opt/abs-chromium/chrome' });
+    await launchPersistentChromium('native-profile', { headless: true, locale: 'fr-FR', timezoneId: 'Europe/Paris' });
+    const config = mocks.launch.mock.calls[0]![1];
+    expect(config.executablePath).toBe('/opt/abs-chromium/chrome');
+    expect(config.args).toContain('--abs-locale=fr-FR');
+    expect(config.args).toContain('--abs-timezone=Europe/Paris');
+    expect(config.args).toContain('--accept-lang=fr-FR');
   });
   it('fails startup if both worker identity override methods fail', async () => {
     const context = fixture();

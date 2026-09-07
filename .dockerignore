@@ -14,3 +14,5 @@ artifacts
 coverage
 tests
 docs
+browser-core/**/.checkout
+browser-core/**/__pycache__
