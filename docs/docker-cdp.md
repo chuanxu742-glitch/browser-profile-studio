@@ -25,6 +25,8 @@ node scripts/smoke-cdp.mjs
 
 `GET /health` 是不含配置或凭据的健康状态。`GET /json/version` 和 WebSocket `/cdp` 需要 `Authorization: Bearer <CDP_TOKEN>`。Compose 默认只发布到宿主机 `127.0.0.1:9222`。同一 Docker 网络中的客户端使用 `http://browser:9222`。发现接口按连接时的 Host 生成可达 WebSocket 地址，不返回浏览器内部端口。
 
+认证后的 `GET /status` 返回配置元数据（configured）、当前连接数和连接上限，不返回 token/代理密码。configured 是预期配置，不是对所有浏览器表面的实时探测结果。
+
 ## Playwright 接入
 
 建议 Node 客户端使用项目锁定的 Playwright 1.62.1；Python 安装兼容版本的 playwright 包。
@@ -49,6 +51,7 @@ await browser.close(); // 断开客户端，服务端继续持有浏览器。
 | 变量 | 默认/说明 |
 | --- | --- |
 | CDP_TOKEN | 网络监听必填，至少 24 字符；不要写入镜像 |
+| CDP_MAX_CONNECTIONS | 默认 8，范围 1–64；含正在握手的连接，超额握手返回 429，断开后释放名额 |
 | CDP_HOST / CDP_PORT | 本地入口默认 127.0.0.1:9222；镜像监听 0.0.0.0:9222 |
 | CDP_PROFILE_DIR | 镜像为 /data/profile，挂载命名卷 |
 | CDP_SEED | 首次启动随机生成并保存在 cdp-profile.json；可在服务环境显式指定 uint32 |
@@ -59,6 +62,8 @@ await browser.close(); // 断开客户端，服务端继续持有浏览器。
 | CDP_PUBLIC_URL | 可选 HTTP(S) origin；经过 TLS 反向代理时可设为外部 origin，使 discovery 返回 wss 地址 |
 
 服务重启会加载相同 seed 和配置。改变已有 Profile 的 seed、OS、语言、时区或视口会拒绝启动（`CDP_PROFILE_CONFIG_CONFLICT`），避免悄然改变现有身份。创建另一组环境应使用另一卷/实例。内核版本变更返回 `CDP_PROFILE_VERSION_MISMATCH`，需要显式规划迁移或创建新 Profile。
+
+首次创建元数据先写同目录临时文件并 fsync，再以不覆盖既有文件的硬链接操作发布。并发创建者读取同一份完整结果，避免读到半份 JSON。Profile 卷需要支持硬链接（如本地 NTFS/ext4）；不支持时直接报错，不退回有竞争风险的覆盖写入。每次启动重新验证文件中的 locale/timezone。损坏文件不会被静默重建为新的随机身份。
 
 浏览器使用自己的 Profile 锁保护重复打开；不要对同一卷运行多个容器。`docker compose restart` 保留 Cookie 和站点存储；普通 `down` 保留命名卷，`down -v` 会删除环境数据。服务处理 SIGTERM/SIGINT，关闭浏览器后退出。浏览器崩溃或环境初始化失败时服务停止，Compose 的重启策略负责恢复。
 
@@ -85,5 +90,7 @@ docker save -o antigravity-browser-cdp-0.1.0.tar antigravity-browser-cdp:0.1.0
 当前宿主 Docker Desktop 因遗留 Windows socket 无法访问而启动失败，实际镜像构建/导出和 Linux 容器验证尚未完成。交付的 ZIP 是可构建源码包，不是 `docker load` 镜像包。修复 Docker engine 后执行上述命令完成镜像验收；不要把本机 Chromium 测试当成 Linux 容器测试。
 
 本轮结果：`npm test` 通过 224 个单元测试、35 个 MCP 测试、26 个默认集成测试；另外 CDP 服务 1 项、身份一致性 2 项、请求头 2 项通过。类型检查、生产构建和 Compose 静态校验通过。默认集成按条件跳过的用例不算通过；受管扩展以及真实可用 WebGPU 设备的创建路径未在本轮验证。
+
+后续可靠性优化后：单元测试增至 234 项，MCP 35 项、默认集成 26 项及扩展后的 CDP 回归通过；类型检查、生产构建通过。`scripts/package-cdp.ps1` 可生成新版源码 ZIP 与 SHA-256 文件；已有同名输出会拒绝覆盖。具体比较见 [project-vs-chromix.md](./project-vs-chromix.md)。
 
 Docker 故障处理记录：为绕开旧的 `sailor-ingest.sock`，原 Docker 临时运行目录被保留为 `C:\Users\32536\AppData\Local\Docker\run.audit-backup-ebcc472aa3984220ac6e7026b882b659`。后续 Docker 又因 `docker-secrets-engine/engine.sock` 无法访问退出，该 socket 清理被自动审批拒绝，未继续修改。没有重置 Docker 或删除镜像/数据卷。

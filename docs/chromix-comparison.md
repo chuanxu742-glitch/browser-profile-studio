@@ -1,5 +1,7 @@
 # Chromix 对照与本次优化
 
+本文记录首轮修复。最新的能力差异、后续优化与未完成事项见 [当前项目与 Chromix 的区别](./project-vs-chromix.md)。
+
 对照日期：2026-09-07。参考源码固定在 [Chromix e540796](https://github.com/xiaozhou26/Chromix/tree/e540796decd489e8e9dff8dea940eb03e77db693)。以下是源码审阅结论，没有运行或验证 Chromix 的发行二进制。
 
 | 方面 | Chromix | 本项目与处理决定 |
