@@ -13,6 +13,7 @@ services:
       - "127.0.0.1:${CDP_PORT:-9222}:9222"
     environment:
       CDP_TOKEN: ${CDP_TOKEN:?Set CDP_TOKEN to at least 24 characters}
+      CDP_MAX_CONNECTIONS: ${CDP_MAX_CONNECTIONS:-8}
       CDP_COUNTRY: ${CDP_COUNTRY:-US}
       CDP_LOCALE: ${CDP_LOCALE:-en-US}
       CDP_TIMEZONE: ${CDP_TIMEZONE:-America/New_York}
