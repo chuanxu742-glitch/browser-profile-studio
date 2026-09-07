@@ -13,6 +13,10 @@
     {
       "path": "patches/0001-native-process-profile.patch",
       "sha256": "df671ba4895f1853a2d89554f0cc716043b96d7491747aa6b906f9a10e6228e5"
+    },
+    {
+      "path": "patches/0002-native-rendering-surfaces.patch",
+      "sha256": "a71647df8b1fdae656dfc8bffff279622763998c9e359649ef9e74523ffb1528"
     }
   ],
   "upstreamFiles": {
@@ -20,6 +24,17 @@
     "content/renderer/render_thread_impl.cc": "1836c3cf3ce8da9b693b607774d518fc7c681956aae7919f7d99baf7ba5106d1",
     "third_party/blink/renderer/core/frame/navigator_language.cc": "6eecd7715b44a514025ef27bebe599c258123ea9c39ac10e4a26022ca0269888",
     "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc": "7b689c17f7007b7e342412cb27165111fe6b5db8672ac27b8b9fc1ea0f432928",
-    "third_party/blink/renderer/core/timezone/timezone_controller.cc": "4574c1fb3f000be38d206acdb184c5f1d3a0afa75bf28c8cf0f6dd05e6b7382e"
+    "third_party/blink/renderer/core/timezone/timezone_controller.cc": "4574c1fb3f000be38d206acdb184c5f1d3a0afa75bf28c8cf0f6dd05e6b7382e",
+    "third_party/blink/renderer/platform/BUILD.gn": "478f164fccdf15ad419929a423ecd1614c86b829b08994f4460dc369b1bec51a",
+    "third_party/blink/renderer/core/frame/navigator_device_memory.cc": "69c4a6d2796ecefbb8ebeab82f866da33b5eda285612f9125d7242ed4a6bc993",
+    "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc": "ca85162516797abdf7af7a82111f5a1aeca64109bee3d2b8473079c84db105cf",
+    "third_party/blink/renderer/platform/graphics/image_data_buffer.cc": "8a3790838f510cc4e2d5b5aace69eefbb546131f5ca9ecbc1369d82d614ff0dc",
+    "third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc": "e2a511dc9a206c6afe3d030762cc3b05084f709825e40cfd0da3c61486b6f5af",
+    "third_party/blink/renderer/modules/webaudio/offline_audio_context.cc": "527a99a25bfa83b42b9d1e4f0b448f09ad5d8db64c513997708c3694838314f4",
+    "third_party/blink/renderer/modules/webaudio/realtime_analyser.cc": "71fba8d8b5fcdbfac2af0f75006a0a457ad7c967acacd61bd32d852d652e782d",
+    "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc": "22321ae748fe62a911f06d77cd893080edb3d12f954a10f1e948dc2cd923d2f7",
+    "third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc": "b1407eaf37534105c6aec343297aba15cb8b97f28913ed3af58384f509a46969",
+    "third_party/blink/renderer/platform/fonts/font_cache.cc": "284a124db458ff38620ee4a2d85bbdd90713475c07f7344d0035de0b64c05cca",
+    "third_party/blink/renderer/modules/webgpu/gpu.cc": "917b2b573dcfad9a069fd2ebb19418fadd22ec188daa0702aff411edfcccca76"
   }
 }

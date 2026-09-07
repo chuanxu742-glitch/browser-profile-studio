@@ -141,7 +141,10 @@ def build(workspace, jobs):
     output.mkdir(parents=True, exist_ok=True)
     shutil.copy2(HERE / 'args.gn', output / 'args.gn')
     run('gn', 'gen', 'out/Abs', '--fail-on-unused-args', cwd=source)
-    run('autoninja', '-C', 'out/Abs', '-j', jobs, 'chrome', 'chrome_sandbox', cwd=source)
+    run('autoninja', '-C', 'out/Abs', '-j', jobs, 'chrome', 'chrome_sandbox',
+        'blink_platform_unittests', cwd=source)
+    run(output / 'blink_platform_unittests', '--gtest_filter=AbsProfileTest.*',
+        '--test-launcher-jobs=1', cwd=source)
 
 
 def package(workspace, destination):

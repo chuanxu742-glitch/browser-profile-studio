@@ -34,6 +34,7 @@ export async function startCdpService(env: NodeJS.ProcessEnv = process.env) {
     headless: true, viewport: fingerprint.viewport, locale: metadata.locale, timezoneId: metadata.timezone,
     userAgent: fingerprint.userAgent, fingerprintProfile: fingerprint,
     initScript: buildStealthInjectionScript(fingerprint),
+    managedFingerprintInitScript: true,
     ...(proxy ? { proxy: { server: proxy.server, ...(proxy.username ? { username: proxy.username } : {}),
       ...(proxy.password ? { password: proxy.password } : {}) } } : {}),
   });

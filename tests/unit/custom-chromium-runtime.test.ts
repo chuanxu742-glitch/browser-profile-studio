@@ -19,7 +19,10 @@ async function fixture() {
     browserVersion: managedBrowserIdentity('chromium').fullVersion,
     chromiumRevision: EXPECTED_CHROMIUM_CORE.chromiumRevision,
     playwrightVersion: EXPECTED_CHROMIUM_CORE.playwrightVersion,
-    patches: [{ path: EXPECTED_CHROMIUM_CORE.patchPath, sha256: String(EXPECTED_CHROMIUM_CORE.patchSha256) }],
+    patches: [
+      { path: EXPECTED_CHROMIUM_CORE.patchPath, sha256: String(EXPECTED_CHROMIUM_CORE.patchSha256) },
+      { path: EXPECTED_CHROMIUM_CORE.renderingPatchPath, sha256: String(EXPECTED_CHROMIUM_CORE.renderingPatchSha256) },
+    ],
     executableSha256: createHash('sha256').update('test executable').digest('hex') };
   const provenancePath = join(directory, 'build-provenance.json');
   await writeFile(provenancePath, JSON.stringify(provenance));
@@ -50,6 +53,7 @@ describe('custom Chromium runtime', () => {
     const lock = JSON.parse(await readFile(new URL('../../browser-core/chromium/core.lock.json', import.meta.url), 'utf8'));
     expect(lock.chromiumRevision).toBe(EXPECTED_CHROMIUM_CORE.chromiumRevision);
     expect(lock.patches[0].sha256).toBe(EXPECTED_CHROMIUM_CORE.patchSha256);
+    expect(lock.patches[1].sha256).toBe(EXPECTED_CHROMIUM_CORE.renderingPatchSha256);
     expect(lock.browserVersion).toBe(managedBrowserIdentity('chromium').fullVersion);
   });
   it('derives all native flags from one profile and validates conflicting values', () => {
@@ -59,6 +63,11 @@ describe('custom Chromium runtime', () => {
     expect(args).toContain(`--abs-timezone=${profile.geo.timezoneId}`);
     expect(args).toContain(`--abs-languages=${profile.geo.languages.join(',')}`);
     expect(args).toContain(`--abs-hardware-concurrency=${profile.hardware.hardwareConcurrency}`);
+    expect(args).toContain(`--abs-device-memory=${profile.hardware.deviceMemory}`);
+    expect(args).toContain(`--abs-canvas-seed=${profile.canvas.seed}`);
+    expect(args).toContain(`--abs-audio-seed=${profile.audio.seed}`);
+    expect(args).toContain(`--abs-webgl-renderer=${profile.webgl.unmaskedRenderer}`);
+    expect(args.some(value => value.startsWith('--abs-font-allowlist='))).toBe(true);
     expect(() => nativeChromiumProfileArgs({ ...options, locale: 'ja-JP' })).toThrow('LANGUAGE_MISMATCH');
     expect(() => nativeChromiumProfileArgs({ ...options, timezoneId: 'Invalid/Zone' })).toThrow();
     expect(nativeChromiumProfileArgs({ headless: true, timezoneId: 'europe/paris' }))
@@ -67,5 +76,28 @@ describe('custom Chromium runtime', () => {
     expect(() => nativeChromiumProfileArgs({ ...options, fingerprintProfile: {
       ...profile, hardware: { ...profile.hardware, hardwareConcurrency: 0 },
     } })).toThrow('CORES_INVALID');
+  });
+  it('rejects old single-patch builds', async () => {
+    const core = await fixture();
+    core.provenance.patches.pop();
+    await writeFile(core.provenancePath, JSON.stringify(core.provenance));
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('PROVENANCE_MISMATCH');
+  });
+  it('supports seed zero, leaves disabled surfaces alone and validates font settings', () => {
+    const profile = generateFingerprint({ engine: 'chromium', os: 'linux', seed: 7 });
+    const args = nativeChromiumProfileArgs({ headless: true, fingerprintProfile: {
+      ...profile, canvas: { enabled: true, seed: 0 }, audio: { enabled: false, seed: 5 },
+      webgpu: { supported: false },
+    } }, { ABS_CHROMIUM_FONT_ALLOWLIST: 'Liberation Sans, Liberation Mono' });
+    expect(args).toContain('--abs-canvas-seed=0');
+    expect(args.some(value => value.startsWith('--abs-audio-seed='))).toBe(false);
+    expect(args).toContain('--abs-webgpu-disabled=1');
+    expect(args).toContain('--abs-font-allowlist=Liberation Sans,Liberation Mono');
+    expect(() => nativeChromiumProfileArgs({ headless: true, fingerprintProfile: profile },
+      { ABS_CHROMIUM_FONT_ALLOWLIST: 'Arial,,Consolas' })).toThrow('FONTS_INVALID');
+    expect(() => nativeChromiumProfileArgs({ headless: true, fingerprintProfile: {
+      ...profile, canvas: { enabled: true, seed: -1 },
+    } }, {})).toThrow('CANVAS_SEED_INVALID');
   });
 });

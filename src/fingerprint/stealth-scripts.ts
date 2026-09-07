@@ -4,8 +4,10 @@ import type { FingerprintConfig } from './types.js';
  * Builds self-contained, stealth-hardened client JavaScript to be evaluated
  * inside each browsing context before any other script executes.
  */
-export function buildWorkerBootstrap(config: FingerprintConfig): string {
-  const serialized = JSON.stringify(config);
+export interface FingerprintScriptOptions { nativeChromium?: boolean }
+
+export function buildWorkerBootstrap(config: FingerprintConfig, options: FingerprintScriptOptions = {}): string {
+  const serialized = JSON.stringify({ ...config, nativeChromium: options.nativeChromium === true });
   return `(function() {
   'use strict';
   if (typeof self !== 'undefined') {
@@ -50,6 +52,7 @@ export function buildWorkerBootstrap(config: FingerprintConfig): string {
     nativeFunctions.add(Function.prototype.toString);
   }
   try {
+    if (!config.nativeChromium) {
     const origDTF = Intl.DateTimeFormat;
     const PatchedDTF = markAsNative(function(locales, options) {
       const loc = locales === undefined ? (config.geo && config.geo.locale) || 'en-US' : locales;
@@ -62,6 +65,7 @@ export function buildWorkerBootstrap(config: FingerprintConfig): string {
     PatchedDTF.prototype = origDTF.prototype;
     Object.setPrototypeOf(PatchedDTF, origDTF);
     Intl.DateTimeFormat = PatchedDTF;
+    }
   } catch (_) {}
   const nav = typeof navigator !== 'undefined' ? navigator : undefined;
   if (typeof self !== 'undefined' && typeof WorkerNavigator !== 'undefined' && WorkerNavigator.prototype) {
@@ -84,6 +88,7 @@ export function buildWorkerBootstrap(config: FingerprintConfig): string {
       }
       const languages = Object.freeze([...(config.geo && config.geo.languages || [])]);
       const defineGetter = (prop, getter) => {
+        if (config.nativeChromium && ['hardwareConcurrency', 'deviceMemory', 'language', 'languages'].includes(prop)) return;
         try {
           Object.defineProperty(proto, prop, {
             get: markAsNative(getter, 'get ' + prop),
@@ -155,7 +160,7 @@ export function buildWorkerBootstrap(config: FingerprintConfig): string {
       });
     } catch (_) {}
   }
-  if (config.webgl) {
+  if (!config.nativeChromium && config.webgl) {
     const vendorVal = config.webgl.unmaskedVendor || config.webgl.vendor;
     const rendererVal = config.webgl.unmaskedRenderer || config.webgl.renderer;
     const hookWebGL = (proto) => {
@@ -190,7 +195,7 @@ export function buildWorkerBootstrap(config: FingerprintConfig): string {
       }
     } catch (e) {}
   }
-  if (nav && config.webgpu && !config.webgpu.supported) {
+  if (!config.nativeChromium && nav && config.webgpu && !config.webgpu.supported) {
     try {
       Object.defineProperty(nav, 'gpu', { get: markAsNative(() => undefined, 'get gpu'), configurable: true });
     } catch (e) {}
@@ -199,8 +204,8 @@ export function buildWorkerBootstrap(config: FingerprintConfig): string {
 `;
 }
 
-export function buildStealthInjectionScript(config: FingerprintConfig): string {
-  const serialized = JSON.stringify(config);
+export function buildStealthInjectionScript(config: FingerprintConfig, options: FingerprintScriptOptions = {}): string {
+  const serialized = JSON.stringify({ ...config, nativeChromium: options.nativeChromium === true });
 
   return `
 (function() {
@@ -239,6 +244,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
   const navigatorPrototype = navigatorObject ? Object.getPrototypeOf(navigatorObject) : undefined;
 
   function defineNativeGetter(target, property, getter, enumerable = true) {
+    if (config.nativeChromium && ['hardwareConcurrency', 'deviceMemory', 'language', 'languages'].includes(property)) return true;
     if (!target) return false;
     try {
       try {
@@ -487,6 +493,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
   }
 
   try {
+    if (!config.nativeChromium) {
     const OriginalDateTimeFormat = Intl.DateTimeFormat;
     const PatchedDateTimeFormat = markAsNative(function(locales, options) {
       const localeValue = locales === undefined ? config.geo.locale : locales;
@@ -499,6 +506,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
     PatchedDateTimeFormat.prototype = OriginalDateTimeFormat.prototype;
     Object.setPrototypeOf(PatchedDateTimeFormat, OriginalDateTimeFormat);
     Intl.DateTimeFormat = PatchedDateTimeFormat;
+    }
   } catch (e) {}
 
   // 5. Native Browser Engine Specific Identifiers (Firefox vs Chromium)
@@ -774,7 +782,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
   }
 
   // 8. Deterministic Canvas Noise (保持 getImageData、toDataURL、toBlob 多出口像素绝对一致)
-  if (config.canvas && config.canvas.enabled) {
+  if (!config.nativeChromium && config.canvas && config.canvas.enabled) {
     const salt = Number.isFinite(config.canvas.seed) ? config.canvas.seed : 42;
 
     function getSpatialOffset(x, y, seed) {
@@ -965,7 +973,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
   }
 
   // 9. WebGL / WebGPU values come from the same profile in every context.
-  if (config.webgl) {
+  if (!config.nativeChromium && config.webgl) {
     const UNMASKED_VENDOR_WEBGL = 37445;
     const UNMASKED_RENDERER_WEBGL = 37446;
     const vendorVal = config.webgl.unmaskedVendor || config.webgl.vendor;
@@ -1086,7 +1094,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
   }
 
   // 12. AudioContext Fingerprint Protection (stable per returned buffer)
-  if (config.audio && config.audio.enabled) {
+  if (!config.nativeChromium && config.audio && config.audio.enabled) {
     const audioSeed = (config.audio.seed || 100) * 0.0000001;
     const adjustedBuffers = new WeakSet();
     const adjustedArrays = new WeakSet();
@@ -1400,7 +1408,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
 
   // 15. Worker & SharedWorker Isolation & Fingerprint Alignment
   try {
-    const workerBootstrapCode = ${JSON.stringify(buildWorkerBootstrap(config))};
+    const workerBootstrapCode = ${JSON.stringify(buildWorkerBootstrap(config, options))};
     const origCreateObjectURL = typeof URL !== 'undefined' ? URL.createObjectURL : undefined;
     const origRevokeObjectURL = typeof URL !== 'undefined' ? URL.revokeObjectURL : undefined;
     const blobUrlMap = new Map();
@@ -1456,6 +1464,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
     }
 
     function alignWorkerFingerprintData(data) {
+      if (config.nativeChromium) return;
       if (!data || typeof data !== 'object') return;
       try {
         if ('timezone' in data && config.geo && config.geo.timezoneId) {

@@ -14,7 +14,7 @@ spec.loader.exec_module(core)
 
 class SourceVerificationTests(unittest.TestCase):
     def test_patch_hashes(self):
-        self.assertEqual(len(core.patches()), 1)
+        self.assertEqual(len(core.patches()), 2)
 
     def test_rejects_modified_patch(self):
         with patch.object(core, 'LOCK', {**core.LOCK, 'patches': [

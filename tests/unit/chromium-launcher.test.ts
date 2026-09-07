@@ -9,7 +9,8 @@ vi.mock('../../src/browser/custom-chromium-runtime.js', async (importOriginal) =
   ...await importOriginal<typeof import('../../src/browser/custom-chromium-runtime.js')>(),
   resolveVerifiedChromiumCore: mocks.nativeCore,
 }));
-import { launchPersistentChromium } from '../../src/browser/chromium-launcher.js';
+import { launchPersistentChromium, usesNativeChromiumProfile } from '../../src/browser/chromium-launcher.js';
+import { buildStealthInjectionScript } from '../../src/fingerprint/stealth-scripts.js';
 
 describe('managed Chromium startup', () => {
   beforeEach(() => vi.resetAllMocks());
@@ -59,5 +60,19 @@ describe('managed Chromium startup', () => {
       fingerprintProfile: generateFingerprint({ engine: 'chromium' }) })).rejects.toThrow('SERVICE_WORKER_FINGERPRINT_SETUP_FAILED');
     expect(close).toHaveBeenCalled();
     expect(context.close).toHaveBeenCalled();
+  });
+  it('regenerates only the managed fingerprint script and preserves caller scripts', async () => {
+    const context = fixture();
+    mocks.nativeCore.mockResolvedValue({ executablePath: '/opt/abs-chromium/chrome' });
+    mocks.connect.mockResolvedValue({ close: vi.fn(), onEvent: vi.fn(), send: vi.fn(async () => ({ targetInfos: [] })) });
+    const profile = generateFingerprint({ engine: 'chromium', os: 'linux' });
+    await launchPersistentChromium('native-profile', { headless: true, fingerprintProfile: profile,
+      managedFingerprintInitScript: true, initScript: buildStealthInjectionScript(profile) });
+    expect(context.addInitScript).toHaveBeenCalledWith(buildStealthInjectionScript(profile, { nativeChromium: true }));
+    expect(usesNativeChromiumProfile(context)).toBe(true);
+    context.addInitScript.mockClear();
+    await launchPersistentChromium('native-profile', { headless: true, fingerprintProfile: profile,
+      initScript: 'globalThis.applicationSetting = 42' });
+    expect(context.addInitScript).toHaveBeenCalledWith('globalThis.applicationSetting = 42');
   });
 });

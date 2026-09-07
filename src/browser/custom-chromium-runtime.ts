@@ -10,6 +10,8 @@ export const EXPECTED_CHROMIUM_CORE = Object.freeze({
   playwrightVersion: '1.62.1',
   patchPath: 'patches/0001-native-process-profile.patch',
   patchSha256: 'df671ba4895f1853a2d89554f0cc716043b96d7491747aa6b906f9a10e6228e5',
+  renderingPatchPath: 'patches/0002-native-rendering-surfaces.patch',
+  renderingPatchSha256: 'a71647df8b1fdae656dfc8bffff279622763998c9e359649ef9e74523ffb1528',
 });
 
 export async function resolveVerifiedChromiumCore(
@@ -28,9 +30,11 @@ export async function resolveVerifiedChromiumCore(
       || record.browserVersion !== managedBrowserIdentity('chromium').fullVersion
       || record.chromiumRevision !== EXPECTED_CHROMIUM_CORE.chromiumRevision
       || record.playwrightVersion !== EXPECTED_CHROMIUM_CORE.playwrightVersion
-      || patches.length !== 1
+      || patches.length !== 2
       || patches[0]?.path !== EXPECTED_CHROMIUM_CORE.patchPath
-      || patches[0]?.sha256 !== EXPECTED_CHROMIUM_CORE.patchSha256) {
+      || patches[0]?.sha256 !== EXPECTED_CHROMIUM_CORE.patchSha256
+      || patches[1]?.path !== EXPECTED_CHROMIUM_CORE.renderingPatchPath
+      || patches[1]?.sha256 !== EXPECTED_CHROMIUM_CORE.renderingPatchSha256) {
     throw new Error('CUSTOM_CHROMIUM_PROVENANCE_MISMATCH');
   }
   const hash = createHash('sha256');
@@ -39,7 +43,10 @@ export async function resolveVerifiedChromiumCore(
   return { executablePath };
 }
 
-export function nativeChromiumProfileArgs(options: FirefoxLaunchOptions): string[] {
+export function nativeChromiumProfileArgs(
+  options: FirefoxLaunchOptions,
+  environment: NodeJS.ProcessEnv = process.env,
+): string[] {
   const profile = options.fingerprintProfile;
   const locale = options.locale ?? profile?.geo.locale;
   const timezone = options.timezoneId ?? profile?.geo.timezoneId;
@@ -64,6 +71,42 @@ export function nativeChromiumProfileArgs(options: FirefoxLaunchOptions): string
     const cores = profile.hardware.hardwareConcurrency;
     if (!Number.isInteger(cores) || cores < 1 || cores > 256) throw new Error('CUSTOM_CHROMIUM_CORES_INVALID');
     args.push(`--abs-hardware-concurrency=${cores}`);
+    const memory = profile.hardware.deviceMemory;
+    if (![0.25, 0.5, 1, 2, 4, 8].includes(memory)) throw new Error('CUSTOM_CHROMIUM_MEMORY_INVALID');
+    args.push(`--abs-device-memory=${memory}`);
+    for (const [surface, config] of [['canvas', profile.canvas], ['audio', profile.audio]] as const) {
+      if (!config.enabled) continue;
+      if (!Number.isInteger(config.seed) || config.seed < 0 || config.seed > 0xffffffff) {
+        throw new Error(`CUSTOM_CHROMIUM_${surface.toUpperCase()}_SEED_INVALID`);
+      }
+      args.push(`--abs-${surface}-seed=${config.seed}`);
+    }
+    const stringFlag = (name: string, value: string | undefined) => {
+      if (value === undefined) return;
+      if (!value.trim() || value.length > 512 || !/^[\x20-\x7e]+$/.test(value)) {
+        throw new Error(`CUSTOM_CHROMIUM_IDENTITY_INVALID: ${name}`);
+      }
+      args.push(`--abs-${name}=${value}`);
+    };
+    stringFlag('webgl-vendor', profile.webgl.unmaskedVendor);
+    stringFlag('webgl-renderer', profile.webgl.unmaskedRenderer);
+    if (!profile.webgpu.supported) {
+      args.push('--abs-webgpu-disabled=1');
+    } else if (profile.webgpu.adapterInfo) {
+      for (const field of ['vendor', 'architecture', 'device', 'description'] as const) {
+        // Empty metadata denotes an unknown field; preserve the real backend.
+        const value = profile.webgpu.adapterInfo[field];
+        if (value) stringFlag(`webgpu-${field}`, value);
+      }
+    }
+    const fonts = environment.ABS_CHROMIUM_FONT_ALLOWLIST ?? (profile.os === 'linux'
+      ? 'Liberation Sans,Liberation Serif,Liberation Mono,Noto Color Emoji' : undefined);
+    if (fonts !== undefined) {
+      const families = fonts.split(',').map(family => family.trim());
+      if (families.length > 128 || families.some(family => !family || family.length > 128
+          || !/^[\x20-\x7e]+$/.test(family))) throw new Error('CUSTOM_CHROMIUM_FONTS_INVALID');
+      args.push(`--abs-font-allowlist=${[...new Set(families)].join(',')}`);
+    }
   }
   return args;
 }

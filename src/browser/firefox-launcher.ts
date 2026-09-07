@@ -61,6 +61,8 @@ export interface FirefoxLaunchOptions {
   extraHTTPHeaders?: Record<string, string> | undefined;
   userAgent?: string | undefined;
   initScript?: string | undefined;
+  /** The built-in fingerprint script may be regenerated for a native core. */
+  managedFingerprintInitScript?: boolean | undefined;
   managedExtensions?: readonly {
     extensionId: string;
     directory: string;
