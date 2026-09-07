@@ -357,29 +357,28 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         const frame = document.createElement('iframe');
         frame.srcdoc = '<html><body>frame</body></html>';
         const iframeDeferred = Promise.withResolvers();
-        frame.onload = () => iframeDeferred.resolve(readContext(frame.contentWindow));
+        frame.onload = () => {
+          try { iframeDeferred.resolve(readContext(frame.contentWindow)); }
+          catch (error) { iframeDeferred.reject(error); }
+        };
         document.body.appendChild(frame);
         const iframe = await iframeDeferred.promise;
-        let worker;
-        try {
+        const worker = await (async () => {
           const workerDeferred = Promise.withResolvers();
           const source = 'self.postMessage((' + readContext.toString() + ')(self));';
-          const instance = new Worker(new Blob([source], { type: 'application/javascript' }));
-          const timer = setTimeout(() => workerDeferred.reject(new Error('worker profile probe timed out')), 3000);
-          instance.onmessage = (event) => {
+          const workerUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+          const instance = new Worker(workerUrl);
+          const timer = setTimeout(() => workerDeferred.reject(new Error('worker profile probe timed out')), 5000);
+          instance.onmessage = (event) => workerDeferred.resolve(event.data);
+          instance.onerror = (event) => workerDeferred.reject(new Error(event.message || 'worker profile probe failed'));
+          try {
+            return await workerDeferred.promise;
+          } finally {
             clearTimeout(timer);
             instance.terminate();
-            workerDeferred.resolve(event.data);
-          };
-          instance.onerror = () => {
-            clearTimeout(timer);
-            instance.terminate();
-            workerDeferred.resolve(undefined);
-          };
-          worker = await workerDeferred.promise;
-        } catch (_) {
-          worker = undefined;
-        }
+            URL.revokeObjectURL(workerUrl);
+          }
+        })();
         let serviceWorker;
         if (navigator.serviceWorker) {
           const registration = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
@@ -423,18 +422,17 @@ describe('Comprehensive Anti-Detect Fingerprint Suite (方案一 + 方案二 + �
         hardwareConcurrency: metrics.top.hardwareConcurrency,
         renderer: metrics.top.renderer,
       });
-      if (metrics.worker) {
-        expect(metrics.worker).toMatchObject({
-          userAgent: metrics.top.userAgent,
-          language: metrics.top.language,
-          languages: metrics.top.languages,
-          timezone: metrics.top.timezone,
-          webdriver: undefined,
-          webdriverPresent: false,
-          hardwareConcurrency: metrics.top.hardwareConcurrency,
-          renderer: metrics.top.renderer,
-        });
-      }
+      expect(metrics.worker).toBeDefined();
+      expect(metrics.worker).toMatchObject({
+        userAgent: metrics.top.userAgent,
+        language: metrics.top.language,
+        languages: metrics.top.languages,
+        timezone: metrics.top.timezone,
+        webdriver: undefined,
+        webdriverPresent: false,
+        hardwareConcurrency: metrics.top.hardwareConcurrency,
+        renderer: metrics.top.renderer,
+      });
     } finally {
       await manager.stop(session.sessionId, 'test_done');
       await manager.shutdown();

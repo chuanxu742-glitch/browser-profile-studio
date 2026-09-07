@@ -1,4 +1,4 @@
-import { findGeoByCountryCode, DEFAULT_GEO } from './database.js';
+import { findGeoByCountryCode, findCoordinatesByTimezone } from './database.js';
 import type { GeoAlignmentOptions, GeoAlignmentResult } from './types.js';
 
 /**
@@ -11,10 +11,11 @@ export function alignGeoEnvironment(options: GeoAlignmentOptions = {}): GeoAlign
 
   const timezoneId = options.timezone || defaults.timezone;
   const locale = options.locale || defaults.locale;
-  const languages = options.locale ? [options.locale] : defaults.languages;
+  const languages = options.locale ? [options.locale] : [...defaults.languages];
 
-  const latitude = options.geolocation?.latitude ?? defaults.latitude;
-  const longitude = options.geolocation?.longitude ?? defaults.longitude;
+  const coordinates = findCoordinatesByTimezone(timezoneId) ?? defaults;
+  const latitude = options.geolocation?.latitude ?? coordinates.latitude;
+  const longitude = options.geolocation?.longitude ?? coordinates.longitude;
   const accuracy = options.geolocation?.accuracy ?? 100;
 
   // Build standard Accept-Language header matching preferred languages
@@ -28,13 +29,9 @@ export function alignGeoEnvironment(options: GeoAlignmentOptions = {}): GeoAlign
 
   const extraHeaders: Record<string, string> = {
     'Accept-Language': acceptLanguageHeader,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-User': '?1',
-    'Sec-Fetch-Dest': 'document',
-    'Upgrade-Insecure-Requests': '1',
   };
+  // Accept and Fetch Metadata depend on each request's initiator and resource
+  // type. Let the browser produce them for navigation, fetch and subresources.
 
   return {
     timezoneId,

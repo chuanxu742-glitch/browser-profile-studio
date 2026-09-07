@@ -1,5 +1,3 @@
-import type { GeoIpInfo } from './types.js';
-
 export interface CountryGeoDefaults {
   readonly country: string;
   readonly countryName: string;
@@ -178,10 +176,11 @@ export const TIMEZONE_COORDINATES: Record<string, { latitude: number; longitude:
 
 export function findCoordinatesByTimezone(timezoneId?: string): { latitude: number; longitude: number } | undefined {
   if (!timezoneId) return undefined;
-  return TIMEZONE_COORDINATES[timezoneId.trim()];
+  const key = timezoneId.trim();
+  return Object.hasOwn(TIMEZONE_COORDINATES, key) ? TIMEZONE_COORDINATES[key] : undefined;
 }
 
 export function findGeoByCountryCode(countryCode: string): CountryGeoDefaults {
   const upper = countryCode.trim().toUpperCase();
-  return COUNTRY_GEO_DEFAULTS[upper] ?? DEFAULT_GEO;
+  return Object.hasOwn(COUNTRY_GEO_DEFAULTS, upper) ? COUNTRY_GEO_DEFAULTS[upper]! : DEFAULT_GEO;
 }
