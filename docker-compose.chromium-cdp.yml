@@ -1,0 +1,6 @@
+# Overlay for docker-compose.cdp.yml; requires antigravity-cdp:local base image.
+services:
+  browser:
+    build:
+      dockerfile: Dockerfile.chromium-cdp
+    image: antigravity-browser-native-cdp:0.1.0

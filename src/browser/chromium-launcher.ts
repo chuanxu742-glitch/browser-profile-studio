@@ -4,6 +4,7 @@ import type { FirefoxContextLike, FirefoxLaunchOptions, FirefoxLauncherLike, Fir
 import type { UnifiedFingerprintProfile } from '../fingerprint/types.js';
 import { buildWorkerBootstrap } from '../fingerprint/stealth-scripts.js';
 import { RawCdpConnection, type RawCdpEvent } from './raw-cdp-connection.js';
+import { nativeChromiumProfileArgs, resolveVerifiedChromiumCore } from './custom-chromium-runtime.js';
 
 interface ChromiumCdpContext extends FirefoxContextLike {
   newCDPSession(page: FirefoxPageLike): Promise<{
@@ -20,11 +21,13 @@ export async function launchPersistentChromium(
   options: FirefoxLaunchOptions,
 ): Promise<FirefoxContextLike> {
   if (options.headless && options.managedExtensions?.length) throw new Error('EXTENSION_HEADED_REQUIRED');
+  const nativeCore = await resolveVerifiedChromiumCore();
   const module = await import('playwright');
   const chromium = module.chromium as unknown as {
     launchPersistentContext(directory: string, launchOptions: Record<string, unknown>): Promise<FirefoxContextLike>;
   };
   const launchConfig = {
+    ...(nativeCore ? { executablePath: nativeCore.executablePath } : {}),
     headless: options.headless,
     ...(options.viewport ? { viewport: options.viewport } : {}),
     ...(options.proxy ? { proxy: options.proxy } : {}),
@@ -64,14 +67,15 @@ export async function launchPersistentChromium(
         `--lang=${options.fingerprintProfile.geo?.locale ?? options.locale ?? 'en-US'}`,
       ] : []),
       ...managedChromiumArgs(options.managedExtensions),
+      ...(nativeCore ? nativeChromiumProfileArgs(options) : []),
     ],
     ignoreDefaultArgs: ['--enable-automation'],
     acceptDownloads: false,
     ignoreHTTPSErrors: false,
   };
 
-  // Only the Playwright-managed Chromium build is allowed. Falling back to a
-  // locally installed Chrome or Edge would invalidate the generated profile.
+  // Use the managed build or the explicitly configured, provenance-checked core.
+  // Both must match the exact browser version used to generate the profile.
   const context = await chromium.launchPersistentContext(profileDirectory, launchConfig);
   try {
     await assertManagedRuntimeVersion(context, 'chromium');

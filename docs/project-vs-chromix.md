@@ -1,5 +1,7 @@
 # 当前项目与 Chromix 的区别
 
+2026-09-08 补充：已开始维护独立 Chromium 原生补丁，覆盖语言、ICU locale、时区及硬件并发数，并提供 GitHub 构建/原生测试/Docker 导出流程。当前验证到精确源码应用和启动器测试，尚无通过完整编译的自定义 Chromium 二进制；以下已交付能力对比仍按默认运行时计算。详见 [内核实现与构建状态](../browser-core/chromium/README.md)。
+
 更新：2026-09-07。对照对象为 Chromix `e540796decd489e8e9dff8dea940eb03e77db693`；当日重新检查公开发行资产，仍是 Windows x64 的 151/152 两个包。这里只比较源码、公开交付物和本项目已完成的测试，没有运行 Chromix 二进制，因此不对两者检测站表现或运行性能作胜负判断。
 
 | 维度 | 我们的项目 | Chromix |
@@ -29,7 +31,7 @@
 1. 实际 Linux Docker 构建、容器重启/持久化与网络连接验收。此前 Docker Desktop 启动故障仍未解决；现有源码包不是 `docker load` 镜像。
 2. 更完整的跨域 iframe、Shared Worker、已存在 Service Worker 恢复与多客户端并发行为矩阵。现有用例只能证明它们覆盖的路径。
 3. 有真实可用 GPU 的环境中验证 WebGPU adapter/device/limits、WebGL1/2 与字体渲染一致性。不能因为 JS 返回目标型号就认为真实能力已改变。
-4. 若决定达到 Chromix 同类的内核修改深度，需要单独维护 Linux 原生构建、补丁、发行校验与升级回归，不是继续堆叠浏览器开关就能完成。
+4. 首批 Chromium 原生补丁及构建流程已经加入；仍须完成实际 Linux 编译和原生运行验证。Canvas、音频、字体、WebGL/WebGPU 的更深层修改和升级回归尚未完成。
 
 这些是不同层面的能力，不能简单认定我们的功能更多就意味着内核更强，也不能仅凭 Chromix 有更多补丁就认定实际效果一定更好。
 

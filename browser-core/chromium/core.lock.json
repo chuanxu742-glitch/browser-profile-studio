@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "engine": "chromium",
+  "browserVersion": "151.0.7922.34",
+  "chromiumRevision": "782af9cb30a53f54487e5d2e44738645a8ec457c",
+  "depotToolsRevision": "69a652ea05e450f84620f56957a801923186fda5",
+  "playwrightVersion": "1.62.1",
+  "reference": {
+    "repository": "https://github.com/xiaozhou26/Chromix",
+    "revision": "e540796decd489e8e9dff8dea940eb03e77db693"
+  },
+  "patches": [
+    {
+      "path": "patches/0001-native-process-profile.patch",
+      "sha256": "df671ba4895f1853a2d89554f0cc716043b96d7491747aa6b906f9a10e6228e5"
+    }
+  ],
+  "upstreamFiles": {
+    "content/browser/renderer_host/render_process_host_impl.cc": "189717078c7d1a15e492c8fb44d820c691773905a82932a4d65623e53f7dc6e3",
+    "content/renderer/render_thread_impl.cc": "1836c3cf3ce8da9b693b607774d518fc7c681956aae7919f7d99baf7ba5106d1",
+    "third_party/blink/renderer/core/frame/navigator_language.cc": "6eecd7715b44a514025ef27bebe599c258123ea9c39ac10e4a26022ca0269888",
+    "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc": "7b689c17f7007b7e342412cb27165111fe6b5db8672ac27b8b9fc1ea0f432928",
+    "third_party/blink/renderer/core/timezone/timezone_controller.cc": "4574c1fb3f000be38d206acdb184c5f1d3a0afa75bf28c8cf0f6dd05e6b7382e"
+  }
+}

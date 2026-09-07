@@ -7,3 +7,5 @@ mozconfig text eol=lf
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.vbs text eol=crlf
+browser-core/chromium/** text eol=lf
+browser-core/chromium/patches/*.patch whitespace=-blank-at-eol
