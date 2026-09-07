@@ -35,36 +35,60 @@ export async function launchPersistentChromium(
     ...(options.extraHTTPHeaders ? { extraHTTPHeaders: options.extraHTTPHeaders } : {}),
     ...(options.userAgent ? { userAgent: options.userAgent } : {}),
     args: [
-      '--no-sandbox',
       '--disable-blink-features=AutomationControlled',
       '--disable-infobars',
-      '--excludeSwitches=enable-automation',
       '--use-mock-keychain',
+      '--disable-component-update',
+      '--disable-domain-reliability',
+      '--disable-breakpad',
+      '--disable-sync',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--password-store=basic',
+      // 深层反检测参数：禁用后台网络探测与遥测泄漏
+      '--disable-background-networking',
+      '--disable-client-side-phishing-detection',
+      '--disable-default-apps',
+      '--disable-hang-monitor',
+      '--disable-prompt-on-repost',
+      '--disable-translate',
+      '--disable-renderer-backgrounding',
+      '--disable-backgrounding-occluded-windows',
+      '--metrics-recording-only',
+      '--no-service-autorun',
       ...(options.fingerprintProfile ? [
         '--remote-debugging-port=0',
         '--remote-debugging-address=127.0.0.1',
         `--user-agent=${options.fingerprintProfile.userAgent}`,
+        `--window-size=${options.fingerprintProfile.viewport?.width ?? 1920},${options.fingerprintProfile.viewport?.height ?? 1080}`,
+        `--lang=${options.fingerprintProfile.geo?.locale ?? options.locale ?? 'en-US'}`,
       ] : []),
       ...managedChromiumArgs(options.managedExtensions),
     ],
     ignoreDefaultArgs: ['--enable-automation'],
     acceptDownloads: false,
+    ignoreHTTPSErrors: false,
   };
 
   // Only the Playwright-managed Chromium build is allowed. Falling back to a
   // locally installed Chrome or Edge would invalidate the generated profile.
   const context = await chromium.launchPersistentContext(profileDirectory, launchConfig);
-  await assertManagedRuntimeVersion(context, 'chromium');
-  if (options.fingerprintProfile) {
-    await installManagedServiceWorkerIdentity(context, options.fingerprintProfile, profileDirectory);
-    await installManagedChromiumIdentity(context as ChromiumCdpContext, options.fingerprintProfile);
-  }
+  try {
+    await assertManagedRuntimeVersion(context, 'chromium');
+    if (options.fingerprintProfile) {
+      await installManagedServiceWorkerIdentity(context, options.fingerprintProfile, profileDirectory);
+      await installManagedChromiumIdentity(context as ChromiumCdpContext, options.fingerprintProfile);
+    }
 
-  if (options.initScript && typeof context?.addInitScript === 'function') {
-    await context.addInitScript(options.initScript);
-  }
+    if (options.initScript && typeof context?.addInitScript === 'function') {
+      await context.addInitScript(options.initScript);
+    }
 
-  return context;
+    return context;
+  } catch (error) {
+    await context.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function installManagedServiceWorkerIdentity(
@@ -87,21 +111,22 @@ async function installManagedServiceWorkerIdentity(
   const configureTarget = async (sessionId: string, targetId: string, paused: boolean): Promise<void> => {
     try {
       try {
-        await connection.send('Network.setUserAgentOverride', override, sessionId);
-      } catch (_) {}
-      try {
         await connection.send('Emulation.setUserAgentOverride', override, sessionId);
-      } catch (_) {}
+      } catch {
+        await connection.send('Network.setUserAgentOverride', override, sessionId);
+      }
       const evaluation = await connection.send('Runtime.evaluate', {
         expression: bootstrap,
         awaitPromise: false,
         returnByValue: false,
       }, sessionId);
       if (evaluation.exceptionDetails) {
-        console.warn('SW bootstrap warning:', evaluation.exceptionDetails);
+        throw new Error('SERVICE_WORKER_BOOTSTRAP_EXCEPTION');
       }
     } catch (err) {
-      console.warn('configureTarget error:', err);
+      connection.close();
+      await context.close().catch(() => undefined);
+      throw err;
     } finally {
       if (paused) {
         await connection.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => undefined);

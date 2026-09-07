@@ -16,6 +16,15 @@ Service Worker 身份链路：Chromium 会通过仅绑定回环地址的浏览�
 
 ## 安装
 
+### Docker + Playwright CDP
+
+独立 Chromium CDP 服务入口已提供，支持认证、持久 Profile 与客户端重连。使用
+`docker compose -f docker-compose.cdp.yml up -d --build` 前设置至少 24 字符的 `CDP_TOKEN`。
+客户端通过 `chromium.connectOverCDP` 连接并复用 `browser.contexts()[0]`。
+构建、Node/Python 示例、配置与验证状态见 [Docker CDP 使用说明](docs/docker-cdp.md)。
+
+### 本地安装
+
 要求 Node.js 20 或更高版本。
 
 ```sh

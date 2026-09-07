@@ -51,7 +51,15 @@ describe('Fingerprint and Stealth Engine Unit Tests', () => {
       expect(linux.platform).toBe('Linux x86_64');
       expect(linux.hardware.platform).toBe('Linux x86_64');
       expect(linux.userAgent).toContain('X11; Linux x86_64');
+      expect(linux.webgl.unmaskedRenderer).not.toContain('Direct3D');
+      expect([4, 8]).toContain(linux.hardware.deviceMemory);
       expect(() => generateFingerprint({ engine: 'chromium', browserVersion: 'not-a-version' })).toThrow('BROWSER_VERSION_INVALID');
+    });
+
+    it('normalizes explicit locale and language preferences', () => {
+      const fp = generateFingerprint({ locale: 'de-DE', languages: ['en-US', 'de-DE'] });
+      expect(fp.geo.languages).toEqual(['de-DE', 'en-US']);
+      expect(generateFingerprint({ languages: ['ja-JP'] }).geo.locale).toBe('ja-JP');
     });
 
   });

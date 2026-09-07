@@ -5,7 +5,7 @@
 | 方面 | Chromix | 本项目与处理决定 |
 | --- | --- | --- |
 | 环境一致性 | Chromium 补丁与 `--fingerprint-*` 参数，SDK 协调启动参数 | 本项目为受管 Firefox/Chromium、原生首选项和 CDP/脚本组合。保留现有架构，修复 locale、语言列表、时区与坐标的配置差异 |
-| 请求头 | Node SDK 用 Playwright locale 等选项构建 context | 移除地理配置中的全局导航头，由浏览器按资源类型生成 Fetch Metadata 和 Accept |
+| 请求头与地域设置 | Node SDK 将顶层 locale/timezone 转为内核 flags，明确移除 context 层对应覆盖 | 移除地理配置中的全局导航头，由浏览器按资源类型生成 Fetch Metadata 和 Accept |
 | 内核完整性 | `_binary.js` 使用流式 SHA-256 校验下载文件 | 自定义 Firefox 可执行文件改用流式校验，保留严格版本、源码、补丁锁与失败拒绝策略 |
 | GeoIP | Node `geoipHttp(proxyUrl)` 内的 fetch 未使用 proxyUrl，并将国家代码小写作为 locale | 该实现不适合借用。国家默认环境也不等于真实出口探测；本次未增加在线 GeoIP 服务 |
 | 产品范围 | 浏览器内核与轻量 SDK | 本项目还有 Studio、持久 Profile、代理池、权限、审计与 RPA，不能把内核替换等同于产品升级 |
@@ -36,5 +36,7 @@ CI 的 verify 作业也执行该检查。
 首轮发现的跨 iframe/Worker 测试超时已修复，根因为 iframe 保护代码删除 Window.navigator 后，测试加载回调抛错但没有拒绝等待中的 Promise。此前已在撤回首轮优化、保留原工作区改动的临时副本中复现；修复后正常完成。真实身份测试通过不代表 stock Firefox 已获得自定义内核才支持的 Service Worker 时区覆盖，原有能力边界保持不变。
 
 ## 后续内核接入边界
+
+完整核查与 Docker/CDP 交付依据见 [chromix-cdp-audit.md](./chromix-cdp-audit.md)，包含真实 CDP 接管观测、当前发行平台限制和分阶段验收任务。
 
 本次未引入 Chromix 依赖或替换浏览器。若未来支持 Chromix，应独立实现管理员配置的引擎适配器，固定发行版及校验清单，从真实内核版本生成身份，并增加 Window/Worker/Service Worker/网络一致性测试。当前仅受管 Playwright 版本的身份检查不能直接用于 Chromix 二进制。Chromix README 所述能力不能视为本项目已实现或已验证的能力。

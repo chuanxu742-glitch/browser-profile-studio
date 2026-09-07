@@ -1,6 +1,13 @@
 node_modules
 dist
 .browser-data
+data
+artifacts
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
 .git
 .env
 *.log

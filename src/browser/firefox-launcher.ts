@@ -134,12 +134,18 @@ export async function launchPersistentFirefox(
       '--window-position=100,100',
     ],
     firefoxUserPrefs: {
+      'marionette.enabled': false,
       'dom.webdriver.enabled': false,
       'privacy.resistFingerprinting': false,
+      'webgl.disabled': false,
       'media.peerconnection.ice.default_address_only': true,
       'webgl.force-enabled': true,
       'layers.acceleration.force-enabled': true,
       'gfx.font_rendering.cleartype_params.rendering_mode': 5,
+      'toolkit.telemetry.enabled': false,
+      'toolkit.telemetry.unified': false,
+      'experiments.supported': false,
+      'network.http.speculative-parallel-limit': 0,
       ...(options.managedExtensions?.length ? {
         'extensions.autoDisableScopes': 0,
         'extensions.enabledScopes': 15,
@@ -148,8 +154,10 @@ export async function launchPersistentFirefox(
       ...firefoxFingerprintUserPrefs(options.fingerprintProfile),
     },
     acceptDownloads: false,
+    ignoreHTTPSErrors: false,
   };
 
+  await syncFirefoxUserJs(profileDirectory, launchConfig.firefoxUserPrefs);
   const context = await firefox.launchPersistentContext(profileDirectory, launchConfig);
   await assertManagedRuntimeVersion(context, 'firefox');
 
@@ -191,4 +199,10 @@ async function installManagedFirefoxExtensions(profileDirectory: string, extensi
     await copyFile(extension.packagePath, join(extensionsDirectory, `${extension.geckoId}.xpi`));
   }
   await atomicWriteFile(indexPath, JSON.stringify(filenames));
+}
+
+async function syncFirefoxUserJs(profileDirectory: string, prefs: Record<string, string | number | boolean>): Promise<void> {
+  const userJsPath = join(profileDirectory, 'user.js');
+  const lines = Object.entries(prefs).map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`);
+  await atomicWriteFile(userJsPath, lines.join('\n') + '\n');
 }

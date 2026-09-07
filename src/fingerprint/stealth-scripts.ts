@@ -1063,6 +1063,7 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
         navigatorObject.gpu.requestAdapter = markAsNative(async function(options) {
           const adapter = await origRequestAdapter.apply(this, arguments);
           if (!adapter) return adapter;
+          const methods = new Map();
           return new Proxy(adapter, {
             get(target, prop) {
               if (prop === 'info') {
@@ -1073,7 +1074,10 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
                   description: rendererVal,
                 };
               }
-              return Reflect.get(target, prop);
+              const value = Reflect.get(target, prop, target);
+              if (typeof value !== 'function') return value;
+              if (!methods.has(prop)) methods.set(prop, value.bind(target));
+              return methods.get(prop);
             },
           });
         });
