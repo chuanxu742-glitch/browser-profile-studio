@@ -354,7 +354,9 @@ export function generateFingerprint(
   const geo: GeoFingerprintConfig = {
     timezoneId: targetTz,
     locale: explicitLocale || geoDefaults.locale,
-    languages: explicitLanguages && explicitLanguages.length > 0 ? explicitLanguages : geoDefaults.languages,
+    languages: explicitLanguages && explicitLanguages.length > 0
+      ? [...explicitLanguages]
+      : explicitLocale ? [explicitLocale] : [...geoDefaults.languages],
     geolocation: {
       latitude: explicitLatitude !== undefined ? explicitLatitude : (tzCoords ? tzCoords.latitude : geoDefaults.latitude),
       longitude: explicitLongitude !== undefined ? explicitLongitude : (tzCoords ? tzCoords.longitude : geoDefaults.longitude),

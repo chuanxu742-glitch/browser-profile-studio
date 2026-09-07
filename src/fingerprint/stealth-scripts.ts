@@ -1332,7 +1332,8 @@ export function buildStealthInjectionScript(config: FingerprintConfig): string {
             delete ifrNav.maxTouchPoints;
             delete ifrNav.plugins;
             delete ifrNav.mimeTypes;
-            delete iframeWin.navigator;
+            // Keep the Window navigator accessor: deleting it removes the
+            // entire API in Firefox rather than revealing a prototype value.
           } catch (_) {}
         }
       } catch (_) {} finally {

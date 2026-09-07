@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { managedBrowserIdentity } from '../fingerprint/runtime-identity.js';
 
 interface FirefoxBuildProvenance {
@@ -55,7 +57,9 @@ export async function resolveVerifiedFirefoxCore(
   });
   let provenance: FirefoxBuildProvenance;
   try {
-    provenance = JSON.parse(raw.replace(/^\uFEFF/, '')) as FirefoxBuildProvenance;
+    const parsed: unknown = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid provenance');
+    provenance = parsed as FirefoxBuildProvenance;
   } catch {
     throw new Error(`CUSTOM_FIREFOX_PROVENANCE_INVALID: ${provenancePath}`);
   }
@@ -64,20 +68,25 @@ export async function resolveVerifiedFirefoxCore(
   if (provenance.schemaVersion !== 1 || provenance.engine !== 'firefox' || provenance.browserVersion !== expectedVersion) {
     throw new Error(`CUSTOM_FIREFOX_PROVENANCE_MISMATCH: expected Firefox ${expectedVersion}`);
   }
-  const expectedPatch = provenance.patches?.find((patch) => patch.path === EXPECTED_FIREFOX_CORE.patchPath);
+  const expectedPatch = Array.isArray(provenance.patches)
+    ? provenance.patches.find((patch) => patch && typeof patch === 'object' && patch.path === EXPECTED_FIREFOX_CORE.patchPath)
+    : undefined;
   if (
     provenance.playwrightVersion !== EXPECTED_FIREFOX_CORE.playwrightVersion
     || provenance.playwrightBrowserRevision !== EXPECTED_FIREFOX_CORE.playwrightBrowserRevision
     || provenance.playwrightGitRevision !== EXPECTED_FIREFOX_CORE.playwrightGitRevision
     || provenance.mozillaRevision !== EXPECTED_FIREFOX_CORE.mozillaRevision
-    || expectedPatch?.sha256?.toLowerCase() !== EXPECTED_FIREFOX_CORE.patchSha256
+    || typeof expectedPatch?.sha256 !== 'string'
+    || expectedPatch.sha256.toLowerCase() !== EXPECTED_FIREFOX_CORE.patchSha256
   ) {
     throw new Error('CUSTOM_FIREFOX_SOURCE_LOCK_MISMATCH: build provenance does not match the pinned source and patch set');
   }
-  if (!/^[a-f0-9]{64}$/i.test(provenance.executableSha256 ?? '')) {
+  if (typeof provenance.executableSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(provenance.executableSha256)) {
     throw new Error('CUSTOM_FIREFOX_PROVENANCE_HASH_INVALID');
   }
-  const actualHash = createHash('sha256').update(await readFile(executablePath)).digest('hex');
+  const hash = createHash('sha256');
+  await pipeline(createReadStream(executablePath), hash);
+  const actualHash = hash.digest('hex');
   if (actualHash !== provenance.executableSha256!.toLowerCase()) {
     throw new Error('CUSTOM_FIREFOX_INTEGRITY_MISMATCH: executable SHA-256 differs from build provenance');
   }
