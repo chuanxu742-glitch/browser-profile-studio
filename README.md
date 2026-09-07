@@ -25,7 +25,7 @@ Service Worker 身份链路：Chromium 会通过仅绑定回环地址的浏览�
 
 ### Chromium 原生内核
 
-已增加首批语言、ICU locale、时区、硬件并发数的 C++ 补丁，以及 GitHub Linux 编译、原生 CDP 验收和 Docker 镜像导出工作流。源码应用检查已通过，完整内核编译尚待构建机执行；默认仍使用 Playwright 管理的浏览器。构建机配置和可选内核接入见 [Chromium 原生内核说明](browser-core/chromium/README.md)。
+已实现语言、ICU locale、时区、硬件并发数，以及 Canvas、音频、字体、WebGL/WebGPU 身份、设备内存的原生补丁与启动器接入。按当前要求只进行源码应用、静态检查和轻量测试，不编译内核；原生运行和 Docker 镜像验收留待之后执行。实现范围、验证状态和构建入口见 [Chromium 原生内核说明](browser-core/chromium/README.md)。
 
 ### 本地安装
 

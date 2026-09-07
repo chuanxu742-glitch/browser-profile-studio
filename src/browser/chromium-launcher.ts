@@ -2,7 +2,7 @@
 import { assertManagedRuntimeVersion } from './firefox-launcher.js';
 import type { FirefoxContextLike, FirefoxLaunchOptions, FirefoxLauncherLike, FirefoxPageLike } from './firefox-launcher.js';
 import type { UnifiedFingerprintProfile } from '../fingerprint/types.js';
-import { buildWorkerBootstrap } from '../fingerprint/stealth-scripts.js';
+import { buildStealthInjectionScript, buildWorkerBootstrap } from '../fingerprint/stealth-scripts.js';
 import { RawCdpConnection, type RawCdpEvent } from './raw-cdp-connection.js';
 import { nativeChromiumProfileArgs, resolveVerifiedChromiumCore } from './custom-chromium-runtime.js';
 
@@ -14,6 +14,11 @@ interface ChromiumCdpContext extends FirefoxContextLike {
 
 export interface ChromiumLauncherLike extends FirefoxLauncherLike {
   connectOverCDP(endpoint: string): Promise<FirefoxContextLike>;
+}
+
+const nativeProfileContexts = new WeakSet<object>();
+export function usesNativeChromiumProfile(context: object): boolean {
+  return nativeProfileContexts.has(context);
 }
 
 export async function launchPersistentChromium(
@@ -80,14 +85,17 @@ export async function launchPersistentChromium(
   try {
     await assertManagedRuntimeVersion(context, 'chromium');
     if (options.fingerprintProfile) {
-      await installManagedServiceWorkerIdentity(context, options.fingerprintProfile, profileDirectory);
+      await installManagedServiceWorkerIdentity(context, options.fingerprintProfile, profileDirectory, !!nativeCore);
       await installManagedChromiumIdentity(context as ChromiumCdpContext, options.fingerprintProfile);
     }
 
     if (options.initScript && typeof context?.addInitScript === 'function') {
-      await context.addInitScript(options.initScript);
+      await context.addInitScript(nativeCore && options.managedFingerprintInitScript && options.fingerprintProfile
+        ? buildStealthInjectionScript(options.fingerprintProfile, { nativeChromium: true })
+        : options.initScript);
     }
 
+    if (nativeCore) nativeProfileContexts.add(context);
     return context;
   } catch (error) {
     await context.close().catch(() => undefined);
@@ -99,6 +107,7 @@ async function installManagedServiceWorkerIdentity(
   context: FirefoxContextLike,
   profile: UnifiedFingerprintProfile,
   profileDirectory: string,
+  nativeChromium: boolean,
 ): Promise<void> {
   let connection: RawCdpConnection;
   try {
@@ -110,7 +119,7 @@ async function installManagedServiceWorkerIdentity(
   context.on?.('close', () => connection.close());
   const configuredTargets = new Set<string>();
   const override = managedChromiumUserAgentOverride(profile);
-  const bootstrap = buildWorkerBootstrap(profile);
+  const bootstrap = buildWorkerBootstrap(profile, { nativeChromium });
 
   const configureTarget = async (sessionId: string, targetId: string, paused: boolean): Promise<void> => {
     try {

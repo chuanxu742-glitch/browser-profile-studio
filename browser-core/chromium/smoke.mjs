@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
+import { verifyRendering } from './rendering-probe.mjs';
 
 const lock = JSON.parse(await readFile(new URL('./core.lock.json', import.meta.url), 'utf8'));
 const executable = process.env.ABS_CHROMIUM_EXECUTABLE_PATH;
@@ -20,6 +21,7 @@ function probe() {
   return {
     language: navigator.language, languages: Array.from(navigator.languages),
     cores: navigator.hardwareConcurrency,
+    memory: navigator.deviceMemory,
     locale: new Intl.DateTimeFormat().resolvedOptions().locale,
     timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
     offsets: [new Date('2026-01-15T12:00:00Z').getTimezoneOffset(),
@@ -55,8 +57,10 @@ await new Promise(resolve => server.listen(0, '0.0.0.0', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const report = { chromiumRevision: lock.chromiumRevision, results: [] };
 const profiles = [
-  { locale: 'fr-FR', languages: ['fr-FR', 'fr'], timezone: 'Europe/Paris', cores: 3, offsets: [-60, -120] },
-  { locale: 'ja-JP', languages: ['ja-JP', 'ja'], timezone: 'Asia/Tokyo', cores: 7, offsets: [-540, -540] },
+  { locale: 'fr-FR', languages: ['fr-FR', 'fr'], timezone: 'Europe/Paris', cores: 3, memory: 4,
+    seed: 0, gpuVendor: 'abs-test-vendor-a', gpuRenderer: 'abs-test-renderer-a', offsets: [-60, -120] },
+  { locale: 'ja-JP', languages: ['ja-JP', 'ja'], timezone: 'Asia/Tokyo', cores: 7, memory: 8,
+    seed: 927, gpuVendor: 'abs-test-vendor-b', gpuRenderer: 'abs-test-renderer-b', offsets: [-540, -540] },
 ];
 
 async function runProfile(profile) {
@@ -69,6 +73,10 @@ async function runProfile(profile) {
     `--accept-lang=${profile.languages.join(',')}`,
     `--abs-locale=${profile.locale}`, `--abs-languages=${profile.languages.join(',')}`,
     `--abs-timezone=${profile.timezone}`, `--abs-hardware-concurrency=${profile.cores}`,
+    `--abs-device-memory=${profile.memory}`, `--abs-canvas-seed=${profile.seed}`, `--abs-audio-seed=${profile.seed}`,
+    `--abs-webgl-vendor=${profile.gpuVendor}`, `--abs-webgl-renderer=${profile.gpuRenderer}`,
+    `--abs-webgpu-vendor=${profile.gpuVendor}`, `--abs-webgpu-description=${profile.gpuRenderer}`,
+    '--abs-font-allowlist=Liberation Sans,Liberation Serif,Liberation Mono,Noto Color Emoji',
     ...(process.env.ABS_CHROMIUM_NO_SANDBOX === '1' ? ['--no-sandbox'] : []), 'about:blank',
   ], { env: { ...process.env, TZ: 'UTC', LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '', spawnError;
@@ -129,7 +137,7 @@ async function runProfile(profile) {
       });
       return { dedicated, shared, service };
     }));
-    const expected = { language: profile.locale, languages: profile.languages, cores: profile.cores,
+    const expected = { language: profile.locale, languages: profile.languages, cores: profile.cores, memory: profile.memory,
       locale: profile.locale, timezone: profile.timezone, offsets: profile.offsets,
       nativeGetter: true, ownProperty: false };
     for (const [realm, actual] of Object.entries(results)) {
@@ -142,7 +150,8 @@ async function runProfile(profile) {
     assert.equal((await page.evaluate(probe)).timezone, 'America/New_York');
     await session.send('Emulation.setTimezoneOverride', { timezoneId: '' });
     assert.deepEqual(await page.evaluate(probe), expected, 'CDP clear must restore native baseline');
-    report.results.push({ profile, realms: results, headers, cdpRestore: true });
+    const rendering = await verifyRendering(page, profile);
+    report.results.push({ profile, realms: results, headers, cdpRestore: true, rendering });
   } finally {
     clearTimeout(watchdog);
     await browser?.close().catch(() => {});
@@ -158,10 +167,18 @@ async function runProfile(profile) {
 
 try {
   for (const profile of profiles) await runProfile(profile);
+  assert.notDeepEqual(report.results[0].rendering.canvas, report.results[1].rendering.canvas,
+    'Different seeds must change opaque Canvas samples');
+  assert.notDeepEqual(report.results[0].rendering.audio, report.results[1].rendering.audio,
+    'Different seeds must change rendered Audio samples');
+  for (const kind of ['webgl', 'webgl2', 'webgpu']) {
+    const a = report.results[0].rendering.gpu[kind], b = report.results[1].rendering.gpu[kind];
+    if (!a.skipped && !b.skipped) assert.equal(a.maxTexture, b.maxTexture, 'Metadata must not alter real GPU limits');
+  }
   if (process.env.ABS_CHROMIUM_SMOKE_REPORT) {
     await writeFile(process.env.ABS_CHROMIUM_SMOKE_REPORT, JSON.stringify(report, null, 2) + '\n');
   }
-  console.log('PASS: native page, cross-site iframe, dedicated/shared/service workers, headers and CDP restore');
+  console.log('PASS: native realms, Canvas/Audio read paths, available GPU metadata, fonts and CDP restore. Check report for unavailable GPU backends.');
 } finally {
   await new Promise(resolve => server.close(resolve));
 }

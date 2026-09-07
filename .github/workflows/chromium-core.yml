@@ -44,6 +44,7 @@ jobs:
       - run: python3 browser-core/chromium/core.py check
       - run: python3 -m unittest discover -s browser-core/chromium -p 'test_*.py'
       - run: node --check browser-core/chromium/smoke.mjs
+      - run: node --check browser-core/chromium/rendering-probe.mjs
 
   build-linux:
     if: github.event_name == 'workflow_dispatch' && inputs.build
@@ -66,7 +67,9 @@ jobs:
       - name: Fetch pinned source and apply verified patches
         run: python3 browser-core/chromium/core.py prepare --workspace "$CHROMIUM_WORKSPACE"
       - name: Install Chromium Linux system dependencies
-        run: sudo "$CHROMIUM_WORKSPACE/src/build/install-build-deps.sh" --no-prompt
+        run: |
+          sudo "$CHROMIUM_WORKSPACE/src/build/install-build-deps.sh" --no-prompt
+          sudo apt-get install -y fonts-liberation fonts-dejavu-core
       - name: Build (persistent workspace allows incremental retries)
         run: python3 browser-core/chromium/core.py build --workspace "$CHROMIUM_WORKSPACE" --jobs "$BUILD_JOBS"
       - name: Package runtime dependencies and provenance
