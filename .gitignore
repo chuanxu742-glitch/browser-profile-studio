@@ -17,6 +17,8 @@ artifacts/
 browser-core/**/.checkout/
 browser-core/**/obj-*/
 browser-core/**/build-provenance.json
+browser-core/**/__pycache__/
+native-core/
 
 # Local credential-migration diagnostics are intentionally not published.
 scripts/extract-chrome-cookies.py

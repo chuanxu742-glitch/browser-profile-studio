@@ -12,6 +12,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  cdp-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: docker compose -f docker-compose.cdp.yml up -d --build --wait --wait-timeout 120
+        env:
+          CDP_TOKEN: ci-disposable-cdp-token-at-least-24
+      - run: node scripts/smoke-cdp.mjs
+        env:
+          CDP_TOKEN: ci-disposable-cdp-token-at-least-24
+          CDP_SMOKE_PHASE: write
+      - run: |
+          docker compose -f docker-compose.cdp.yml restart
+          docker compose -f docker-compose.cdp.yml up -d --wait --wait-timeout 120
+        env:
+          CDP_TOKEN: ci-disposable-cdp-token-at-least-24
+      - run: node scripts/smoke-cdp.mjs
+        env:
+          CDP_TOKEN: ci-disposable-cdp-token-at-least-24
+          CDP_SMOKE_PHASE: read
+      - run: docker compose -f docker-compose.cdp.yml down
+        if: always()
+        env:
+          CDP_TOKEN: ci-disposable-cdp-token-at-least-24
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -29,6 +59,8 @@ jobs:
       - run: npm run test:unit
       - run: npm run test:mcp
       - run: npm run test:integration
+      - run: npm run test:geo-headers
+      - run: npm run test:cdp
       - run: npm run build
       - run: npm audit --omit=dev
   firefox:

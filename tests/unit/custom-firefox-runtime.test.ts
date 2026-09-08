@@ -13,6 +13,33 @@ afterEach(async () => {
 });
 
 describe('custom Firefox runtime verification', () => {
+  it.each(['null', '[]', '42', '"invalid"', '{'])('rejects malformed provenance %s with a stable error', async (raw) => {
+    const root = await mkdtemp(join(tmpdir(), 'abs-custom-firefox-'));
+    roots.push(root);
+    const executablePath = join(root, 'firefox.exe');
+    await writeFile(executablePath, 'test');
+    await writeFile(join(root, 'build-provenance.json'), raw);
+    await expect(resolveVerifiedFirefoxCore({ ABS_FIREFOX_EXECUTABLE_PATH: executablePath }))
+      .rejects.toThrow('CUSTOM_FIREFOX_PROVENANCE_INVALID');
+  });
+
+  it.each([{}, [null], [{ path: 'patches/0001-service-worker-fingerprint-overrides.patch', sha256: 42 }]])(
+    'rejects malformed patch metadata %# without an incidental TypeError', async (patches) => {
+      const root = await mkdtemp(join(tmpdir(), 'abs-custom-firefox-'));
+      roots.push(root);
+      const executablePath = join(root, 'firefox.exe');
+      await writeFile(executablePath, 'test');
+      await writeFile(join(root, 'build-provenance.json'), JSON.stringify({
+        schemaVersion: 1, engine: 'firefox', browserVersion: managedBrowserIdentity('firefox').fullVersion,
+        playwrightVersion: '1.62.1', playwrightBrowserRevision: '1538',
+        playwrightGitRevision: '26a9e470a7b3c7822084b09fb7f13902c5f37b51',
+        mozillaRevision: 'f1b6c0f86b96b7e0688c26f65803576f27cdaf88', patches,
+      }));
+      await expect(resolveVerifiedFirefoxCore({ ABS_FIREFOX_EXECUTABLE_PATH: executablePath }))
+        .rejects.toThrow('CUSTOM_FIREFOX_SOURCE_LOCK_MISMATCH');
+    },
+  );
+
   it('selects the verified executable and rejects subsequent tampering against its provenance', async () => {
     const root = await mkdtemp(join(tmpdir(), 'abs-custom-firefox-'));
     roots.push(root);

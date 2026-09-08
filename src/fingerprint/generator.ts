@@ -260,17 +260,22 @@ export function generateFingerprint(
     ? COMMON_GPUS.filter((g) => g.unmaskedVendor.includes('Apple'))
     : COMMON_GPUS.filter((g) => !g.unmaskedVendor.includes('Apple'));
   const chosenGpu = gpuPool[Math.floor(rng() * gpuPool.length)] ?? COMMON_GPUS[0]!;
+  const gpu = os === 'linux' ? {
+    vendor: 'WebKit', renderer: 'WebKit WebGL',
+    unmaskedVendor: 'Google Inc. (Intel)',
+    unmaskedRenderer: 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)',
+  } : chosenGpu;
 
   // WebGL 基础供应商与渲染器必须与浏览器内核真实行为严格一致：
   // 在 Windows/Linux 下 Firefox 为 Mozilla，Chromium 为 WebKit；macOS 下保持 Apple 硬件特征
-  const defaultVendor = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : chosenGpu.vendor;
-  const defaultRenderer = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : chosenGpu.renderer;
+  const defaultVendor = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : gpu.vendor;
+  const defaultRenderer = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : gpu.renderer;
 
   const webgl: WebGLFingerprint = {
     vendor: defaultVendor,
     renderer: defaultRenderer,
-    unmaskedVendor: chosenGpu.unmaskedVendor,
-    unmaskedRenderer: chosenGpu.unmaskedRenderer,
+    unmaskedVendor: gpu.unmaskedVendor,
+    unmaskedRenderer: gpu.unmaskedRenderer,
     maxTextureSize: 16384,
     shaderPrecision: {
       rangeMin: 127,
@@ -286,10 +291,10 @@ export function generateFingerprint(
     supported: engine === 'chromium',
     ...(engine === 'chromium' ? {
       adapterInfo: {
-        vendor: chosenGpu.unmaskedVendor,
+        vendor: gpu.unmaskedVendor,
         architecture: 'common-3d',
-        device: chosenGpu.unmaskedRenderer,
-        description: chosenGpu.unmaskedRenderer,
+        device: gpu.unmaskedRenderer,
+        description: gpu.unmaskedRenderer,
       },
     } : {}),
   };
@@ -306,7 +311,8 @@ export function generateFingerprint(
 
   // 3. Hardware concurrency & memory
   const concurrencyChoices = [4, 6, 8, 12, 16, 20, 24, 32];
-  const memoryChoices = [4, 8, 16, 24, 32, 64];
+  // Conservative web-exposed buckets; this is not physical RAM capacity.
+  const memoryChoices = [4, 8];
   const hardwareConcurrency = concurrencyChoices[Math.floor(rng() * concurrencyChoices.length)] ?? 8;
   const deviceMemory = memoryChoices[Math.floor(rng() * memoryChoices.length)] ?? 16;
 
@@ -356,8 +362,10 @@ export function generateFingerprint(
   const tzCoords = findCoordinatesByTimezone(targetTz);
   const geo: GeoFingerprintConfig = {
     timezoneId: targetTz,
-    locale: explicitLocale || geoDefaults.locale,
-    languages: explicitLanguages && explicitLanguages.length > 0 ? explicitLanguages : geoDefaults.languages,
+    locale: explicitLocale || explicitLanguages?.[0] || geoDefaults.locale,
+    languages: explicitLanguages && explicitLanguages.length > 0
+      ? [...new Set([explicitLocale || explicitLanguages[0]!, ...explicitLanguages])]
+      : explicitLocale ? [explicitLocale] : [...geoDefaults.languages],
     geolocation: {
       latitude: explicitLatitude !== undefined ? explicitLatitude : (tzCoords ? tzCoords.latitude : geoDefaults.latitude),
       longitude: explicitLongitude !== undefined ? explicitLongitude : (tzCoords ? tzCoords.longitude : geoDefaults.longitude),

@@ -1,0 +1,11 @@
+# Build Dockerfile.cdp as antigravity-cdp:local first. Place the verified native
+# archive's chromium/ directory at native-core/chromium/ in the build context.
+ARG CDP_BASE_IMAGE=antigravity-cdp:local
+FROM ${CDP_BASE_IMAGE}
+USER root
+COPY native-core/chromium /opt/abs-chromium
+RUN test -x /opt/abs-chromium/chrome && \
+    test -f /opt/abs-chromium/build-provenance.json && \
+    chmod -R a+rX /opt/abs-chromium
+ENV ABS_CHROMIUM_EXECUTABLE_PATH=/opt/abs-chromium/chrome
+USER node
