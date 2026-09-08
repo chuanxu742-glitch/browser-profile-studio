@@ -45,6 +45,7 @@ export interface WebGLFingerprint {
 }
 
 export interface WebGPUFingerprint {
+  /** Expected engine API surface, not proof that a GPU adapter/device is available. */
   readonly supported: boolean;
   readonly adapterInfo?: {
     vendor: string;

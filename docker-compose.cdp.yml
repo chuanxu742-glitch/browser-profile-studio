@@ -1,0 +1,26 @@
+name: antigravity-cdp
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: Dockerfile.cdp
+    image: antigravity-browser-cdp:0.1.0
+    init: true
+    shm_size: 2gb
+    stop_grace_period: 30s
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CDP_PORT:-9222}:9222"
+    environment:
+      CDP_TOKEN: ${CDP_TOKEN:?Set CDP_TOKEN to at least 24 characters}
+      CDP_MAX_CONNECTIONS: ${CDP_MAX_CONNECTIONS:-8}
+      CDP_COUNTRY: ${CDP_COUNTRY:-US}
+      CDP_LOCALE: ${CDP_LOCALE:-en-US}
+      CDP_TIMEZONE: ${CDP_TIMEZONE:-America/New_York}
+      CDP_WIDTH: ${CDP_WIDTH:-1280}
+      CDP_HEIGHT: ${CDP_HEIGHT:-800}
+      CDP_PROXY: ${CDP_PROXY:-}
+    volumes:
+      - cdp-profile:/data/profile
+volumes:
+  cdp-profile:

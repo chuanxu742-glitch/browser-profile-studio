@@ -3,8 +3,9 @@ import { createRequire } from 'node:module';
 import { assertManagedRuntimeVersion } from './firefox-launcher.js';
 import type { FirefoxContextLike, FirefoxLaunchOptions, FirefoxLauncherLike, FirefoxPageLike } from './firefox-launcher.js';
 import type { UnifiedFingerprintProfile } from '../fingerprint/types.js';
-import { buildWorkerBootstrap } from '../fingerprint/stealth-scripts.js';
+import { buildStealthInjectionScript, buildWorkerBootstrap } from '../fingerprint/stealth-scripts.js';
 import { RawCdpConnection, type RawCdpEvent } from './raw-cdp-connection.js';
+import { nativeChromiumProfileArgs, resolveVerifiedChromiumCore } from './custom-chromium-runtime.js';
 
 interface ChromiumCdpContext extends FirefoxContextLike {
   newCDPSession(page: FirefoxPageLike): Promise<{
@@ -16,11 +17,17 @@ export interface ChromiumLauncherLike extends FirefoxLauncherLike {
   connectOverCDP(endpoint: string): Promise<FirefoxContextLike>;
 }
 
+const nativeProfileContexts = new WeakSet<object>();
+export function usesNativeChromiumProfile(context: object): boolean {
+  return nativeProfileContexts.has(context);
+}
+
 export async function launchPersistentChromium(
   profileDirectory: string,
   options: FirefoxLaunchOptions,
 ): Promise<FirefoxContextLike> {
   if (options.headless && options.managedExtensions?.length) throw new Error('EXTENSION_HEADED_REQUIRED');
+  const nativeCore = await resolveVerifiedChromiumCore();
   if (options.fingerprintProfile) {
     const dependency = createRequire(import.meta.url)('playwright-core/package.json') as { version?: unknown };
     if (dependency.version !== '1.62.1') throw new Error('WORKER_FINGERPRINT_SETUP_FAILED: requires pinned Playwright 1.62.1');
@@ -42,7 +49,13 @@ export async function launchPersistentChromium(
     if (!explicitLanguages.length) extraHTTPHeaders['Accept-Language'] = languages.join(',');
   }
   const launchConfig = {
+    ...(nativeCore ? { executablePath: nativeCore.executablePath } : {}),
     headless: options.headless,
+    ...(options.handleProcessSignals === undefined ? {} : {
+      handleSIGINT: options.handleProcessSignals,
+      handleSIGTERM: options.handleProcessSignals,
+      handleSIGHUP: options.handleProcessSignals,
+    }),
     ...(options.viewport ? { viewport: options.viewport } : {}),
     ...(options.fingerprintProfile ? {
       screen: { width: options.fingerprintProfile.screen.width, height: options.fingerprintProfile.screen.height },
@@ -56,14 +69,32 @@ export async function launchPersistentChromium(
     ...(Object.keys(extraHTTPHeaders).length ? { extraHTTPHeaders } : {}),
     ...(options.userAgent ? { userAgent: options.userAgent } : {}),
     args: [
-      '--no-sandbox',
       '--disable-blink-features=AutomationControlled',
       '--disable-infobars',
       '--use-mock-keychain',
+      '--disable-component-update',
+      '--disable-domain-reliability',
+      '--disable-breakpad',
+      '--disable-sync',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--password-store=basic',
+      // 深层反检测参数：禁用后台网络探测与遥测泄漏
+      '--disable-background-networking',
+      '--disable-client-side-phishing-detection',
+      '--disable-default-apps',
+      '--disable-hang-monitor',
+      '--disable-prompt-on-repost',
+      '--disable-translate',
+      '--disable-renderer-backgrounding',
+      '--disable-backgrounding-occluded-windows',
+      '--metrics-recording-only',
+      '--no-service-autorun',
       ...(options.fingerprintProfile ? [
         '--remote-debugging-port=0',
         '--remote-debugging-address=127.0.0.1',
         `--user-agent=${options.fingerprintProfile.userAgent}`,
+        `--window-size=${options.fingerprintProfile.viewport?.width ?? 1920},${options.fingerprintProfile.viewport?.height ?? 1080}`,
         `--lang=${options.fingerprintProfile.geo.locale}`,
         `--accept-lang=${options.fingerprintProfile.geo.languages.join(',')}`,
         ...(options.fingerprintProfile.webrtc === 'block_leak' || options.fingerprintProfile.webrtc === 'replace'
@@ -71,23 +102,30 @@ export async function launchPersistentChromium(
           : []),
       ] : []),
       ...managedChromiumArgs(options.managedExtensions),
+      ...(nativeCore ? nativeChromiumProfileArgs(options) : []),
     ],
     ignoreDefaultArgs: ['--enable-automation'],
     acceptDownloads: false,
+    ignoreHTTPSErrors: false,
   };
 
-  // Only the Playwright-managed Chromium build is allowed. Falling back to a
-  // locally installed Chrome or Edge would invalidate the generated profile.
+  // Use the managed build or the explicitly configured, provenance-checked core.
+  // Both must match the exact browser version used to generate the profile.
   const context = await chromium.launchPersistentContext(profileDirectory, launchConfig);
   try {
     await assertManagedRuntimeVersion(context, 'chromium');
     if (options.fingerprintProfile) {
-      await installManagedWorkerIdentity(context, options.fingerprintProfile, profileDirectory);
+      await installManagedWorkerIdentity(context, options.fingerprintProfile, profileDirectory, !!nativeCore);
       await installManagedChromiumIdentity(context as ChromiumCdpContext, options.fingerprintProfile);
     }
+
     if (options.initScript && typeof context?.addInitScript === 'function') {
-      await context.addInitScript(options.initScript);
+      await context.addInitScript(nativeCore && options.managedFingerprintInitScript && options.fingerprintProfile
+        ? buildStealthInjectionScript(options.fingerprintProfile, { nativeChromium: true })
+        : options.initScript);
     }
+
+    if (nativeCore) nativeProfileContexts.add(context);
     return context;
   } catch (error) {
     await context.close().catch(() => undefined);
@@ -99,6 +137,7 @@ async function installManagedWorkerIdentity(
   context: FirefoxContextLike,
   profile: UnifiedFingerprintProfile,
   profileDirectory: string,
+  nativeChromium: boolean,
 ): Promise<void> {
   const startupGate = await gatePlaywrightWorkerStartup(context, profile);
   const connection = await RawCdpConnection.connect(profileDirectory).catch(async (error: unknown) => {
@@ -121,7 +160,7 @@ async function installManagedWorkerIdentity(
     filter: [{ type: 'iframe', exclude: false }, { type: 'worker', exclude: false }, { exclude: true }],
   };
   const override = managedChromiumUserAgentOverride(profile);
-  const bootstrap = buildWorkerBootstrap(profile);
+  const bootstrap = buildWorkerBootstrap(profile, { nativeChromium });
 
   const configure = (sessionId: string, targetId: string, type: string, paused: boolean): Promise<void> => {
     const previous = targets.get(targetId);

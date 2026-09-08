@@ -1,0 +1,145 @@
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 2a8abef..854e972 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -4015,6 +4015,12 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+   };
+   renderer_cmd->CopySwitchesFrom(browser_cmd, kSwitchNames);
+ 
++  // A native profile belongs to the browser process, including renderers for
++  // out-of-process frames and workers. Never change it after process startup.
++  static constexpr const char* kAbsProfileSwitches[] = {
++      "abs-languages", "abs-locale", "abs-timezone", "abs-hardware-concurrency"};
++  renderer_cmd->CopySwitchesFrom(browser_cmd, kAbsProfileSwitches);
++
+   // Propagate WebNN switches needed by backends that run in the renderer.
+   renderer_cmd->CopySwitchesFrom(
+       browser_cmd, switches::GetWebNNSwitchesForRendererProcess());
+diff --git a/content/renderer/render_thread_impl.cc b/content/renderer/render_thread_impl.cc
+index 718f7d9..1b6e6c5 100644
+--- a/content/renderer/render_thread_impl.cc
++++ b/content/renderer/render_thread_impl.cc
+@@ -21,6 +21,7 @@
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
++#include "base/i18n/rtl.h"
+ #include "base/lazy_instance.h"
+ #include "base/logging.h"
+ #include "base/memory/discardable_memory_allocator.h"
+@@ -812,6 +813,14 @@ void RenderThreadImpl::InitializeCompositorThread() {
+ void RenderThreadImpl::InitializeWebKit(mojo::BinderMap* binders) {
+   DCHECK(!blink_platform_impl_);
+ 
++  // Initialize the process default before Blink creates any JS realms. Do not
++  // mutate global ICU state from navigator getters running on worker threads.
++  const std::string profile_locale =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("abs-locale");
++  if (!profile_locale.empty()) {
++    base::i18n::SetICUDefaultLocale(profile_locale);
++  }
++
+   const base::CommandLine& command_line =
+       *base::CommandLine::ForCurrentProcess();
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2..607c946 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -4,11 +4,25 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
++#include "base/check.h"
++#include "base/check_op.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/system/sys_info.h"
+ 
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  const auto* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch("abs-hardware-concurrency")) {
++    unsigned processors = 0;
++    CHECK(base::StringToUint(
++        command_line->GetSwitchValueASCII("abs-hardware-concurrency"),
++        &processors));
++    CHECK_GE(processors, 1u);
++    CHECK_LE(processors, 256u);
++    return processors;
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+index 75cd346..6f5966c 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -84,6 +84,16 @@ void NavigatorLanguage::EnsureUpdatedLanguage() {
+   }
+ 
+   if (languages_dirty_) {
++    const std::string profile_languages =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++            "abs-languages");
++    if (!profile_languages.empty()) {
++      // Shared by Navigator and WorkerNavigator. Explicit CDP emulation above
++      // retains precedence; clearing it restores this process profile.
++      languages_ = ParseAndSanitize(String::FromUTF8(profile_languages));
++      languages_dirty_ = false;
++      return;
++    }
+     languages_ = ParseAndSanitize(GetAcceptLanguages());
+     // Reduce the Accept-Language if the ReduceAcceptLanguage deprecation
+     // trial is not enabled and feature flag ReduceAcceptLanguage is enabled.
+diff --git a/third_party/blink/renderer/core/timezone/timezone_controller.cc b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+index 48eb8d2..2438759 100644
+--- a/third_party/blink/renderer/core/timezone/timezone_controller.cc
++++ b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/core/timezone/timezone_controller.h"
+ 
++#include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+@@ -93,7 +94,18 @@ void NotifyTimezoneChangeOnMainThread() {
+ 
+ TimeZoneController::TimeZoneController() {
+   DCHECK(IsMainThread());
+-  if (!base::FeatureList::IsEnabled(kLazyBlinkTimezoneInit)) {
++  const std::string profile_timezone =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("abs-timezone");
++  if (!profile_timezone.empty()) {
++    std::unique_ptr<icu::TimeZone> timezone(icu::TimeZone::createTimeZone(
++        icu::UnicodeString(profile_timezone.c_str(), -1, US_INV)));
++    CHECK(timezone);
++    CHECK(*timezone != icu::TimeZone::getUnknown());
++    // Set the default during initialization, before any page or worker runs.
++    // CDP overrides retain their normal lifecycle and restore this baseline.
++    icu::TimeZone::adoptDefault(timezone.release());
++    host_timezone_id_ = String::FromUTF8(profile_timezone);
++  } else if (!base::FeatureList::IsEnabled(kLazyBlinkTimezoneInit)) {
+     host_timezone_id_ = GetCurrentTimezoneId();
+   }
+ }
+@@ -247,10 +259,15 @@ void TimeZoneController::OnTimeZoneChange(const String& timezone_id) {
+ 
+   // Remember requested timezone id so we can set it when timezone
+   // override is removed.
+-  instance().host_timezone_id_ = timezone_id;
++  const std::string profile_timezone =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("abs-timezone");
++  const String effective_timezone = profile_timezone.empty()
++                                        ? timezone_id
++                                        : String::FromUTF8(profile_timezone);
++  instance().host_timezone_id_ = effective_timezone;
+ 
+   if (!HasTimeZoneOverride())
+-    SetIcuTimeZoneAndNotifyV8(timezone_id);
++    SetIcuTimeZoneAndNotifyV8(effective_timezone);
+ }
+ 
+ const String& TimeZoneController::GetHostTimezoneId() {

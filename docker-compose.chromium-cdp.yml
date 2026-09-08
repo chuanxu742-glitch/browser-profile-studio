@@ -1,0 +1,8 @@
+# Overlay for docker-compose.cdp.yml; requires antigravity-cdp:local base image.
+services:
+  browser:
+    build:
+      dockerfile: Dockerfile.chromium-cdp
+    image: antigravity-browser-native-cdp:0.1.0
+    environment:
+      ABS_CHROMIUM_FONT_ALLOWLIST: ${ABS_CHROMIUM_FONT_ALLOWLIST:-Liberation Sans,Liberation Serif,Liberation Mono,Noto Color Emoji}

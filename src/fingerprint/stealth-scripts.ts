@@ -1,18 +1,20 @@
 import type { FingerprintConfig } from './types.js';
 
+export interface FingerprintScriptOptions { nativeChromium?: boolean }
+
 /** Workers are injected in their own realm by the launcher, before their script runs. */
-export function buildWorkerBootstrap(config: FingerprintConfig): string {
-  return buildRealmBootstrap(config);
+export function buildWorkerBootstrap(config: FingerprintConfig, options: FingerprintScriptOptions = {}): string {
+  return buildRealmBootstrap(config, options);
 }
 
-export function buildStealthInjectionScript(config: FingerprintConfig): string {
-  return buildRealmBootstrap(config);
+export function buildStealthInjectionScript(config: FingerprintConfig, options: FingerprintScriptOptions = {}): string {
+  return buildRealmBootstrap(config, options);
 }
 
-function buildRealmBootstrap(config: FingerprintConfig): string {
+function buildRealmBootstrap(config: FingerprintConfig, options: FingerprintScriptOptions = {}): string {
   return `(() => {
   'use strict';
-  const config = ${JSON.stringify(config)};
+  const config = ${JSON.stringify({ ...config, nativeChromium: options.nativeChromium === true })};
   const apply = Reflect.apply;
   const nativeSource = Function.prototype.toString;
   const descriptor = Object.getOwnPropertyDescriptor;
@@ -32,6 +34,8 @@ function buildRealmBootstrap(config: FingerprintConfig): string {
   }
 
   function nativeGetter(owner, key, value) {
+    // These getters are implemented by the verified core in every realm.
+    if (config.nativeChromium && ['hardwareConcurrency', 'deviceMemory', 'language', 'languages'].includes(key)) return;
     const desc = owner && descriptor(owner, key);
     if (!desc || !desc.get || apply(desc.get, navigator, []) === value) return;
     wrap(owner, key, (target, receiver, args) => {
@@ -77,7 +81,7 @@ function buildRealmBootstrap(config: FingerprintConfig): string {
     }
   }
 
-  if (config.webgl) {
+  if (!config.nativeChromium && config.webgl) {
     for (const name of ['WebGLRenderingContext', 'WebGL2RenderingContext']) {
       const ctor = globalThis[name];
       wrap(ctor && ctor.prototype, 'getParameter', (target, receiver, args) => {
@@ -100,7 +104,7 @@ function buildRealmBootstrap(config: FingerprintConfig): string {
     }
   }
 
-  if (config.canvas && config.canvas.enabled) {
+  if (!config.nativeChromium && config.canvas && config.canvas.enabled) {
     const seed = config.canvas.seed >>> 0;
     function mix(value) {
       value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
@@ -345,7 +349,7 @@ function buildRealmBootstrap(config: FingerprintConfig): string {
     });
   }
 
-  if (config.audio && config.audio.enabled && typeof AudioBuffer !== 'undefined') {
+  if (!config.nativeChromium && config.audio && config.audio.enabled && typeof AudioBuffer !== 'undefined') {
     const adjusted = new WeakSet();
     const getChannelData = AudioBuffer.prototype.getChannelData;
     const channelCount = descriptor(AudioBuffer.prototype, 'numberOfChannels').get;

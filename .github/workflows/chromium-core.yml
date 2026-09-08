@@ -1,0 +1,127 @@
+name: chromium-core
+
+on:
+  push:
+    paths: ['browser-core/chromium/**', '.github/workflows/chromium-core.yml']
+  pull_request:
+    paths: ['browser-core/chromium/**', '.github/workflows/chromium-core.yml']
+  workflow_dispatch:
+    inputs:
+      build:
+        description: 'Compile and test Linux x64 Chromium (requires a prepared large runner)'
+        type: boolean
+        default: false
+      runner:
+        description: 'Runner labels as a JSON array; standard ubuntu-latest has insufficient disk'
+        type: string
+        default: '["self-hosted", "linux", "x64", "chromium-build"]'
+      jobs:
+        description: 'Parallel compiler jobs (budget at least 2 GiB RAM per job)'
+        type: number
+        default: 16
+      package_docker:
+        description: 'Also build, test and export the native CDP Docker image (runner needs Docker)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: chromium-core
+  cancel-in-progress: false
+
+jobs:
+  patch-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 browser-core/chromium/core.py check
+      - run: python3 -m unittest discover -s browser-core/chromium -p 'test_*.py'
+      - run: node --check browser-core/chromium/smoke.mjs
+      - run: node --check browser-core/chromium/rendering-probe.mjs
+
+  build-linux:
+    if: github.event_name == 'workflow_dispatch' && inputs.build
+    needs: patch-check
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 1440
+    env:
+      CHROMIUM_WORKSPACE: ${{ vars.CHROMIUM_WORKSPACE }}
+      BUILD_JOBS: ${{ inputs.jobs }}
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - name: Select persistent or temporary Chromium workspace
+        run: printf 'CHROMIUM_WORKSPACE=%s\n' "${CHROMIUM_WORKSPACE:-$RUNNER_TEMP/abs-chromium-151}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Fetch pinned source and apply verified patches
+        run: python3 browser-core/chromium/core.py prepare --workspace "$CHROMIUM_WORKSPACE"
+      - name: Install Chromium Linux system dependencies
+        run: |
+          sudo "$CHROMIUM_WORKSPACE/src/build/install-build-deps.sh" --no-prompt
+          sudo apt-get install -y fonts-liberation fonts-dejavu-core
+      - name: Build (persistent workspace allows incremental retries)
+        run: python3 browser-core/chromium/core.py build --workspace "$CHROMIUM_WORKSPACE" --jobs "$BUILD_JOBS"
+      - name: Package runtime dependencies and provenance
+        run: python3 browser-core/chromium/core.py package --workspace "$CHROMIUM_WORKSPACE" --output artifacts/native-core
+      - name: Test the extracted artifact through CDP without injected scripts
+        env:
+          # Restricted to this isolated CI test, which visits only its local server.
+          ABS_CHROMIUM_NO_SANDBOX: '1'
+          ABS_CHROMIUM_SMOKE_REPORT: artifacts/native-core/native-smoke.json
+        run: |
+          mkdir -p artifacts/native-core/extracted
+          tar -xzf artifacts/native-core/abs-chromium-*-linux-x64.tar.gz -C artifacts/native-core/extracted
+          ABS_CHROMIUM_EXECUTABLE_PATH="$PWD/artifacts/native-core/extracted/chromium/chrome" node browser-core/chromium/smoke.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chromium-linux-x64-${{ github.sha }}
+          path: |
+            artifacts/native-core/*.tar.gz
+            artifacts/native-core/*.sha256
+            artifacts/native-core/native-smoke.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build and test native CDP Docker image
+        if: inputs.package_docker
+        env:
+          CDP_TOKEN: ci-native-core-disposable-token-at-least-24
+          CDP_PORT: '19222'
+          CDP_URL: http://127.0.0.1:19222
+        run: |
+          mkdir -p native-core
+          cp -a artifacts/native-core/extracted/chromium native-core/
+          docker build -f Dockerfile.cdp -t antigravity-cdp:local .
+          docker compose -p abs-native-ci -f docker-compose.cdp.yml -f docker-compose.chromium-cdp.yml up -d --build --wait --wait-timeout 120
+          CDP_SMOKE_PHASE=write node scripts/smoke-cdp.mjs
+          docker compose -p abs-native-ci -f docker-compose.cdp.yml -f docker-compose.chromium-cdp.yml restart
+          docker compose -p abs-native-ci -f docker-compose.cdp.yml -f docker-compose.chromium-cdp.yml up -d --wait --wait-timeout 120
+          CDP_SMOKE_PHASE=read node scripts/smoke-cdp.mjs
+          docker save antigravity-browser-native-cdp:0.1.0 | gzip > artifacts/native-core/abs-chromium-cdp-docker.tar.gz
+          cd artifacts/native-core
+          sha256sum abs-chromium-cdp-docker.tar.gz > abs-chromium-cdp-docker.tar.gz.sha256
+      - name: Clean isolated CI container and profile
+        if: always() && inputs.package_docker
+        env:
+          CDP_TOKEN: ci-native-core-disposable-token-at-least-24
+          CDP_PORT: '19222'
+        run: docker compose -p abs-native-ci -f docker-compose.cdp.yml -f docker-compose.chromium-cdp.yml down --volumes
+      - uses: actions/upload-artifact@v7
+        if: inputs.package_docker
+        with:
+          name: chromium-cdp-docker-${{ github.sha }}
+          path: |
+            artifacts/native-core/abs-chromium-cdp-docker.tar.gz
+            artifacts/native-core/abs-chromium-cdp-docker.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7

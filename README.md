@@ -18,6 +18,19 @@ Firefox 使用 Gecko 原生首选项对齐可支持的身份字段；stock 内�
 
 ## 安装
 
+### Docker + Playwright CDP
+
+独立 Chromium CDP 服务入口已提供，支持认证、持久 Profile 与客户端重连。使用
+`docker compose -f docker-compose.cdp.yml up -d --build` 前设置至少 24 字符的 `CDP_TOKEN`。
+客户端通过 `chromium.connectOverCDP` 连接并复用 `browser.contexts()[0]`。
+构建、Node/Python 示例、配置与验证状态见 [Docker CDP 使用说明](docs/docker-cdp.md)。
+
+### Chromium 原生内核
+
+已实现语言、ICU locale、时区、硬件并发数，以及 Canvas、音频、字体、WebGL/WebGPU 身份、设备内存的原生补丁与启动器接入。按当前要求只进行源码应用、静态检查和轻量测试，不编译内核；原生运行和 Docker 镜像验收留待之后执行。实现范围、验证状态和构建入口见 [Chromium 原生内核说明](browser-core/chromium/README.md)。
+
+### 本地安装
+
 要求 Node.js 20 或更高版本。
 
 ```sh

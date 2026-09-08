@@ -1,0 +1,673 @@
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 854e972..28f0e38 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -4018,7 +4018,11 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+   // A native profile belongs to the browser process, including renderers for
+   // out-of-process frames and workers. Never change it after process startup.
+   static constexpr const char* kAbsProfileSwitches[] = {
+-      "abs-languages", "abs-locale", "abs-timezone", "abs-hardware-concurrency"};
++      "abs-languages", "abs-locale", "abs-timezone", "abs-hardware-concurrency",
++      "abs-device-memory", "abs-canvas-seed", "abs-audio-seed",
++      "abs-webgl-vendor", "abs-webgl-renderer",
++      "abs-webgpu-vendor", "abs-webgpu-architecture", "abs-webgpu-device",
++      "abs-webgpu-description", "abs-webgpu-disabled", "abs-font-allowlist"};
+   renderer_cmd->CopySwitchesFrom(browser_cmd, kAbsProfileSwitches);
+ 
+   // Propagate WebNN switches needed by backends that run in the renderer.
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 05fa33e..d5f43f1 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
+ 
++#include <initializer_list>
++
++#include "third_party/blink/renderer/platform/abs_profile.h"
++
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -12,6 +16,14 @@
+ namespace blink {
+ 
+ float NavigatorDeviceMemory::deviceMemory() const {
++  double configured;
++  if (base::StringToDouble(abs_profile::Get("abs-device-memory"), &configured)) {
++    // Use the supported profile buckets exactly; never round malformed input.
++    for (double bucket : {0.25, 0.5, 1.0, 2.0, 4.0, 8.0}) {
++      if (configured == bucket)
++        return static_cast<float>(bucket);
++    }
++  }
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc b/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
+index adb616d..2e767ff 100644
+--- a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
++++ b/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.h"
+ 
++#include "third_party/blink/renderer/platform/graphics/abs_canvas_noise.h"
++
+ #include "base/location.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+@@ -195,7 +197,13 @@ CanvasAsyncBlobCreator::CanvasAsyncBlobCreator(
+       skia_image_->readPixels(info, pixel, info.minRowBytes(), 0, 0);
+     }
+ 
+-    if (skia_image_->peekPixels(&src_data_)) {
++    if (abs_profile::Uint("abs-canvas-seed")) {
++      SkPixmap source;
++      skia_image_ = skia_image_->peekPixels(&source)
++                        ? abs_profile::CanvasCopy(source)
++                        : nullptr;
++    }
++    if (skia_image_ && skia_image_->peekPixels(&src_data_)) {
+       static_bitmap_image_loaded_ = true;
+ 
+       // Ensure that the size of the to-be-encoded-image does not pass the
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index fd13b97..d08c6a2 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h"
+ 
++#include "third_party/blink/renderer/platform/graphics/abs_canvas_noise.h"
++
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdlib>
+@@ -513,6 +515,8 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+     }
+   }
+ 
++  if (image_data)
++    abs_profile::CanvasPixels(image_data->GetSkPixmap(), sx, sy);
+   return image_data;
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index aed92e0..0bf3238 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -25,6 +25,8 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_context.h"
+ 
++#include "third_party/blink/renderer/platform/abs_profile.h"
++
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "media/base/audio_glitch_info.h"
+@@ -432,6 +434,18 @@ void OfflineAudioContext::FireCompletionEvent() {
+       return;
+     }
+ 
++    // Rendering has stopped; transform exactly once before exposing the same
++    // AudioBuffer to the completion event and promise. All read APIs then see
++    // identical data, with no mutation of application-created writable buffers.
++    if (const auto seed = abs_profile::Uint("abs-audio-seed")) {
++      for (unsigned channel = 0; channel < rendered_buffer->numberOfChannels(); ++channel) {
++        auto samples = rendered_buffer->getChannelData(channel)->AsSpan();
++        for (size_t i = 0; i < samples.size(); ++i)
++          samples[i] = abs_profile::AudioSample(
++              samples[i], *seed, static_cast<uint32_t>(i), channel);
++      }
++    }
++
+     // Call the offline rendering completion event listener and resolve the
+     // promise too.
+     DispatchEvent(*OfflineAudioCompletionEvent::Create(rendered_buffer));
+diff --git a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+index d0b1bd6..e8fe6b1 100644
+--- a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
++++ b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+@@ -25,6 +25,8 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/realtime_analyser.h"
+ 
++#include "third_party/blink/renderer/platform/abs_profile.h"
++
+ #include <limits.h>
+ 
+ #include <algorithm>
+@@ -113,10 +115,13 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
+   const size_t source_length = magnitude_buffer_.size();
+   const size_t len = std::min(source_length, destination_array->length());
+   if (len > 0) {
++    const auto profile_seed = abs_profile::Uint("abs-audio-seed");
+     base::span<float> destination = destination_array->AsSpan();
+     for (unsigned i = 0; i < len; ++i) {
+       const float linear_value = magnitude_buffer_[i];
+-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
++      double db_mag = audio_utilities::LinearToDecibels(linear_value);
++      if (profile_seed)
++        db_mag = abs_profile::AudioSample(static_cast<float>(db_mag), *profile_seed, i);
+       destination[i] = static_cast<float>(db_mag);
+     }
+   }
+@@ -146,10 +151,13 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
+                                        : 1.0 / (max_decibels_ - min_decibels_);
+     const double min_decibels = min_decibels_;
+ 
++    const auto profile_seed = abs_profile::Uint("abs-audio-seed");
+     base::span<unsigned char> destination = destination_array->AsSpan();
+     for (unsigned i = 0; i < len; ++i) {
+       const float linear_value = magnitude_buffer_[i];
+-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
++      double db_mag = audio_utilities::LinearToDecibels(linear_value);
++      if (profile_seed)
++        db_mag = abs_profile::AudioSample(static_cast<float>(db_mag), *profile_seed, i);
+ 
+       // The range m_minDecibels to m_maxDecibels will be scaled to byte values
+       // from 0 to UCHAR_MAX.
+@@ -177,6 +185,7 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
+ 
+     const unsigned write_index = GetWriteIndex();
+ 
++    const auto profile_seed = abs_profile::Uint("abs-audio-seed");
+     base::span<float> destination = destination_array->AsSpan();
+     for (unsigned i = 0; i < len; ++i) {
+       // Buffer access is protected due to modulo operation.
+@@ -184,6 +193,8 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
+           input_buffer_[(i + write_index - fft_size + kInputBufferSize) %
+                         kInputBufferSize];
+ 
++      if (profile_seed)
++        value = abs_profile::AudioSample(value, *profile_seed, i);
+       destination[i] = value;
+     }
+   }
+@@ -202,14 +213,17 @@ void RealtimeAnalyser::GetByteTimeDomainData(DOMUint8Array* destination_array) {
+ 
+     const unsigned write_index = GetWriteIndex();
+ 
++    const auto profile_seed = abs_profile::Uint("abs-audio-seed");
+     base::span<unsigned char> destination = destination_array->AsSpan();
+     for (unsigned i = 0; i < len; ++i) {
+       // Buffer access is protected due to modulo operation.
+-      const float value =
++      float value =
+           input_buffer_[(i + write_index - fft_size + kInputBufferSize) %
+                         kInputBufferSize];
+ 
+       // Scale from nominal -1 -> +1 to unsigned byte.
++      if (profile_seed)
++        value = abs_profile::AudioSample(value, *profile_seed, i);
+       const double scaled_value = 128 * (value + 1);
+ 
+       // Clip to valid range.
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 319e17e..7566749 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -25,6 +25,8 @@
+ 
+ #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+ 
++#include "third_party/blink/renderer/platform/abs_profile.h"
++
+ #include <inttypes.h>
+ 
+ #include <memory>
+@@ -4191,6 +4193,9 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        const std::string configured = abs_profile::Get("abs-webgl-renderer");
++        if (!configured.empty())
++          return WebGLAny(script_state, String::FromUTF8(configured));
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4200,6 +4205,9 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        const std::string configured = abs_profile::Get("abs-webgl-vendor");
++        if (!configured.empty())
++          return WebGLAny(script_state, String::FromUTF8(configured));
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu.cc b/third_party/blink/renderer/modules/webgpu/gpu.cc
+index 4aae58a..ade5fd0 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu.h"
+ 
++#include "third_party/blink/renderer/platform/abs_profile.h"
++
+ #include <utility>
+ 
+ #include "base/feature_list.h"
+@@ -418,6 +420,10 @@ ScriptPromise<IDLNullable<GPUAdapter>> GPU::requestAdapter(
+       MakeGarbageCollected<ScriptPromiseResolver<IDLNullable<GPUAdapter>>>(
+           script_state);
+   auto promise = resolver->Promise();
++  if (abs_profile::Get("abs-webgpu-disabled") == "1") {
++    resolver->Resolve(nullptr);
++    return promise;
++  }
+   RequestAdapterImpl(script_state, options, resolver);
+   return promise;
+ }
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
+index 9d15570..6fbcbf2 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_adapter_info.h"
+ 
++#include "third_party/blink/renderer/platform/abs_profile.h"
++
+ #include "third_party/blink/renderer/modules/webgpu/gpu_memory_heap_info.h"
+ #include "third_party/blink/renderer/modules/webgpu/gpu_subgroup_matrix_config.h"
+ 
+@@ -34,7 +36,18 @@ GPUAdapterInfo::GPUAdapterInfo(const String& vendor,
+       type_(type),
+       d3d_shader_model_(d3d_shader_model),
+       vk_driver_version_(vk_driver_version),
+-      power_preference_(power_preference) {}
++      power_preference_(power_preference) {
++  // Identity metadata does not alter adapter availability, fallback status,
++  // enabled features or device limits. Never manufacture a working device.
++  const std::string vendor = abs_profile::Get("abs-webgpu-vendor");
++  const std::string architecture = abs_profile::Get("abs-webgpu-architecture");
++  const std::string device = abs_profile::Get("abs-webgpu-device");
++  const std::string description = abs_profile::Get("abs-webgpu-description");
++  if (!vendor.empty()) vendor_ = String::FromUTF8(vendor);
++  if (!architecture.empty()) architecture_ = String::FromUTF8(architecture);
++  if (!device.empty()) device_ = String::FromUTF8(device);
++  if (!description.empty()) description_ = String::FromUTF8(description);
++}
+ 
+ void GPUAdapterInfo::AppendMemoryHeapInfo(GPUMemoryHeapInfo* info) {
+   memory_heaps_.push_back(info);
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index 85d03ee..71513c9 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1088,6 +1088,8 @@ component("platform") {
+     "graphics/image.cc",
+     "graphics/image.h",
+     "graphics/image_data_buffer.cc",
++    "abs_profile.h",
++    "graphics/abs_canvas_noise.h",
+     "graphics/image_data_buffer.h",
+     "graphics/image_decoder_wrapper.cc",
+     "graphics/image_decoder_wrapper.h",
+@@ -2198,6 +2200,7 @@ source_set("blink_platform_unittests_sources") {
+   testonly = true
+ 
+   sources = [
++    "abs_profile_test.cc",
+     "animation/animation_translation_util_test.cc",
+     "animation/compositor_animation_test.cc",
+     "animation/timing_function_test.cc",
+diff --git a/third_party/blink/renderer/platform/abs_profile.h b/third_party/blink/renderer/platform/abs_profile.h
+new file mode 100644
+index 0000000..c292d6c
+--- /dev/null
++++ b/third_party/blink/renderer/platform/abs_profile.h
+@@ -0,0 +1,55 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_ABS_PROFILE_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_ABS_PROFILE_H_
++
++#include <bit>
++#include <cstdint>
++#include <optional>
++#include <string>
++
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++
++namespace blink::abs_profile {
++
++// CommandLine is immutable after renderer startup. No shared mutable profile or
++// per-worker setters: worker creation cannot race configuration installation.
++inline std::string Get(const char* name) {
++  return base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(name);
++}
++
++inline std::optional<uint32_t> Uint(const char* name) {
++  uint32_t value;
++  if (!base::StringToUint(Get(name), &value))
++    return std::nullopt;
++  return value;
++}
++
++inline uint32_t Mix(uint32_t value) {
++  value ^= value >> 16;
++  value *= 0x85ebca6bu;
++  value ^= value >> 13;
++  value *= 0xc2b2ae35u;
++  return value ^ (value >> 16);
++}
++
++// Replace two low mantissa bits, rather than adding noise on each read. This
++// is idempotent, preserves silence, NaN/Infinity and subnormal samples, and
++// changes a finite normalized sample by at most three ULPs.
++inline float AudioSample(float value, uint32_t seed, uint32_t index,
++                         uint32_t channel = 0) {
++  uint32_t bits = std::bit_cast<uint32_t>(value);
++  const uint32_t exponent = bits & 0x7f800000u;
++  if (!exponent || exponent == 0x7f800000u)
++    return value;
++  bits &= ~3u;
++  return std::bit_cast<float>(bits | (Mix(seed ^ bits ^
++      (index * 0x9e3779b9u) ^ (channel * 0x165667b1u)) & 3u));
++}
++
++}  // namespace blink::abs_profile
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_ABS_PROFILE_H_
+diff --git a/third_party/blink/renderer/platform/abs_profile_test.cc b/third_party/blink/renderer/platform/abs_profile_test.cc
+new file mode 100644
+index 0000000..11a757c
+--- /dev/null
++++ b/third_party/blink/renderer/platform/abs_profile_test.cc
+@@ -0,0 +1,115 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/platform/abs_profile.h"
++#include "third_party/blink/renderer/platform/graphics/abs_canvas_noise.h"
++
++#include <array>
++#include <bit>
++#include <cstdint>
++#include <cstdlib>
++#include <limits>
++
++#include "base/test/scoped_command_line.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace blink {
++namespace {
++
++TEST(AbsProfileTest, SeedZeroIsValidAndMalformedSeedIsAbsent) {
++  base::test::ScopedCommandLine command;
++  command.GetProcessCommandLine()->RemoveSwitch("abs-canvas-seed");
++  EXPECT_FALSE(abs_profile::Uint("abs-canvas-seed"));
++  command.GetProcessCommandLine()->AppendSwitchASCII("abs-canvas-seed", "0");
++  EXPECT_EQ(abs_profile::Uint("abs-canvas-seed"), 0u);
++  command.GetProcessCommandLine()->AppendSwitchASCII("abs-canvas-seed", "bad");
++  EXPECT_FALSE(abs_profile::Uint("abs-canvas-seed"));
++}
++
++TEST(AbsProfileTest, AudioIsIdempotentBoundedAndSeeded) {
++  unsigned differences = 0;
++  for (uint32_t i = 0; i < 100; ++i) {
++    float value = static_cast<float>(i + 1) / 103.0f;
++    float once = abs_profile::AudioSample(value, 0, i);
++    EXPECT_EQ(once, abs_profile::AudioSample(once, 0, i));
++    EXPECT_EQ(std::bit_cast<uint32_t>(once) & ~3u,
++              std::bit_cast<uint32_t>(value) & ~3u);
++    differences += once != abs_profile::AudioSample(value, 927, i);
++  }
++  EXPECT_GT(differences, 0u);
++}
++
++TEST(AbsProfileTest, AudioPreservesSpecialValues) {
++  for (uint32_t bits : {0u, 0x80000000u, 1u, 0x7f800000u, 0xff800000u,
++                        0x7fc01234u}) {
++    EXPECT_EQ(bits, std::bit_cast<uint32_t>(abs_profile::AudioSample(
++                        std::bit_cast<float>(bits), 123, 0)));
++  }
++}
++
++TEST(AbsProfileTest, CanvasIsIdempotentAndDoesNotTouchPaddingOrAlpha) {
++  base::test::ScopedCommandLine command;
++  command.GetProcessCommandLine()->AppendSwitchASCII("abs-canvas-seed", "0");
++  std::array<uint8_t, 12> data = {93, 126, 167, 255, 12, 35, 68, 127,
++                                  201, 202, 203, 204};
++  const auto original = data;
++  SkPixmap pixmap(SkImageInfo::Make(2, 1, kRGBA_8888_SkColorType,
++                                   kUnpremul_SkAlphaType), data.data(), 12);
++  abs_profile::CanvasPixels(pixmap);
++  const auto once = data;
++  abs_profile::CanvasPixels(pixmap);
++  EXPECT_EQ(data, once);
++  for (size_t i = 0; i < 3; ++i)
++    EXPECT_LE(std::abs(static_cast<int>(data[i]) - original[i]), 1);
++  for (size_t i = 3; i < data.size(); ++i)
++    EXPECT_EQ(data[i], original[i]);
++}
++
++TEST(AbsProfileTest, CanvasCropUsesAbsoluteCoordinates) {
++  base::test::ScopedCommandLine command;
++  command.GetProcessCommandLine()->AppendSwitchASCII("abs-canvas-seed", "927");
++  std::array<uint8_t, 24> full;
++  for (size_t i = 0; i < full.size(); ++i)
++    full[i] = i % 4 == 3 ? 255 : 100;
++  std::array<uint8_t, 8> crop;
++  for (size_t i = 0; i < crop.size(); ++i)
++    crop[i] = full[16 + i];
++  SkPixmap all(SkImageInfo::Make(3, 2, kRGBA_8888_SkColorType,
++                               kUnpremul_SkAlphaType), full.data(), 12);
++  SkPixmap part(SkImageInfo::Make(2, 1, kRGBA_8888_SkColorType,
++                                kUnpremul_SkAlphaType), crop.data(), 8);
++  abs_profile::CanvasPixels(all);
++  abs_profile::CanvasPixels(part, 1, 1);
++  for (size_t i = 0; i < crop.size(); ++i)
++    EXPECT_EQ(full[16 + i], crop[i]);
++}
++
++TEST(AbsProfileTest, CanvasByteOrdersAgreeAndCopyOwnsItsPixels) {
++  base::test::ScopedCommandLine command;
++  command.GetProcessCommandLine()->AppendSwitchASCII("abs-canvas-seed", "23");
++  std::array<uint8_t, 4> rgba = {93, 126, 167, 255};
++  std::array<uint8_t, 4> bgra = {167, 126, 93, 255};
++  auto original = rgba;
++  SkPixmap red(SkImageInfo::Make(1, 1, kRGBA_8888_SkColorType,
++                                kUnpremul_SkAlphaType), rgba.data(), 4);
++  SkPixmap blue(SkImageInfo::Make(1, 1, kBGRA_8888_SkColorType,
++                                 kUnpremul_SkAlphaType), bgra.data(), 4);
++  auto owned = abs_profile::CanvasCopy(red);
++  ASSERT_TRUE(owned);
++  EXPECT_EQ(rgba, original);
++  abs_profile::CanvasPixels(red);
++  abs_profile::CanvasPixels(blue);
++  EXPECT_EQ(rgba[0], bgra[2]);
++  EXPECT_EQ(rgba[1], bgra[1]);
++  EXPECT_EQ(rgba[2], bgra[0]);
++  SkPixmap copy;
++  ASSERT_TRUE(owned->peekPixels(&copy));
++  EXPECT_NE(copy.addr(), red.addr());
++  const auto bytes = gfx::SkPixmapToSpan(copy);
++  for (size_t i = 0; i < rgba.size(); ++i)
++    EXPECT_EQ(bytes[i], rgba[i]);
++}
++
++}  // namespace
++}  // namespace blink
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+index 3b1a90d..9ebc2ef 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -29,6 +29,8 @@
+ 
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
+ 
++#include "third_party/blink/renderer/platform/abs_profile.h"
++
+ #include <unicode/uscript.h>
+ 
+ #include <limits>
+@@ -41,6 +43,8 @@
+ #include "base/numerics/safe_conversions.h"
+ #include "base/strings/escape.h"
+ #include "base/system/sys_info.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
+ #include "base/timer/elapsed_timer.h"
+ #include "base/trace_event/process_memory_dump.h"
+ #include "base/trace_event/trace_event.h"
+@@ -156,6 +160,27 @@ const FontPlatformData* FontCache::GetFontPlatformData(
+     const FontDescription& font_description,
+     const FontFaceCreationParams& creation_params,
+     AlternateFontName alternate_font_name) {
++  // Filter native family and local() lookups before the cache. Downloaded
++  // web fonts and last-resort glyph fallback keep their original behavior.
++  const std::string allowlist = abs_profile::Get("abs-font-allowlist");
++  if (!allowlist.empty() && creation_params.CreationType() == kCreateFontByFamily &&
++      alternate_font_name != AlternateFontName::kLastResort) {
++    const std::string family = creation_params.Family().GetString().Utf8();
++    bool allowed = family.empty();
++    for (const auto& entry : base::SplitString(
++             allowlist + ",serif,sans-serif,monospace,cursive,fantasy,system-ui,"
++                         "math,emoji,fangsong,ui-serif,ui-sans-serif,ui-monospace,"
++                         "ui-rounded,ui-fangsong,-webkit-body,-webkit-pictograph,"
++                         "-webkit-system-font,-webkit-control",
++             ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++      if (base::EqualsCaseInsensitiveASCII(entry, family)) {
++        allowed = true;
++        break;
++      }
++    }
++    if (!allowed)
++      return nullptr;
++  }
+   TRACE_EVENT0("fonts", "FontCache::GetFontPlatformData");
+ 
+ #if !BUILDFLAG(IS_MAC)
+diff --git a/third_party/blink/renderer/platform/graphics/abs_canvas_noise.h b/third_party/blink/renderer/platform/graphics/abs_canvas_noise.h
+new file mode 100644
+index 0000000..df238f3
+--- /dev/null
++++ b/third_party/blink/renderer/platform/graphics/abs_canvas_noise.h
+@@ -0,0 +1,71 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_ABS_CANVAS_NOISE_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_ABS_CANVAS_NOISE_H_
++
++#include <utility>
++
++#include "third_party/blink/renderer/platform/abs_profile.h"
++#include "third_party/skia/include/core/SkData.h"
++#include "third_party/skia/include/core/SkImage.h"
++#include "third_party/skia/include/core/SkPixmap.h"
++#include "ui/gfx/skia_span_util.h"
++
++namespace blink::abs_profile {
++
++// Only touches a caller-owned readback copy. Respect rowBytes, RGBA/BGRA byte
++// order and absolute coordinates. Alpha, transparent/partially transparent
++// pixels, HDR formats and exact black/white channels retain their values.
++inline void CanvasPixels(const SkPixmap& pixmap, int origin_x = 0,
++                         int origin_y = 0) {
++  const auto seed = Uint("abs-canvas-seed");
++  const auto type = pixmap.colorType();
++  if (!seed || !pixmap.addr() ||
++      (type != kRGBA_8888_SkColorType && type != kBGRA_8888_SkColorType))
++    return;
++  auto bytes = gfx::SkPixmapToWritableSpan(pixmap);
++  for (int y = 0; y < pixmap.height(); ++y) {
++    auto row = bytes.subspan(static_cast<size_t>(y) * pixmap.rowBytes(),
++                            static_cast<size_t>(pixmap.width()) * 4);
++    for (int x = 0; x < pixmap.width(); ++x) {
++      auto pixel = row.subspan(static_cast<size_t>(x) * 4, 4u);
++      if (pixel[3] != 255)
++        continue;
++      for (unsigned channel = 0; channel < 3; ++channel) {
++        const unsigned byte = type == kBGRA_8888_SkColorType ? 2 - channel : channel;
++        const uint8_t value = pixel[byte];
++        if (value == 0 || value == 255)
++          continue;
++        const uint32_t high_bits = value & ~1u;
++        const uint32_t hash = Mix(*seed ^
++            ((static_cast<uint32_t>(origin_x) + x) * 374761393u) ^
++            ((static_cast<uint32_t>(origin_y) + y) * 668265263u) ^
++            (channel * 0x9e3779b9u) ^ (high_bits * 2654435761u));
++        // Never produce a protected endpoint from a non-endpoint: rereading an
++        // exported image must use the same transform.
++        const uint8_t changed = static_cast<uint8_t>(high_bits | (hash & 1u));
++        pixel[byte] = changed == 0 || changed == 255 ? value : changed;
++      }
++    }
++  }
++}
++
++inline sk_sp<SkImage> CanvasCopy(const SkPixmap& source) {
++  const auto info = source.info().makeAlphaType(kUnpremul_SkAlphaType);
++  const size_t row_bytes = info.minRowBytes();
++  const size_t size = info.computeByteSize(row_bytes);
++  if (info.isEmpty() || SkImageInfo::ByteSizeOverflowed(size))
++    return nullptr;
++  auto data = SkData::MakeUninitialized(size);
++  if (!data || !source.readPixels(info, data->writable_data(), row_bytes))
++    return nullptr;
++  SkPixmap copy(info, data->writable_data(), row_bytes);
++  CanvasPixels(copy);
++  return SkImages::RasterFromData(info, std::move(data), row_bytes);
++}
++
++}  // namespace blink::abs_profile
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_ABS_CANVAS_NOISE_H_
+diff --git a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+index c76f655..38186bf 100644
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+@@ -32,6 +32,8 @@
+ 
+ #include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
+ 
++#include "third_party/blink/renderer/platform/graphics/abs_canvas_noise.h"
++
+ #include "base/compiler_specific.h"
+ #include "base/memory/ptr_util.h"
+ #include "third_party/blink/renderer/platform/image-encoders/image_encoder_utils.h"
+@@ -63,7 +65,8 @@ ImageDataBuffer::ImageDataBuffer(scoped_refptr<StaticBitmapImage> image) {
+   }
+ #endif
+ 
+-  if (paint_image.IsTextureBacked() || paint_image.IsLazyGenerated() ||
++  if (abs_profile::Uint("abs-canvas-seed") ||
++      paint_image.IsTextureBacked() || paint_image.IsLazyGenerated() ||
+       paint_image_info.alphaType() != kUnpremul_SkAlphaType) {
+     // Unpremul is handled upfront, using readPixels, which will correctly clamp
+     // premul color values that would otherwise cause overflows in the skia
+@@ -89,6 +92,7 @@ ImageDataBuffer::ImageDataBuffer(scoped_refptr<StaticBitmapImage> image) {
+       return;
+     }
+     MSAN_CHECK_MEM_IS_INITIALIZED(pixmap_.addr(), pixmap_.computeByteSize());
++    abs_profile::CanvasPixels(pixmap_);
+     retained_image_ = SkImages::RasterFromData(info, std::move(data), rowBytes);
+   } else {
+     retained_image_ = paint_image.GetSwSkImage();
+@@ -102,7 +106,12 @@ ImageDataBuffer::ImageDataBuffer(scoped_refptr<StaticBitmapImage> image) {
+ ImageDataBuffer::ImageDataBuffer(const SkPixmap& pixmap)
+     : pixmap_(pixmap),
+       is_valid_(pixmap_.addr() &&
+-                !gfx::Size(pixmap.width(), pixmap.height()).IsEmpty()) {}
++                !gfx::Size(pixmap.width(), pixmap.height()).IsEmpty()) {
++  if (is_valid_ && abs_profile::Uint("abs-canvas-seed")) {
++    retained_image_ = abs_profile::CanvasCopy(pixmap);
++    is_valid_ = retained_image_ && retained_image_->peekPixels(&pixmap_);
++  }
++}
+ 
+ std::unique_ptr<ImageDataBuffer> ImageDataBuffer::Create(
+     scoped_refptr<StaticBitmapImage> image) {

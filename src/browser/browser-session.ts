@@ -33,7 +33,7 @@ import type {
 import {
   defaultFirefoxLauncher,
 } from './firefox-launcher.js';
-import { defaultChromiumLauncher } from './chromium-launcher.js';
+import { defaultChromiumLauncher, usesNativeChromiumProfile } from './chromium-launcher.js';
 import type {
   FirefoxContextLike,
   FirefoxLaunchOptions,
@@ -1429,7 +1429,7 @@ export class BrowserSession {
         'Managed fingerprint and User-Agent profiles cannot be applied to an externally versioned CDP browser',
       );
     }
-    const initScript = fpConfig ? buildStealthInjectionScript(fpConfig) : undefined;
+    let initScript = fpConfig ? buildStealthInjectionScript(fpConfig) : undefined;
     const extraHTTPHeaders = this.options.extraHTTPHeaders ?? (fpConfig
       ? { 'Accept-Language': fpConfig.geo.languages.join(',') }
       : undefined);
@@ -1445,7 +1445,7 @@ export class BrowserSession {
       userAgent: this.options.userAgent ?? fpConfig?.userAgent,
       ...(initScript ? { initScript } : {}),
       ...(this.options.managedExtensions !== undefined ? { managedExtensions: this.options.managedExtensions } : {}),
-      ...(fpConfig !== undefined ? { fingerprintProfile: fpConfig } : {}),
+      ...(fpConfig !== undefined ? { fingerprintProfile: fpConfig, managedFingerprintInitScript: true } : {}),
     };
     if (this.engine === 'chromium' && this.options.cdpEndpoint !== undefined) {
       const launcher = (this.options.launcher ?? defaultChromiumLauncher) as unknown as { connectOverCDP?: (endpoint: string) => Promise<FirefoxContextLike> };
@@ -1455,6 +1455,9 @@ export class BrowserSession {
     } else {
       const launcher = this.engine === 'chromium' ? defaultChromiumLauncher : this.launcher;
       this.context = await launcher.launchPersistentContext(this.profileDirectory, launchOptions);
+    }
+    if (fpConfig && usesNativeChromiumProfile(this.context)) {
+      initScript = buildStealthInjectionScript(fpConfig, { nativeChromium: true });
     }
     this.currentHeadless = headless;
     this.context.setDefaultTimeout?.(this.defaultTimeoutMs);
