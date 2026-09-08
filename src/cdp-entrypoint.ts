@@ -5,6 +5,7 @@ try {
   console.log(JSON.stringify({ event: 'cdp-ready', port: service.port, browserVersion: service.metadata.browserVersion }));
   process.once('SIGTERM', () => { void service.stop(); });
   process.once('SIGINT', () => { void service.stop(); });
+  process.once('SIGHUP', () => { void service.stop(); });
   await service.closed;
 } catch (error) {
   // Proxy URLs and browser launch diagnostics can contain credentials.

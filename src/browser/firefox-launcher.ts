@@ -51,6 +51,8 @@ export interface FirefoxPageLike {
 
 export interface FirefoxLaunchOptions {
   headless: boolean;
+  /** False when the embedding service owns graceful signal shutdown. */
+  handleProcessSignals?: boolean | undefined;
   viewport?: { width: number; height: number } | undefined;
   proxy?: {
     server: string;

@@ -40,6 +40,13 @@ describe('managed Chromium startup', () => {
       .rejects.toThrow('fixture injection failed');
     expect(context.close).toHaveBeenCalled();
   });
+  it('lets an embedding service own signal shutdown without a second browser close', async () => {
+    fixture();
+    await launchPersistentChromium('fixture-profile', { headless: true, handleProcessSignals: false });
+    expect(mocks.launch.mock.calls[0]![1]).toMatchObject({ handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false });
+    await launchPersistentChromium('fixture-profile', { headless: true });
+    expect(mocks.launch.mock.calls[1]![1]).not.toHaveProperty('handleSIGTERM');
+  });
   it('uses the verified native executable and process-level locale/timezone flags', async () => {
     fixture();
     mocks.nativeCore.mockResolvedValue({ executablePath: '/opt/abs-chromium/chrome' });

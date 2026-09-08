@@ -31,6 +31,10 @@ export async function startCdpService(env: NodeJS.ProcessEnv = process.env) {
       availWidth: metadata.width, availHeight: metadata.height, devicePixelRatio: 1 } };
   const proxy = env.CDP_PROXY ? normalizeProxyConfig(env.CDP_PROXY) : undefined;
   const context = await launchPersistentChromium(directory, {
+    // The entrypoint owns shutdown. Playwright's signal handler and stop()
+    // would otherwise close twice, escalating the second call to SIGKILL
+    // before Chromium has flushed persistent cookies to the profile.
+    handleProcessSignals: false,
     headless: true, viewport: fingerprint.viewport, locale: metadata.locale, timezoneId: metadata.timezone,
     userAgent: fingerprint.userAgent, fingerprintProfile: fingerprint,
     initScript: buildStealthInjectionScript(fingerprint),
