@@ -51,6 +51,11 @@ export async function launchPersistentChromium(
   const launchConfig = {
     ...(nativeCore ? { executablePath: nativeCore.executablePath } : {}),
     headless: options.headless,
+    ...(options.handleProcessSignals === undefined ? {} : {
+      handleSIGINT: options.handleProcessSignals,
+      handleSIGTERM: options.handleProcessSignals,
+      handleSIGHUP: options.handleProcessSignals,
+    }),
     ...(options.viewport ? { viewport: options.viewport } : {}),
     ...(options.fingerprintProfile ? {
       screen: { width: options.fingerprintProfile.screen.width, height: options.fingerprintProfile.screen.height },

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -37,7 +37,7 @@ describe('custom Chromium runtime', () => {
   it('checks provenance and executable hash', async () => {
     const core = await fixture();
     expect(await resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
-      .toEqual({ executablePath: core.executablePath });
+      .toEqual({ executablePath: await realpath(core.executablePath) });
     await writeFile(core.executablePath, 'changed executable');
     await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
       .rejects.toThrow('HASH_MISMATCH');
