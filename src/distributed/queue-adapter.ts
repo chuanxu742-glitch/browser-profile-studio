@@ -44,6 +44,8 @@ export interface TaskQueueAdapter {
   markUrlSeen(url: string, ttlSeconds?: number, tenantId?: string): Promise<void>;
   /** 优雅关闭连接 */
   close(): Promise<void>;
+  /** 暴露底层 Redis 客户端（如果存在） */
+  get underlyingRedisClient(): unknown | undefined;
 }
 
 /**
@@ -51,6 +53,9 @@ export interface TaskQueueAdapter {
  */
 export class MemoryQueueAdapter implements TaskQueueAdapter {
   public readonly shardCount: number = 1;
+  public get underlyingRedisClient(): unknown | undefined {
+    return undefined;
+  }
   public readonly leaseDurationMs = 300_000;
   private readonly tasks = new Map<string, DistributedTaskRecord>();
   private readonly pendingQueue: string[] = [];
@@ -85,14 +90,19 @@ export class MemoryQueueAdapter implements TaskQueueAdapter {
     let queueIndex = this.pendingQueue.findIndex((key) => key.startsWith(prefix));
     if (queueIndex < 0) return null;
     while (queueIndex >= 0) {
-      const [key] = this.pendingQueue.splice(queueIndex, 1);
+      const key = this.pendingQueue[queueIndex];
       if (!key) return null;
       const task = this.tasks.get(key);
       if (!task || (task.state !== 'PENDING' && task.state !== 'RETRYING')) {
+        this.pendingQueue.splice(queueIndex, 1);
         queueIndex = this.pendingQueue.findIndex((candidate) => candidate.startsWith(prefix));
-        if (queueIndex < 0) return null;
         continue;
       }
+      if (task.targetWorkerId && task.targetWorkerId !== workerId) {
+        queueIndex = this.pendingQueue.findIndex((candidate, i) => i > queueIndex && candidate.startsWith(prefix));
+        continue;
+      }
+      this.pendingQueue.splice(queueIndex, 1);
       const leasedTask: DistributedTaskRecord = {
         ...task,
         state: 'RUNNING',

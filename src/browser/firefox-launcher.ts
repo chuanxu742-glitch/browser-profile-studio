@@ -1,3 +1,5 @@
+import type { BrowserStorageState } from '../profile/types.js';
+
 /**
  * Narrow Playwright Firefox adapter. Keeping launch behind this interface
  * makes lifecycle tests use a local fake without weakening production rules.
@@ -32,6 +34,8 @@ export interface FirefoxContextLike {
     secure: boolean;
     sameSite: 'Strict' | 'Lax' | 'None';
   }>>;
+  setStorageState?(state: BrowserStorageState): Promise<void>;
+  storageState?(options?: { indexedDB?: boolean; credentials?: boolean }): Promise<BrowserStorageState>;
 }
 
 export interface FirefoxPageLike {
@@ -96,11 +100,13 @@ export function firefoxFingerprintUserPrefs(profile?: UnifiedFingerprintProfile)
     'general.platform.override': profile.platform,
     ...(profile.oscpu ? { 'general.oscpu.override': profile.oscpu } : {}),
     'intl.accept_languages': profile.geo.languages.join(', '),
+    'intl.locale.requested': profile.geo.locale,
     'dom.maxHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintHardwareConcurrency': profile.hardware.hardwareConcurrency,
     'dom.antigravityFingerprintTimezone': profile.geo.timezoneId,
-    'webgl.vendor-string-override': profile.webgl.vendor || 'Mozilla',
-    'webgl.renderer-string-override': profile.webgl.renderer || 'Mozilla',
+    'webgl.sanitize-unmasked-renderer': false,
+    'webgl.override-unmasked-vendor': profile.webgl.unmaskedVendor || profile.webgl.vendor,
+    'webgl.override-unmasked-renderer': profile.webgl.unmaskedRenderer || profile.webgl.renderer,
   };
 }
 
@@ -115,13 +121,23 @@ export async function launchPersistentFirefox(
   };
   await installManagedFirefoxExtensions(profileDirectory, options.managedExtensions ?? []);
   const customCore = await resolveVerifiedFirefoxCore();
+  const profile = options.fingerprintProfile;
+  const blockServiceWorkers = profile?.stealth.blockServiceWorkers === true
+    || Boolean(profile && !customCore && profile.geo.timezoneId !== Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const protectWebRtc = profile?.webrtc === 'block_leak' || profile?.webrtc === 'replace';
 
   const launchConfig = {
     headless: options.headless,
     ...(options.viewport ? { viewport: options.viewport } : {}),
+    ...(profile ? {
+      screen: { width: profile.screen.width, height: profile.screen.height },
+      deviceScaleFactor: profile.screen.devicePixelRatio,
+    } : {}),
     ...(options.proxy ? { proxy: options.proxy } : {}),
     ...(options.timezoneId ? { timezoneId: options.timezoneId } : {}),
-    ...(options.locale ? { locale: options.locale } : {}),
+    // Playwright's locale override truncates navigator.languages to one entry
+    // in every realm. Native requested locale + accept_languages preserve both.
+    ...(!profile && options.locale ? { locale: options.locale } : {}),
     ...(options.geolocation ? { geolocation: options.geolocation } : {}),
     ...(options.permissions ? { permissions: options.permissions } : {}),
     ...(options.extraHTTPHeaders ? { extraHTTPHeaders: options.extraHTTPHeaders } : {}),
@@ -140,7 +156,15 @@ export async function launchPersistentFirefox(
       'dom.webdriver.enabled': false,
       'privacy.resistFingerprinting': false,
       'webgl.disabled': false,
-      'media.peerconnection.ice.default_address_only': true,
+      ...(protectWebRtc ? {
+        'media.peerconnection.ice.default_address_only': true,
+        'media.peerconnection.ice.no_host': true,
+        'media.peerconnection.ice.proxy_only_if_behind_proxy': true,
+      } : {}),
+      ...(profile?.webrtc === 'disable' ? { 'media.peerconnection.enabled': false } : {}),
+      // Stock Firefox cannot align a Service Worker's timezone on all hosts.
+      // Use the actual engine preference; never advertise a fake JS getter.
+      ...(blockServiceWorkers ? { 'dom.serviceWorkers.enabled': false } : {}),
       'webgl.force-enabled': true,
       'layers.acceleration.force-enabled': true,
       'gfx.font_rendering.cleartype_params.rendering_mode': 5,

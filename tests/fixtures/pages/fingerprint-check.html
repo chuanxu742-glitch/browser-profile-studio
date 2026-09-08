@@ -21,8 +21,8 @@
     (async function runBenchmark() {
       const results = {};
 
-      // 1. Webdriver detection (严格判定：必须严格为 undefined 且 'webdriver' in navigator 必须为 false)
-      results.webdriverRemoved = (navigator.webdriver === undefined && !('webdriver' in navigator));
+      // Preserve the native non-automation property rather than deleting it.
+      results.webdriverNonAutomated = navigator.webdriver === false;
       results.webdriverValue = navigator.webdriver;
       results.webdriverPresent = ('webdriver' in navigator);
 
@@ -65,16 +65,24 @@
         results.canvasError = e.message;
       }
 
-      // 5. Native toString hook protection
+      // Inspect the actual patched getter with a different realm's native intrinsic.
+      const frame = document.createElement('iframe');
+      document.body.appendChild(frame);
       try {
-        if (window.chrome && window.chrome.runtime) {
-          const str = Function.prototype.toString.call(window.chrome.runtime.sendMessage);
-          results.toStringProtected = str.includes('[native code]');
-        } else {
-          results.toStringProtected = true;
+        results.toStringProtected = true;
+        results.illegalReceiverRejected = true;
+        for (const name of ['hardwareConcurrency', 'maxTouchPoints']) {
+          const getter = Object.getOwnPropertyDescriptor(Navigator.prototype, name).get;
+          results.toStringProtected &&= frame.contentWindow.Function.prototype.toString.call(getter).includes('[native code]');
+          try {
+            getter.call({});
+            results.illegalReceiverRejected = false;
+          } catch (error) {
+            results.illegalReceiverRejected &&= error instanceof TypeError;
+          }
         }
-      } catch (e) {
-        results.toStringProtected = false;
+      } finally {
+        frame.remove();
       }
 
       // 6. Hardware values

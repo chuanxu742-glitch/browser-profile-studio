@@ -70,6 +70,10 @@ export class RedisQueueAdapter implements TaskQueueAdapter {
     }
   }
 
+  public get underlyingRedisClient(): unknown {
+    return this.redis;
+  }
+
   public async enqueueTask(task: DistributedTaskRecord): Promise<void> {
     if (task.leaseId !== undefined) {
       await this.enqueueOwnedTask(task);
@@ -165,30 +169,54 @@ export class RedisQueueAdapter implements TaskQueueAdapter {
         redis.call('zrem', KEYS[3], expiredId)
       end
 
-      local popped = redis.call('zpopmin', KEYS[1], 1)
-      if #popped == 0 then return nil end
-      local taskId = popped[1]
-      local taskKey = KEYS[2] .. taskId
-      local raw = redis.call('get', taskKey)
-      if not raw then return nil end
-      local decoded, task = pcall(cjson.decode, raw)
-      if not decoded or type(task) ~= 'table' then
-        redis.call('zrem', KEYS[3], taskId)
-        return nil
+      local candidates = redis.call('zrange', KEYS[1], 0, 99, 'WITHSCORES')
+      if #candidates == 0 then return nil end
+
+      local selectedTaskId = nil
+      local selectedTask = nil
+      local taskKey = nil
+
+      for i = 1, #candidates, 2 do
+        local taskId = candidates[i]
+        taskKey = KEYS[2] .. taskId
+        local raw = redis.call('get', taskKey)
+        if raw then
+          local decoded, task = pcall(cjson.decode, raw)
+          if decoded and type(task) == 'table' then
+            local state = task['state']
+            if state == 'PENDING' or state == 'RETRYING' then
+              local targetWorkerId = task['targetWorkerId']
+              if not targetWorkerId or targetWorkerId == '' or targetWorkerId == workerId then
+                selectedTaskId = taskId
+                selectedTask = task
+                break
+              end
+            else
+              redis.call('zrem', KEYS[1], taskId)
+              redis.call('zrem', KEYS[3], taskId)
+            end
+          else
+            redis.call('zrem', KEYS[1], taskId)
+            redis.call('zrem', KEYS[3], taskId)
+          end
+        else
+          redis.call('zrem', KEYS[1], taskId)
+          redis.call('zrem', KEYS[3], taskId)
+        end
       end
-      local state = task['state']
-      if state ~= 'PENDING' and state ~= 'RETRYING' then
-        redis.call('zrem', KEYS[3], taskId)
-        return nil
-      end
+
+      if not selectedTaskId then return nil end
+
+      redis.call('zrem', KEYS[1], selectedTaskId)
+      local task = selectedTask
       task['state'] = 'RUNNING'
       task['workerId'] = workerId
       task['leaseId'] = leaseId
       task['startedAt'] = now
       local leasedRaw = cjson.encode(task)
       redis.call('set', taskKey, leasedRaw)
-      redis.call('zadd', KEYS[3], leaseUntil, taskId)
-      return {taskId, leasedRaw}
+      redis.call('zadd', KEYS[3], leaseUntil, selectedTaskId)
+      return {selectedTaskId, leasedRaw}
     `;
 
     const result = (await this.redis.eval(

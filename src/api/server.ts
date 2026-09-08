@@ -1,8 +1,10 @@
 import { createServer, IncomingMessage, ServerResponse, Server } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
 import { URL } from 'node:url';
+import { z } from 'zod';
 import type { SessionManager } from '../browser/session-manager.js';
 import type { DistributedTaskDefinition, DistributedTaskRecord, TaskExecutionMode, TaskPriority, TaskState } from '../distributed/types.js';
 import type { ApiResponse } from './types.js';
@@ -19,10 +21,19 @@ import type { ManagedExtensionStore } from '../extension/managed-extension-store
 import { managedBrowserIdentity } from '../fingerprint/runtime-identity.js';
 import { LocalBrowserImporter } from '../migration/local-browser-importer.js';
 import { BrowserPool } from '../control-plane/browser-pool.js';
+import { AccountHealth, AccountHealthState } from '../account/account-health.js';
+import type { AccountMetrics } from '../operations/account-metrics.js';
+import type { ProfileBackupService } from '../security/profile-backup.js';
+import type { SecretVault } from '../security/secret-vault.js';
 
 export type StudioRole = 'viewer' | 'operator' | 'manager' | 'owner';
 export interface StudioCredential { readonly token: string; readonly role: StudioRole; readonly label?: string; readonly workspaceId?: string; readonly grants?: TeamIdentity['grants']; }
 type StudioIdentity = { role: StudioRole; label?: string; workspaceId?: string; memberId?: string; grants?: TeamIdentity['grants'] };
+const SAFE_BACKUP_ID = /^bkp_[A-Za-z0-9_-]{16,128}\.backup$/;
+const AccountHealthUpdateSchema = z.object({
+  state: z.enum(AccountHealthState),
+  reason: z.string().max(1_024).optional(),
+}).strict();
 
 export interface RestApiServerOptions {
   readonly port?: number;
@@ -39,6 +50,10 @@ export interface RestApiServerOptions {
   readonly extensionStore?: ManagedExtensionStore;
   readonly localBrowserImporter?: Pick<LocalBrowserImporter, 'scan' | 'importProfile'>;
   readonly browserPool?: BrowserPool;
+  readonly metrics?: AccountMetrics;
+  readonly backupService?: ProfileBackupService;
+  readonly backupDir?: string;
+  readonly vault?: SecretVault;
 }
 
 export class RestApiServer {
@@ -250,10 +265,12 @@ export class RestApiServer {
             chromium: managedBrowserIdentity('chromium').fullVersion,
             firefox: managedBrowserIdentity('firefox').fullVersion,
           },
-          serviceWorkerFingerprintInjection: true,
-          serviceWorkerFingerprintInjectionByEngine: { chromium: true, firefox: true },
-          firefoxNativeServiceWorkerIdentity: true,
-          serviceWorkerReason: 'Chromium aligns via CDP background target injection; Firefox aligns via native user preferences and cross-channel shadow proxy alignment (MessagePort, BroadcastChannel, ServiceWorkerContainer)',
+          serviceWorkerFingerprintInjection: false,
+          serviceWorkerFingerprintInjectionByEngine: { chromium: true, firefox: false },
+          workerBootstrapByEngine: { chromium: true, firefox: false },
+          workerCanvasReason: 'Chromium injects URL, module, Blob, nested, shared and service worker realms. Firefox page Canvas protection remains enabled, but stock and currently verified custom cores have no first-script worker Canvas bootstrap; diagnostics report this contract as unsupported rather than claiming alignment.',
+          firefoxNativeServiceWorkerIdentity: false,
+          serviceWorkerReason: 'Chromium injects actual worker realms before execution. Stock Firefox cannot guarantee complete Service Worker identity; a verified custom Firefox core is required for native timezone and concurrency alignment. Global capability flags are conservative, not a runtime attestation.',
           externalRuntimes: this.options.externalRuntimes?.list() ?? [],
         }, timestamp: Date.now() }); return;
       }
@@ -293,7 +310,26 @@ export class RestApiServer {
       }
       if (pathname === '/api/v1/metrics' && method === 'GET') {
         const memory = process.memoryUsage();
-        this.sendJson(res, 200, { success: true, code: 'OK', data: { uptimeSeconds: Math.floor(process.uptime()), activeSessions: this.profileSessionMap.size, synchronizers: this.synchronizer.listCaptures().length, heapUsedBytes: memory.heapUsed, rssBytes: memory.rss, profiles: (await this.manager.listProfiles()).length, proxies: (await this.options.proxyPool?.list() ?? []).length, rpaTasks: (await this.options.rpa?.listTasks() ?? []).length }, timestamp: Date.now() }); return;
+        this.sendJson(res, 200, {
+          success: true,
+          code: 'OK',
+          data: {
+            uptimeSeconds: Math.floor(process.uptime()),
+            activeSessions: this.profileSessionMap.size,
+            synchronizers: this.synchronizer.listCaptures().length,
+            heapUsedBytes: memory.heapUsed,
+            rssBytes: memory.rss,
+            profiles: (await this.manager.listProfiles()).length,
+            proxies: (await this.options.proxyPool?.list() ?? []).length,
+            rpaTasks: (await this.options.rpa?.listTasks() ?? []).length,
+            ...(this.options.metrics ? {
+              accountOperations: this.options.metrics.snapshot(),
+              accountAlerts: this.options.metrics.evaluateAlerts(),
+            } : {}),
+          },
+          timestamp: Date.now(),
+        });
+        return;
       }
 
       // Managed extension center: package review, integrity and Profile assignment.
@@ -359,24 +395,151 @@ export class RestApiServer {
       // 3. Profiles Management
       if (pathname === '/api/v1/profiles' && method === 'GET') {
         const allProfiles = await this.manager.listProfiles();
-        const query = (parsedUrl.searchParams.get('q') ?? '').trim().toLowerCase();
         const accessible = allProfiles.filter((profile) => this.canAccessResource(identity!, 'profile', profile.profileId));
-        const filtered = query ? accessible.filter((profile) => profile.name.toLowerCase().includes(query) || profile.profileId.toLowerCase().includes(query) || profile.tags?.some((tag) => tag.toLowerCase().includes(query))) : accessible;
-        const offset = boundedQueryInteger(parsedUrl.searchParams.get('offset'), 0, 100_000, 0);
-        const limit = boundedQueryInteger(parsedUrl.searchParams.get('limit'), 1, 500, 100);
-        const profiles = filtered.slice(offset, offset + limit);
+
+        const qName = (parsedUrl.searchParams.get('name') ?? '').trim().toLowerCase();
+        const qTag = (parsedUrl.searchParams.get('tag') ?? '').trim().toLowerCase();
+        const qCountry = (parsedUrl.searchParams.get('country') ?? '').trim().toLowerCase();
+        const qEngine = (parsedUrl.searchParams.get('engine') ?? '').trim().toLowerCase();
+        const qLegacy = (parsedUrl.searchParams.get('q') ?? '').trim().toLowerCase();
+
+        let filtered = accessible;
+        if (qName) {
+          filtered = filtered.filter((p) => p.name.toLowerCase().includes(qName) || p.profileId.toLowerCase().includes(qName));
+        }
+        if (qTag) {
+          filtered = filtered.filter((p) => p.tags?.some((tag) => tag.toLowerCase().includes(qTag)));
+        }
+        if (qCountry) {
+          filtered = filtered.filter((p) => p.country?.toLowerCase() === qCountry);
+        }
+        if (qEngine) {
+          filtered = filtered.filter((p) => p.engine?.toLowerCase() === qEngine);
+        }
+        if (qLegacy) {
+          filtered = filtered.filter((p) => p.name.toLowerCase().includes(qLegacy) || p.profileId.toLowerCase().includes(qLegacy) || p.tags?.some((tag) => tag.toLowerCase().includes(qLegacy)));
+        }
+
+        filtered.sort((a, b) => {
+          if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+          return b.profileId.localeCompare(a.profileId);
+        });
+
+        const limit = boundedQueryInteger(parsedUrl.searchParams.get('limit'), 1, 200, 100);
+        const cursor = parsedUrl.searchParams.get('cursor');
+
+        let startIndex = 0;
+        if (cursor) {
+          try {
+            const parsedCursor = ProfileListCursorSchema.parse(
+              JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')),
+            );
+            startIndex = filtered.findIndex((profile) => (
+              profile.updatedAt < parsedCursor.updatedAt
+              || (
+                profile.updatedAt === parsedCursor.updatedAt
+                && profile.profileId.localeCompare(parsedCursor.profileId) < 0
+              )
+            ));
+            if (startIndex === -1) startIndex = filtered.length;
+          } catch {
+            this.sendJson(res, 400, {
+              success: false,
+              code: 'INVALID_INPUT',
+              message: 'Profile list cursor is invalid',
+              timestamp: Date.now(),
+            });
+            return;
+          }
+        }
+
+        const items = filtered.slice(startIndex, startIndex + limit);
+        let nextCursor: string | null = null;
+        if (startIndex + limit < filtered.length && items.length > 0) {
+          const lastItem = items[items.length - 1];
+          if (lastItem) {
+            nextCursor = Buffer.from(JSON.stringify({ updatedAt: lastItem.updatedAt, profileId: lastItem.profileId })).toString('base64url');
+          }
+        }
+
         res.setHeader('X-Total-Count', String(filtered.length));
-        res.setHeader('X-Offset', String(offset));
-        res.setHeader('X-Limit', String(limit));
         this.sendJson(res, 200, {
           success: true,
           code: 'OK',
-          data: profiles,
+          data: {
+            items: items.map(publicProfile),
+            nextCursor,
+            total: filtered.length
+          },
           timestamp: Date.now(),
         });
         return;
       }
 
+      const profileHealthMatch = pathname.match(/^\/api\/v1\/profiles\/([^/]+)\/health$/);
+      if (profileHealthMatch) {
+        const profileId = decodeURIComponent(profileHealthMatch[1]!);
+        const profile = await this.manager.getProfile(profileId);
+        if (!profile) throw new Error('PROFILE_NOT_FOUND');
+        if (method === 'GET') {
+          const health = await this.manager.getAccountHealth(profileId)
+            ?? new AccountHealth(() => Date.now()).getSnapshot();
+          this.sendJson(res, 200, { success: true, code: 'OK', data: health, timestamp: Date.now() });
+          return;
+        }
+        if (method === 'PUT') {
+          const body = AccountHealthUpdateSchema.parse(await this.readJsonBody(req));
+          const health = await this.manager.updateAccountHealth(profileId, body.state, body.reason);
+          this.sendJson(res, 200, { success: true, code: 'OK', data: health, timestamp: Date.now() });
+          return;
+        }
+      }
+
+      const profileBackupMatch = pathname.match(/^\/api\/v1\/profiles\/([^/]+)\/backups$/);
+      if (profileBackupMatch && method === 'POST') {
+        if (!this.options.backupService || !this.options.backupDir || !this.options.vault) {
+          this.sendJson(res, 503, { success: false, code: 'BACKUP_UNAVAILABLE', message: 'Profile backup is not configured', timestamp: Date.now() });
+          return;
+        }
+        const profileId = decodeURIComponent(profileBackupMatch[1]!);
+        if (!await this.manager.getProfile(profileId)) throw new Error('PROFILE_NOT_FOUND');
+        const backupId = `bkp_${randomUUID().replace(/-/g, '')}.backup`;
+        await this.options.backupService.backup(
+          profileId,
+          this.manager.getStore().getProfileDir(profileId),
+          join(this.options.backupDir, backupId),
+          this.options.vault,
+        );
+        this.sendJson(res, 200, { success: true, code: 'OK', data: { backupId }, timestamp: Date.now() });
+        return;
+      }
+
+      const profileBackupRestoreMatch = pathname.match(/^\/api\/v1\/profiles\/([^/]+)\/backups\/([^/]+)\/restore$/);
+      if (profileBackupRestoreMatch && method === 'POST') {
+        if (!this.options.backupService || !this.options.backupDir || !this.options.vault) {
+          this.sendJson(res, 503, { success: false, code: 'BACKUP_UNAVAILABLE', message: 'Profile backup is not configured', timestamp: Date.now() });
+          return;
+        }
+        const profileId = decodeURIComponent(profileBackupRestoreMatch[1]!);
+        const backupId = decodeURIComponent(profileBackupRestoreMatch[2]!);
+        if (!SAFE_BACKUP_ID.test(backupId)) throw new Error('BACKUP_ID_INVALID');
+        if (!await this.manager.getProfile(profileId)) throw new Error('PROFILE_NOT_FOUND');
+        await this.manager.stopProfileSessions(profileId, 'profile-backup-restore');
+        this.profileSessionMap.delete(profileId);
+        try {
+          await this.options.backupService.restore(
+            join(this.options.backupDir, backupId),
+            this.manager.getStore().getProfileDir(profileId),
+            this.options.vault,
+            profileId,
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('BACKUP_NOT_FOUND');
+          throw error;
+        }
+        this.sendJson(res, 200, { success: true, code: 'OK', data: { restored: true, backupId }, timestamp: Date.now() });
+        return;
+      }
       if (pathname === '/api/v1/profiles/trash' && method === 'GET') {
         this.sendJson(res, 200, { success: true, code: 'OK', data: await this.manager.listDeletedProfiles(), timestamp: Date.now() });
         return;
@@ -528,11 +691,11 @@ export class RestApiServer {
             },
             timestamp: Date.now(),
           });
-        } catch (err) {
+        } catch {
           this.sendJson(res, 500, {
             success: false,
             code: 'SCREENSHOT_FAILED',
-            message: err instanceof Error ? err.message : String(err),
+            message: 'Unable to capture the session screenshot',
             timestamp: Date.now(),
           });
         }
@@ -572,8 +735,8 @@ export class RestApiServer {
             return;
           }
           this.sendJson(res, 200, { success: true, code: 'OK', data: result, timestamp: Date.now() });
-        } catch (err) {
-          this.sendJson(res, 500, { success: false, code: 'INTERACTION_FAILED', message: err instanceof Error ? err.message : String(err), timestamp: Date.now() });
+        } catch {
+          this.sendJson(res, 500, { success: false, code: 'INTERACTION_FAILED', message: 'Unable to perform the session interaction', timestamp: Date.now() });
         }
         return;
       }
@@ -586,8 +749,8 @@ export class RestApiServer {
         try {
           const status = await this.manager.resume(sessionId, Boolean(body.humanConfirmed ?? true));
           this.sendJson(res, 200, { success: true, code: 'OK', data: status, timestamp: Date.now() });
-        } catch (err) {
-          this.sendJson(res, 400, { success: false, code: 'RESUME_FAILED', message: err instanceof Error ? err.message : String(err), timestamp: Date.now() });
+        } catch {
+          this.sendJson(res, 400, { success: false, code: 'RESUME_FAILED', message: 'Unable to resume the session', timestamp: Date.now() });
         }
         return;
       }
@@ -698,7 +861,7 @@ export class RestApiServer {
         }
         const body = await this.readJsonBody(req);
         await this.validateExtensionIds(source.extensionIds ?? [], source.engine ?? 'firefox', identity!);
-        const cookies = body.includeCookies === false ? [] : await this.manager.getStore().getCookies(sourceId);
+        const cookies = body.includeCookies === true ? await this.manager.getStore().getCookies(sourceId) : [];
         const created = await this.manager.createProfile({
           name: body.name?.trim() || `${source.name} - Copy`,
           ...(source.description !== undefined ? { description: source.description } : {}),
@@ -1366,8 +1529,9 @@ export class RestApiServer {
       });
     } catch (err: unknown) {
       const error = err as { code?: string; message?: string; details?: unknown };
+      const validationError = err instanceof z.ZodError;
       const messageCode = error.message && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : undefined;
-      const code = error.code || messageCode || 'INTERNAL_ERROR';
+      const code = validationError ? 'INVALID_INPUT' : error.code || messageCode || 'INTERNAL_ERROR';
       let statusCode = 500;
       if (code === 'INVALID_INPUT' || code === 'INVALID_ARGUMENT' || code.endsWith('_REQUIRED') || code.endsWith('_INVALID')) statusCode = 400;
       else if (code === 'PAYLOAD_TOO_LARGE') statusCode = 413;
@@ -1376,16 +1540,17 @@ export class RestApiServer {
       else if (code === 'SESSION_BUSY' || code === 'ACTION_ID_CONFLICT' || code === 'TWO_FACTOR_NOT_CONFIGURED' || code === 'EXTENSION_INTEGRITY_FAILED') statusCode = 409;
       else if (['TASK_RUNNING', 'TASK_NOT_RETRYABLE', 'TASK_LEASE_LOST'].includes(code)) statusCode = 409;
       else if (code.startsWith('EXTENSION_') && code !== 'EXTENSION_STORE_UNAVAILABLE') statusCode = 400;
-      else if (code === 'EXTENSION_STORE_UNAVAILABLE') statusCode = 503;
+      else if (code === 'EXTENSION_STORE_UNAVAILABLE' || code.endsWith('_UNAVAILABLE')) statusCode = 503;
 
+      const message = validationError ? 'Request validation failed' : error.message || 'Internal Server Error';
       this.sendJson(res, statusCode, {
         success: false,
         code,
-        message: error.message || 'Internal Server Error',
+        message,
         error: {
           code,
-          message: error.message || 'Internal Server Error',
-          details: error.details,
+          message,
+          details: validationError ? err.issues : error.details,
         },
         timestamp: Date.now(),
       });
@@ -1604,6 +1769,8 @@ function roleAllows(actual: StudioRole, required: StudioRole): boolean {
 }
 
 function requiredRole(method: string | undefined, pathname: string): StudioRole {
+  if (/^\/api\/v1\/profiles\/[^/]+\/health$/.test(pathname)) return 'manager';
+  if (pathname.includes('/backups')) return 'owner';
   if (pathname.startsWith('/api/v1/bridge/')) return method === 'GET' ? 'viewer' : 'operator';
   if (pathname.startsWith('/api/v1/team/') || pathname.startsWith('/api/v1/migration/') || pathname.includes('/purge') || pathname.includes('/extensions/import') || (pathname.startsWith('/api/v1/extensions/') && method === 'DELETE')) return 'owner';
   if (pathname.includes('/cookies') || pathname.includes('/2fa/') || method === 'DELETE') return 'owner';
@@ -1621,9 +1788,14 @@ function resourceFromPath(pathname: string): { kind: 'profile' | 'proxy' | 'work
 }
 
 function boundedQueryInteger(raw: string | null, minimum: number, maximum: number, fallback: number): number { const value = Number(raw); return Number.isInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback; }
+const ProfileListCursorSchema = z.object({
+  updatedAt: z.number().finite().nonnegative(),
+  profileId: z.string().min(1).max(128),
+}).strict();
+
 
 function studioOpenApiDocument(host: string, port: number): Record<string, unknown> {
-  const paths = ['/health', '/auth/me', '/profiles', '/profiles/batch', '/profiles/batch-import-csv', '/profiles/batch-export-csv', '/profiles/trash', '/profiles/{id}/extensions', '/extensions', '/extensions/import', '/extensions/{id}', '/migration/local-browsers', '/migration/import-local', '/proxies', '/rpa/workflows', '/rpa/tasks', '/sessions/{sessionId}/diagnostics', '/cluster/tasks', '/cluster/tasks/preflight', '/cluster/tasks/actions', '/cluster/tasks/{id}', '/cluster/status', '/external-runtimes/{provider}/create', '/external-runtimes/{provider}/{runtime}/stop', '/team/workspaces', '/team/members', '/synchronizer/broadcast', '/bridge/browsers', '/bridge/browsers/{id}/tabs'];
+  const paths = ['/health', '/auth/me', '/metrics', '/profiles', '/profiles/batch', '/profiles/batch-import-csv', '/profiles/batch-export-csv', '/profiles/trash', '/profiles/{id}/health', '/profiles/{id}/backups', '/profiles/{id}/backups/{backupId}/restore', '/profiles/{id}/extensions', '/extensions', '/extensions/import', '/extensions/{id}', '/migration/local-browsers', '/migration/import-local', '/proxies', '/rpa/workflows', '/rpa/tasks', '/sessions/{sessionId}/diagnostics', '/cluster/tasks', '/cluster/tasks/preflight', '/cluster/tasks/actions', '/cluster/tasks/{id}', '/cluster/status', '/external-runtimes/{provider}/create', '/external-runtimes/{provider}/{runtime}/stop', '/team/workspaces', '/team/members', '/synchronizer/broadcast', '/bridge/browsers', '/bridge/browsers/{id}/tabs'];
   return { openapi: '3.1.0', info: { title: 'Antigravity Browser Studio API', version: SERVER_VERSION }, servers: [{ url: `http://${host}:${port}/api/v1` }], security: [{ bearerAuth: [] }], paths: Object.fromEntries(paths.map((path) => [path, { get: { summary: path }, post: { summary: path } }])), components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } } };
 }
 
@@ -1633,13 +1805,28 @@ function routeTemplate(pathname: string): string {
     .replace(/\/profiles\/[A-Za-z0-9_-]+/g, '/profiles/:id');
 }
 
-function publicProfile(profile: any): Record<string, unknown> {
-  const result = { ...profile };
-  if (result.proxy) result.proxy = { ...result.proxy, password: undefined, hasPassword: Boolean(result.proxy.password) };
+function publicProfile(profile: unknown): Record<string, unknown> {
+  const result = { ...(profile as Record<string, unknown>) };
+  if (result.proxy && typeof result.proxy === 'object') {
+    const p = result.proxy as Record<string, unknown>;
+    result.proxy = { ...p, password: undefined, hasPassword: Boolean(p.password) };
+  }
+  if (result.proxyServer && typeof result.proxyServer === 'string') {
+    try {
+      const u = new URL(result.proxyServer);
+      if (u.username || u.password) {
+        u.username = '';
+        u.password = '';
+        result.proxyServer = u.toString().replace(/\/$/, '');
+      }
+    } catch {}
+  }
   if (result.twoFactorSecret) {
     result.hasTwoFactorSecret = true;
-    delete result.twoFactorSecret;
   }
+  delete result.twoFactorSecret;
+  delete result.cookies;
+  delete result.loginState;
   return result;
 }
 

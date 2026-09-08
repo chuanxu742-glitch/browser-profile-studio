@@ -32,4 +32,59 @@ describe('ProxyPoolStore', () => {
     expect(await pool.delete(second.proxyId)).toBe(true);
     expect(await pool.next(['US'])).toBeUndefined();
   });
+
+  it('handles proxy quarantine, cooldown, recovery and persistence', async () => {
+    root = await mkdtemp(join(tmpdir(), 'proxy-pool-'));
+    const path = join(root, 'pool2.json');
+    let currentTime = 1_000_000;
+    let checkSuccess = true;
+    const clock = () => currentTime;
+    const checker = async () => ({ success: checkSuccess, server: 'mock', proxyType: 'http' as const });
+    let pool = new ProxyPoolStore(path, undefined, clock, checker);
+    const p1 = await pool.create({ name: 'p1', server: 'http://127.0.0.1:8080', tags: ['EU'] });
+    const p2 = await pool.create({ name: 'p2', server: 'http://127.0.0.1:8081', tags: ['EU'] });
+
+    await pool.check(p1.proxyId);
+    await pool.check(p2.proxyId);
+    expect(new Set([(await pool.next(['EU']))?.proxyId, (await pool.next(['EU']))?.proxyId]))
+      .toEqual(new Set([p1.proxyId, p2.proxyId]));
+
+    checkSuccess = false;
+    await pool.check(p1.proxyId);
+    await pool.check(p1.proxyId);
+    await pool.check(p1.proxyId);
+    expect((await pool.next(['EU']))?.proxyId).toBe(p2.proxyId);
+
+    currentTime += 5 * 60 * 1_000;
+    checkSuccess = true;
+    await pool.check(p1.proxyId);
+    expect((await pool.next(['EU']))?.proxyId).toBe(p2.proxyId);
+    await pool.check(p1.proxyId);
+    expect(new Set([(await pool.next(['EU']))?.proxyId, (await pool.next(['EU']))?.proxyId]).has(p1.proxyId))
+      .toBe(true);
+
+    checkSuccess = false;
+    await pool.check(p1.proxyId);
+    await pool.check(p1.proxyId);
+    await pool.check(p1.proxyId);
+    await pool.check(p1.proxyId);
+    pool = new ProxyPoolStore(path, undefined, clock, checker);
+    expect((await pool.next(['EU']))?.proxyId).toBe(p2.proxyId);
+
+    currentTime += 5 * 60 * 1_000;
+    expect((await pool.next(['EU']))?.proxyId).toBe(p2.proxyId);
+    currentTime += 5 * 60 * 1_000;
+    checkSuccess = true;
+    await pool.check(p1.proxyId);
+    await pool.check(p1.proxyId);
+    expect(new Set([(await pool.next(['EU']))?.proxyId, (await pool.next(['EU']))?.proxyId]).has(p1.proxyId))
+      .toBe(true);
+
+    checkSuccess = false;
+    await pool.check(p1.proxyId);
+    checkSuccess = true;
+    await pool.check(p1.proxyId);
+    expect(new Set([(await pool.next(['EU']))?.proxyId, (await pool.next(['EU']))?.proxyId]).has(p1.proxyId))
+      .toBe(true);
+  });
 });

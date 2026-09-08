@@ -1,0 +1,44 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      # Disable overlays and independent version-cache probes; run full PR queries.
+      CODEQL_ACTION_OVERLAY_ANALYSIS: 'false'
+      CODEQL_ACTION_OVERLAY_ANALYSIS_MATCH_CODEQL_VERSION: 'false'
+      CODEQL_ACTION_OVERLAY_ANALYSIS_MATCH_CODEQL_VERSION_DRY_RUN: 'false'
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: 'false'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          dependency-caching: false
+          trap-caching: false
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript

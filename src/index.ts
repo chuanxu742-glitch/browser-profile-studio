@@ -12,6 +12,12 @@ import { McpRuntimeGuard } from "./mcp/runtime-guard.js";
 import type { SessionManagerLike } from "./mcp/types.js";
 import { UrlPolicy } from "./policy/url-policy.js";
 import { RestApiServer } from "./api/server.js";
+import { ProfileStore } from "./profile/profile-store.js";
+import { VersionedCheckpointStore } from "./profile/versioned-checkpoint-store.js";
+import { AccountMetrics } from "./operations/account-metrics.js";
+import { AccountHealthStore } from "./account/account-health-store.js";
+import { SecretVault } from "./security/secret-vault.js";
+import { loadOrCreatePlatformSecret } from "./security/platform-secret.js";
 
 export interface RuntimeHandle {
   manager: SessionManagerLike;
@@ -42,6 +48,18 @@ async function createDefaultManager(config: AppConfig, audit: AuditLogger): Prom
   // SessionManager accepts BrowserSessionOptions, while allowlist/audit paths
   // live in AppConfig. Build those server-owned dependencies here; callers
   // never get a chance to replace them through an MCP request.
+  const masterSecret = process.env.BROWSER_MASTER_KEY
+    ?? process.env.STUDIO_MASTER_KEY
+    ?? await loadOrCreatePlatformSecret(join(config.dataDir, ".mcp-master-key"));
+  const vault = new SecretVault(masterSecret);
+  const profileStore = new ProfileStore(join(config.dataDir, "profiles"), { vault });
+  await profileStore.init();
+  const checkpointStore = new VersionedCheckpointStore(join(config.dataDir, "checkpoints"), { vault });
+  const accountHealthStore = new AccountHealthStore(profileStore);
+  const metrics = new AccountMetrics();
+  metrics.addAlertRule({ id: "high_checkpoint_failures", metric: "checkpoint_failures", threshold: 5, windowMs: 15 * 60_000 });
+  metrics.addAlertRule({ id: "high_proxy_quarantine", metric: "proxy_quarantine", threshold: 10, windowMs: 15 * 60_000 });
+
   return new SessionManager({
     maxSessions: config.maxSessions,
     ...(config.sessionTtlMs !== undefined ? { sessionTtlMs: config.sessionTtlMs } : {}),
@@ -54,6 +72,11 @@ async function createDefaultManager(config: AppConfig, audit: AuditLogger): Prom
     audit,
     defaultTimeoutMs: config.timeoutMs,
     privateNetworkEnabled: config.allowPrivateNetwork,
+    profileStore,
+    checkpointStore,
+    accountMetrics: metrics,
+    accountHealthStore,
+    checkpointIntervalMs: config.checkpointIntervalMs,
   });
 }
 

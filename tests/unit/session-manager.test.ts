@@ -24,6 +24,7 @@ import { SessionManager } from '../../src/browser/session-manager.js';
 import type { BrowserSession, BrowserSessionOptions, BrowserSessionStatus } from '../../src/browser/browser-session.js';
 import type { DistributedTaskDefinition } from '../../src/distributed/types.js';
 import { ProfileStore } from '../../src/profile/profile-store.js';
+import type { BrowserStorageState } from '../../src/profile/types.js';
 
 const originalRedisUrl = process.env.REDIS_URL;
 const task: DistributedTaskDefinition = { url: 'https://example.com/queue-task' };
@@ -193,6 +194,14 @@ describe('browser-only SessionManager', () => {
       },
       initialCookies: [{ name: 'session', value: 'old', domain: '.example.com', path: '/' }],
     });
+    const initialStorageState: BrowserStorageState = {
+      cookies: [{ name: 'storage-session', value: 'old', domain: 'example.com', path: '/' }],
+      origins: [{
+        origin: 'https://example.com',
+        localStorage: [{ name: 'account', value: 'account-a' }],
+      }],
+    };
+    await store.saveStorageState('account-a', initialStorageState);
     const fixture = fakeSession('ses_saved_profile_0001');
     let captured: BrowserSessionOptions | undefined;
     const manager = new SessionManager({
@@ -212,6 +221,7 @@ describe('browser-only SessionManager', () => {
         persistentProfile: true,
         fingerprintSeed: 424242,
         initialCookies: [{ name: 'session', value: 'old', domain: '.example.com', path: '/' }],
+        initialStorageState,
         fingerprint: {
           os: 'windows',
           hardware: { hardwareConcurrency: 16, screenWidth: 2560, screenHeight: 1440 },
@@ -223,9 +233,42 @@ describe('browser-only SessionManager', () => {
       await expect(store.getCookies('account-a')).resolves.toMatchObject([
         { name: 'session', value: 'new', domain: '.example.com', path: '/', secure: true },
       ]);
+      const updatedStorageState: BrowserStorageState = {
+        cookies: [{ name: 'storage-session', value: 'new', domain: 'example.com', path: '/' }],
+        origins: [],
+      };
+      await captured?.onStorageStatePersist?.(updatedStorageState);
+      await expect(store.getStorageState('account-a')).resolves.toEqual(updatedStorageState);
     } finally {
       await manager.shutdown();
       await rm(workRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('requires an explicit proxy-exit timezone for fingerprinted sessions', async () => {
+    const fixture = fakeSession('ses_proxy_geo_0001');
+    const manager = new SessionManager({
+      cluster: false,
+      sessionFactory: () => fixture.session,
+    });
+
+    try {
+      await expect(manager.start({
+        fingerprint: true,
+        proxy: 'http://127.0.0.1:8080',
+        countryCode: 'US',
+      })).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        message: expect.stringContaining('explicit IANA timezone'),
+      });
+      await expect(manager.start({
+        fingerprint: true,
+        proxy: 'http://127.0.0.1:8080',
+        countryCode: 'US',
+        timezone: 'America/Los_Angeles',
+      })).resolves.toBe(fixture.session);
+    } finally {
+      await manager.shutdown();
     }
   });
 

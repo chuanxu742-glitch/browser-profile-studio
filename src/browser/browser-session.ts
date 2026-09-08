@@ -56,7 +56,8 @@ import {
   type EnvironmentDiagnostics,
   type EnvironmentSurfaceSnapshot,
 } from './environment-diagnostics.js';
-import type { CookieRecord } from '../profile/types.js';
+import { ENVIRONMENT_PROBE } from './environment-probe.js';
+import type { CookieRecord, BrowserStorageState } from '../profile/types.js';
 
 export type BrowserSessionState =
   | 'STOPPED'
@@ -182,6 +183,8 @@ export interface BrowserSessionOptions {
   timezoneId?: string;
   /** Explicit or GeoIP-derived locale, e.g. en-US */
   locale?: string;
+  /** Resolved preferred language list; locale alone does not encode fallbacks. */
+  languages?: readonly string[];
   /** Geolocation coordinates */
   geolocation?: { latitude: number; longitude: number; accuracy?: number };
   /** Granted browser permissions, e.g. ['geolocation'] */
@@ -198,8 +201,14 @@ export interface BrowserSessionOptions {
   fingerprintSeed?: number;
   /** Server-loaded cookies for a saved profile. */
   initialCookies?: readonly CookieRecord[];
+  /** Server-loaded storage state for a saved profile. */
+  initialStorageState?: BrowserStorageState;
   /** Server-owned callback used to persist the final profile cookie jar. */
   onCookiesPersist?: (cookies: readonly CookieRecord[]) => Promise<void> | void;
+  /** Server-owned callback used to persist the final profile storage state. */
+  onStorageStatePersist?: (state: BrowserStorageState) => Promise<void> | void;
+  /** Server-owned callback for persisted account health transitions. */
+  onChallengeStateChange?: (detection: ChallengeDetection) => Promise<void> | void;
   /** Server-owned resource policy selected by SessionManager. */
   automationPolicy?: AutomationPolicy;
   /** Server-owned default action timeout, bounded to 1-60 seconds. */
@@ -247,53 +256,6 @@ export interface BrowserTabStatus {
   url?: string;
   title?: string;
 }
-const ENVIRONMENT_PROBE = `(() => {
-  const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-  const debugInfo = gl && gl.getExtension('WEBGL_debug_renderer_info');
-
-  // 原生对象完整性检验
-  const suspectedProps = ['userAgent', 'platform', 'hardwareConcurrency', 'deviceMemory', 'webdriver', 'languages', 'language'];
-  const ownProps = Object.getOwnPropertyNames(navigator);
-  const pollutedNavigatorProps = suspectedProps.filter(p => ownProps.includes(p));
-
-  const fnToStringStr = Function.prototype.toString.toString();
-  const isFunctionToStringNative = fnToStringStr.includes('[native code]') && Function.prototype.toString.name === 'toString';
-  const isNavigatorToStringNative = Object.prototype.toString.call(navigator) === '[object Navigator]';
-  const isWebglNative = !gl || !gl.getParameter || gl.getParameter.toString().includes('[native code]');
-
-  return {
-    userAgent: navigator.userAgent,
-    platform: navigator.platform,
-    language: navigator.language,
-    languages: Array.from(navigator.languages || []),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    viewport: { width: window.innerWidth, height: window.innerHeight },
-    screen: {
-      width: screen.width,
-      height: screen.height,
-      availWidth: screen.availWidth,
-      availHeight: screen.availHeight,
-      colorDepth: screen.colorDepth,
-      pixelDepth: screen.pixelDepth,
-      devicePixelRatio: window.devicePixelRatio,
-    },
-    hardwareConcurrency: navigator.hardwareConcurrency,
-    deviceMemory: navigator.deviceMemory,
-    webdriver: navigator.webdriver === true,
-    webgl: gl ? {
-      vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : undefined,
-      renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : undefined,
-    } : undefined,
-    integrity: {
-      hasNavigatorInstancePollution: pollutedNavigatorProps.length > 0,
-      pollutedNavigatorProps,
-      isNavigatorToStringNative,
-      isFunctionToStringNative,
-      isWebglNative,
-    },
-  };
-})()`;
 interface ManagedTab {
   tabId: string;
   page: BrowserPageLike;
@@ -629,6 +591,7 @@ export class BrowserSession {
         await mkdir(this.profileDirectory, { recursive: true, mode: 0o700 });
         await mkdir(this.artifactsDirectory, { recursive: true, mode: 0o700 });
         await this.launchContext(this.headless);
+        await this.loadInitialStorageState();
         await this.loadInitialCookies();
         this._state = 'READY';
         await this.scanChallenge();
@@ -804,13 +767,29 @@ export class BrowserSession {
         }),
       ]);
       if (drainTimer) clearTimeout(drainTimer);
-      await this.persistContextCookies().catch(() => undefined);
+      let persistenceError: unknown;
+      try {
+        await this.persistContextStorageState();
+      } catch (error) {
+        persistenceError = error;
+      }
+      try {
+        await this.persistContextCookies();
+      } catch (error) {
+        persistenceError ??= error;
+      }
       await this.closeContext().catch(() => undefined);
       await this.cleanupOwnedProfile().catch(() => undefined);
       await this.cleanupOwnedArtifacts().catch(() => undefined);
       this.controlLease.dispose();
       this.actionCache.clear();
       this._state = 'STOPPED';
+      if (persistenceError !== undefined) {
+        await this.audit({ action: 'browser_stop', outcome: 'failure', reason: 'login_state_checkpoint_failed' });
+        throw new BrowserSessionError('INTERNAL', 'Browser closed but the login state checkpoint failed', {
+          cause: persistenceError,
+        });
+      }
       await this.audit({ action: 'browser_stop', outcome: 'success', reason });
       return this.status();
     })();
@@ -1405,9 +1384,9 @@ export class BrowserSession {
       );
     }
     const locale = this.options.locale ?? profile.geo.locale;
-    const languages = this.options.locale
-      ? [this.options.locale]
-      : [...profile.geo.languages];
+    const languages = this.options.languages
+      ? [...this.options.languages]
+      : this.options.locale ? [this.options.locale] : [...profile.geo.languages];
     const timezoneId = this.options.timezoneId ?? profile.geo.timezoneId;
     const geolocation = this.options.geolocation ?? profile.geo.geolocation;
     return {
@@ -1493,16 +1472,6 @@ export class BrowserSession {
     if (!mainPage) throw new BrowserSessionError('BROWSER_LAUNCH_FAILED', 'Firefox did not provide a page');
     if (!headless && typeof mainPage.bringToFront === 'function') {
       await mainPage.bringToFront().catch(() => undefined);
-    }
-    if (initScript) {
-      if (typeof this.context.addInitScript === 'function') {
-        await this.context.addInitScript(initScript).catch(() => undefined);
-      }
-      for (const p of retainedPages) {
-        if (typeof (p as any).addInitScript === 'function') {
-          await (p as any).addInitScript(initScript).catch(() => undefined);
-        }
-      }
     }
 
     this.tabs.clear();
@@ -1783,15 +1752,18 @@ export class BrowserSession {
 
   private async scanChallenge(preserveTakeover = false): Promise<ChallengeDetection> {
     if (!this.page) return { detected: false, signals: [], observedAt: new Date().toISOString() };
+    const wasDetected = this.challengeDetection?.detected === true;
     const detection = await this.detector.detectPage(this.page);
     if (detection.detected) {
-      const firstDetection = this.challengeDetection?.detected !== true;
       this.challengeDetection = detection;
-      if (this.challengePolicy.shouldPause(detection) && !preserveTakeover && this._state !== 'HUMAN_TAKEOVER' && this._state !== 'USER_CONTROLLED' && this._state !== 'STOPPING' && this._state !== 'STOPPED') {
+      // Only entering the pause aborts active automation; repeated page events
+      // must not cancel read-only actions that were admitted while paused.
+      if (this.challengePolicy.shouldPause(detection) && !preserveTakeover && this._state !== 'PAUSED_CHALLENGE' && this._state !== 'HUMAN_TAKEOVER' && this._state !== 'USER_CONTROLLED' && this._state !== 'STOPPING' && this._state !== 'STOPPED') {
         this._state = 'PAUSED_CHALLENGE';
         this.activeAbort?.abort();
       }
-      if (firstDetection) {
+      if (!wasDetected) {
+        await this.options.onChallengeStateChange?.(detection);
         await this.audit({
           action: 'challenge_detected',
           outcome: 'paused',
@@ -1800,6 +1772,7 @@ export class BrowserSession {
       }
     } else {
       this.challengeDetection = undefined;
+      if (wasDetected) await this.options.onChallengeStateChange?.(detection);
     }
     return detection;
   }
@@ -2083,6 +2056,15 @@ export class BrowserSession {
     })));
   }
 
+
+  private async loadInitialStorageState(): Promise<void> {
+    const state = this.options.initialStorageState;
+    if (!state || !this.context) return;
+    if (!this.context.setStorageState) {
+      throw new BrowserSessionError('INVALID_STATE', 'Browser runtime cannot restore the saved login state');
+    }
+    await this.context.setStorageState(state);
+  }
   private async persistContextCookies(): Promise<void> {
     if (!this.options.onCookiesPersist || !this.context?.cookies) return;
     const cookies = await this.context.cookies();
@@ -2096,6 +2078,25 @@ export class BrowserSession {
       secure: cookie.secure,
       sameSite: cookie.sameSite,
     })));
+  }
+
+  private async persistContextStorageState(): Promise<void> {
+    if (!this.options.onStorageStatePersist || !this.context) return;
+    if (!this.context.storageState) {
+      throw new BrowserSessionError('INVALID_STATE', 'Browser runtime cannot checkpoint the current login state');
+    }
+    await this.options.onStorageStatePersist(await this.context.storageState({
+      indexedDB: true,
+      credentials: true,
+    }));
+  }
+  /**
+   * Forces a login state checkpoint through the serial queue.
+   */
+  public async checkpointStorageState(): Promise<void> {
+    return this.enqueue('browser_checkpoint', async () => {
+      await this.persistContextStorageState();
+    });
   }
   private async cleanupOwnedProfile(): Promise<void> {
     if (this.persistentProfile) return;

@@ -16,6 +16,9 @@ export interface ProxyPoolRecord extends ProxyConfig {
   readonly updatedAt: number;
   readonly lastCheckedAt?: number;
   readonly lastCheck?: ProxyCheckResult;
+  readonly consecutiveFailures?: number;
+  readonly consecutiveSuccesses?: number;
+  readonly quarantineUntil?: number;
 }
 
 export interface ProxyPoolInput extends ProxyConfig {
@@ -30,7 +33,12 @@ export class ProxyPoolStore {
   private writeTail: Promise<void> = Promise.resolve();
   private cursor = 0;
 
-  public constructor(private readonly path: string, private readonly vault?: SecretVault) {}
+  public constructor(
+    private readonly path: string,
+    private readonly vault?: SecretVault,
+    private readonly clock: () => number = Date.now,
+    private readonly checker: (proxy: ProxyConfig) => Promise<ProxyCheckResult> = checkProxy
+  ) {}
 
   public async list(): Promise<ProxyPoolRecord[]> {
     await this.load();
@@ -46,7 +54,7 @@ export class ProxyPoolStore {
   public async create(input: ProxyPoolInput): Promise<ProxyPoolRecord> {
     await this.load();
     const normalized = normalizeProxyConfig(input);
-    const now = Date.now();
+    const now = this.clock();
     const proxyId = `pxy_${randomUUID().slice(0, 8)}`;
     const record: ProxyPoolRecord = {
       proxyId,
@@ -76,8 +84,12 @@ export class ProxyPoolStore {
       ...(input.password ?? existing.password ? { password: input.password ?? existing.password } : {}),
       ...(input.bypass ?? existing.bypass ? { bypass: input.bypass ?? existing.bypass } : {}),
     });
+    const connectionChanged = candidate.server !== existing.server
+      || candidate.username !== existing.username
+      || candidate.password !== existing.password
+      || candidate.bypass !== existing.bypass;
     const updated: ProxyPoolRecord = {
-      ...existing,
+      ...withoutProxyHealth(existing),
       server: candidate.server,
       type: candidate.type,
       ...(candidate.username !== undefined ? { username: candidate.username } : {}),
@@ -86,7 +98,12 @@ export class ProxyPoolStore {
       ...(input.name !== undefined ? { name: input.name.trim() || existing.name } : {}),
       ...(input.tags !== undefined ? { tags: input.tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 32) } : {}),
       ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
-      updatedAt: Date.now(),
+      ...(!connectionChanged && existing.lastCheckedAt !== undefined ? { lastCheckedAt: existing.lastCheckedAt } : {}),
+      ...(!connectionChanged && existing.lastCheck !== undefined ? { lastCheck: existing.lastCheck } : {}),
+      ...(!connectionChanged && existing.consecutiveFailures !== undefined ? { consecutiveFailures: existing.consecutiveFailures } : {}),
+      ...(!connectionChanged && existing.consecutiveSuccesses !== undefined ? { consecutiveSuccesses: existing.consecutiveSuccesses } : {}),
+      ...(!connectionChanged && existing.quarantineUntil !== undefined ? { quarantineUntil: existing.quarantineUntil } : {}),
+      updatedAt: this.clock(),
     };
     this.records.set(proxyId, updated);
     await this.persist();
@@ -104,16 +121,55 @@ export class ProxyPoolStore {
     await this.load();
     const record = this.records.get(proxyId);
     if (!record) throw new Error('PROXY_NOT_FOUND');
-    const result = await checkProxy(record);
-    const updated: ProxyPoolRecord = { ...record, lastCheckedAt: Date.now(), lastCheck: result, updatedAt: Date.now() };
+
+    const result = await this.checker(record);
+    const now = this.clock();
+
+    let failures = record.consecutiveFailures ?? 0;
+    let successes = record.consecutiveSuccesses ?? 0;
+    let quarantineUntil = record.quarantineUntil;
+
+    if (result.success) {
+      failures = 0;
+      if (quarantineUntil !== undefined && now < quarantineUntil) {
+        successes = 0;
+      } else {
+        successes += 1;
+        if (successes >= 2) {
+          quarantineUntil = undefined;
+        }
+      }
+    } else {
+      successes = 0;
+      failures += 1;
+      const threshold = 3;
+      if (failures >= threshold) {
+        const base = 5 * 60 * 1000;
+        const max = 24 * 60 * 60 * 1000;
+        const cooldown = Math.min(max, base * (2 ** (failures - threshold)));
+        quarantineUntil = now + cooldown;
+      }
+    }
+
+    const updated: ProxyPoolRecord = {
+      ...withoutProxyHealth(record),
+      lastCheckedAt: now,
+      lastCheck: result,
+      updatedAt: now,
+      consecutiveFailures: failures,
+      consecutiveSuccesses: successes,
+      ...(quarantineUntil !== undefined ? { quarantineUntil } : {}),
+    };
     this.records.set(proxyId, updated);
     await this.persist();
     return cloneProxy(updated);
   }
 
   public async next(tags: readonly string[] = []): Promise<ProxyPoolRecord | undefined> {
+    const now = this.clock();
     const records = (await this.list()).filter((record) => record.enabled
       && record.lastCheck?.success === true
+      && record.quarantineUntil === undefined
       && tags.every((tag) => record.tags.includes(tag)));
     if (!records.length) return undefined;
     const selected = records[this.cursor % records.length];
@@ -152,4 +208,20 @@ export class ProxyPoolStore {
 
 function cloneProxy(value: ProxyPoolRecord): ProxyPoolRecord {
   return { ...value, tags: [...value.tags], ...(value.lastCheck ? { lastCheck: { ...value.lastCheck } } : {}) };
+}
+
+function withoutProxyHealth(value: ProxyPoolRecord): ProxyPoolRecord {
+  return {
+    proxyId: value.proxyId,
+    name: value.name,
+    server: value.server,
+    ...(value.type !== undefined ? { type: value.type } : {}),
+    ...(value.username !== undefined ? { username: value.username } : {}),
+    ...(value.password !== undefined ? { password: value.password } : {}),
+    ...(value.bypass !== undefined ? { bypass: value.bypass } : {}),
+    tags: [...value.tags],
+    enabled: value.enabled,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  };
 }

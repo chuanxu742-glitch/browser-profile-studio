@@ -5,11 +5,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chuanxu742-glitch/antigravity-browser.git"
+    "url": "git+https://github.com/chuanxu742-glitch/browser-profile-studio.git"
   },
-  "homepage": "https://github.com/chuanxu742-glitch/antigravity-browser#readme",
+  "homepage": "https://github.com/chuanxu742-glitch/browser-profile-studio#readme",
   "bugs": {
-    "url": "https://github.com/chuanxu742-glitch/antigravity-browser/issues"
+    "url": "https://github.com/chuanxu742-glitch/browser-profile-studio/issues"
   },
   "description": "Browser profile isolation and policy-gated Firefox automation MCP baseline",
   "files": [
@@ -38,7 +38,12 @@
     "start:cdp": "node dist/cdp-entrypoint.js",
     "test:extensions": "vitest run tests/integration/managed-extension-real.test.ts",
     "test:benchmarks": "node --import tsx/esm scripts/run-online-benchmarks.ts",
+    "test:capacity": "node --import tsx/esm scripts/run-account-scale-benchmark.ts",
     "test:market": "node --import tsx/esm scripts/test-market-crawling.ts",
+    "soak": "node --import tsx/esm scripts/run-account-soak.ts",
+    "acceptance:login": "node --import tsx/esm scripts/run-login-acceptance.ts",
+    "capacity:release": "node --import tsx/esm scripts/run-capacity-release-gate.ts",
+    "rekey:backups": "node --import tsx/esm scripts/rekey-backups.ts",
     "acceptance:egress": "node --import tsx/esm scripts/production-acceptance.ts",
     "import:local": "node --import tsx/esm scripts/import-local-browser.ts",
     "studio": "node --import tsx/esm scripts/start-studio.ts",

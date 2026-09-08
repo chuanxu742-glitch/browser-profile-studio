@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cdp-container:
     runs-on: ubuntu-latest
@@ -40,10 +47,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          package-manager-cache: false
       - run: npm ci
       - run: npx playwright install --with-deps chromium firefox
       - run: npm run typecheck
@@ -59,10 +68,43 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          package-manager-cache: false
       - run: npm ci
       - run: npx playwright install --with-deps firefox
       - run: npm run test:firefox
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run install:browsers
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: npm run test:mcp
+      - run: npm run test:integration
+      - run: npm run build
+      - run: npm run test:firefox
+      - run: npm run test:fingerprint-runtime
+      - name: Report real fingerprint evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $reports = Get-ChildItem artifacts/fingerprint-repair-20260905/*.json -ErrorAction SilentlyContinue
+          foreach ($report in $reports) {
+            $json = Get-Content $report.FullName -Raw
+            Write-Output $json
+            $result = $json | ConvertFrom-Json
+            "$($result.engine): deep Worker acceptance = $($result.strictDeepWorkerAcceptance); diagnostics = $($result.diagnostics.consistency)" >> $env:GITHUB_STEP_SUMMARY
+          }

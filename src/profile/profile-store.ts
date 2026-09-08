@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import type {
   ProfileMetadata,
   ProfileCreateOptions,
@@ -9,6 +10,7 @@ import type {
   CookieRecord,
   CookieFormat,
   ProfileFingerprintSettings,
+  BrowserStorageState,
 } from './types.js';
 import { cookiesToNetscape, parseCookies } from './cookie-converter.js';
 import { normalizeProxyConfig } from '../proxy/validator.js';
@@ -277,6 +279,44 @@ export class ProfileStore {
     }));
     await atomicWriteFile(cookiePath, JSON.stringify(persisted, null, 2));
   }
+  public async getStorageState(profileId: string): Promise<BrowserStorageState | undefined> {
+    const statePath = this.getStorageStatePath(profileId);
+    const backupPath = `${statePath}.bak`;
+    if (!existsSync(statePath) && !existsSync(backupPath)) {
+      return undefined;
+    }
+
+    const tryRead = async (path: string): Promise<BrowserStorageState> => {
+      const raw = await readFile(path, 'utf-8');
+      const serialized = raw.startsWith('enc:v1:')
+        ? this.options.vault?.decrypt(raw)
+        : raw;
+      if (serialized === undefined) {
+        throw new BrowserToolError('INVALID_STATE', 'Cannot decrypt storage state without a vault');
+      }
+      return parseBrowserStorageState(serialized);
+    };
+
+    try {
+      if (existsSync(statePath)) {
+        return await tryRead(statePath);
+      }
+    } catch (e) {
+      if (existsSync(backupPath)) {
+        return await tryRead(backupPath);
+      }
+      throw e;
+    }
+
+    return tryRead(backupPath);
+  }
+
+  public async saveStorageState(profileId: string, state: BrowserStorageState): Promise<void> {
+    const statePath = this.getStorageStatePath(profileId);
+    const serialized = JSON.stringify(state);
+    const payload = this.options.vault ? this.options.vault.encrypt(serialized) : serialized;
+    await atomicWriteFile(statePath, payload);
+  }
 
   public async exportCookies(profileId: string, format: CookieFormat = 'json'): Promise<string> {
     const cookies = await this.getCookies(profileId);
@@ -358,6 +398,50 @@ export class ProfileStore {
       || (metadata.twoFactorSecret && !vault.isEncrypted(metadata.twoFactorSecret)),
     );
   }
+}
+
+const BrowserStorageStateSchema = z.object({
+  cookies: z.array(z.object({
+    name: z.string(),
+    value: z.string(),
+    domain: z.string(),
+    path: z.string(),
+    expires: z.number().optional(),
+    httpOnly: z.boolean().optional(),
+    secure: z.boolean().optional(),
+    sameSite: z.enum(['Strict', 'Lax', 'None']).optional(),
+  })),
+  origins: z.array(z.object({
+    origin: z.string(),
+    localStorage: z.array(z.object({
+      name: z.string(),
+      value: z.string(),
+    })),
+    indexedDB: z.array(z.object({
+      name: z.string(),
+      version: z.number(),
+      stores: z.array(z.object({
+        name: z.string(),
+        keyPath: z.union([z.string(), z.array(z.string()), z.null()]).optional(),
+        autoIncrement: z.boolean(),
+        indexes: z.array(z.object({
+          name: z.string(),
+          keyPath: z.union([z.string(), z.array(z.string()), z.null()]),
+          unique: z.boolean(),
+          multiEntry: z.boolean(),
+        })),
+        records: z.array(z.object({
+          key: z.unknown(),
+          value: z.unknown(),
+        })),
+      })),
+    })).optional(),
+  })),
+  credentials: z.array(z.unknown()).optional(),
+}).transform((state): BrowserStorageState => state as BrowserStorageState);
+
+function parseBrowserStorageState(serialized: string): BrowserStorageState {
+  return BrowserStorageStateSchema.parse(JSON.parse(serialized));
 }
 
 function normalizeFingerprintSettings(

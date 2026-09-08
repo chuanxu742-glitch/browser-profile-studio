@@ -1,7 +1,14 @@
+import type { VersionedCheckpointStore } from '../profile/versioned-checkpoint-store.js';
+import type { AccountHealthStore } from '../account/account-health-store.js';
+import { AccountHealth, AccountHealthState, type AccountHealthSnapshot } from '../account/account-health.js';
+import type { AccountMetrics } from '../operations/account-metrics.js';
 import { BrowserSession, BrowserSessionError } from './browser-session.js';
 import type { BrowserSessionOptions, BrowserSessionStatus, BrowserTabStatus } from './browser-session.js';
 import type { EnvironmentDiagnostics } from './environment-diagnostics.js';
 import type { ChallengePolicy } from '../challenge/policy.js';
+import type { LeaseManager, ProfileLease } from '../distributed/profile-lease.js';
+import { MemoryLeaseManager, RedisLeaseManager } from '../distributed/profile-lease.js';
+import type { Cluster, Redis } from 'ioredis';
 import { BrowserToolError } from '../domain.js';
 import type { Workspace, WorkspaceRetention } from '../domain.js';
 import { createWorkspaceId, cloneWorkspace, digestWorkspaceLease, normalizeWorkspaceName } from './workspace.js';
@@ -29,6 +36,7 @@ import {
   type ProfileCreateOptions,
   type ProfileSummary,
   type CookieRecord,
+  type BrowserStorageState,
   type CookieFormat,
 } from '../profile/index.js';
 import { normalizeProxyConfig, checkProxy, type ProxyConfig, type ProxyCheckResult } from '../proxy/index.js';
@@ -54,6 +62,13 @@ export interface SessionManagerOptions extends Omit<BrowserSessionOptions, 'sess
   sessionFactory?: (options: BrowserSessionOptions) => BrowserSession;
   profileStore?: ProfileStore;
   extensionStore?: ManagedExtensionStore;
+  checkpointStore?: VersionedCheckpointStore;
+  accountHealthStore?: AccountHealthStore;
+  accountMetrics?: AccountMetrics;
+  /** Periodic checkpoint interval. Zero disables periodic writes. */
+  checkpointIntervalMs?: number;
+  /** Server-owned lease backend. Distributed workers inject the shared Redis lease manager. */
+  profileLeaseManager?: LeaseManager;
   /**
    * Cluster control-plane configuration. Browser-only worker processes set
    * this to false so they do not create a second, unused queue connection.
@@ -123,6 +138,7 @@ export interface BrowserCapabilities {
   forbiddenCapabilities: readonly string[];
   managedBrowserVersions: Readonly<Record<'firefox' | 'chromium', string>>;
   serviceWorkerFingerprintInjectionByEngine: Readonly<Record<'firefox' | 'chromium', boolean>>;
+  workerBootstrapByEngine: Readonly<Record<'firefox' | 'chromium', boolean>>;
 }
 
 export const DEFAULT_HANDOFF_TTL_MS = 5 * 60_000;
@@ -141,8 +157,11 @@ export const DEFAULT_MAX_TABS_PER_SESSION = getAutomationPolicy(DEFAULT_AUTOMATI
 export class SessionManager {
   private readonly options: SessionManagerOptions;
   private readonly sessions = new Map<string, BrowserSession>();
-  /** Prevent two live Firefox processes from opening the same persistent profile. */
-  private readonly persistentProfileOwners = new Map<string, string>();
+  /** Lease manager for persistent profile ownership across distributed workers */
+  private readonly profileLeaseManager: LeaseManager;
+  private readonly activeProfileLeases = new Map<string, { tenantId: string; lease: ProfileLease }>();
+  private readonly profileIdBySession = new Map<string, string>();
+  private readonly leaseRenewalTimers = new Map<string, unknown>();
   private readonly workspaces = new Map<string, Workspace>();
   private readonly workspaceBySession = new Map<string, string>();
   /** Only a digest and expiry are retained; the raw handoff token stays with the caller. */
@@ -160,6 +179,8 @@ export class SessionManager {
   private readonly cancelTimer: (handle: unknown) => void;
   private readonly expiryTimers = new Map<string, { handle: unknown; generation: number; expiresAt?: number }>();
   private readonly workspaceExpiryTimers = new Map<string, unknown>();
+  private readonly checkpointTimers = new Map<string, unknown>();
+  private readonly checkpointIntervalMs: number | undefined;
   private readonly expiredSessionIds = new Set<string>();
   private nextExpiryGeneration = 0;
   private readonly clusterScheduler?: DistributedMasterScheduler;
@@ -188,6 +209,9 @@ export class SessionManager {
     this.now = options.clock?.now ?? (() => Date.now());
     this.scheduleTimer = options.clock?.setTimeout ?? ((handler, timeoutMs) => setTimeout(handler, timeoutMs));
     this.cancelTimer = options.clock?.clearTimeout ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
+    this.checkpointIntervalMs = !options.checkpointStore || options.checkpointIntervalMs === 0
+      ? undefined
+      : boundedInteger(options.checkpointIntervalMs ?? 5 * 60_000, 1_000, 24 * 60 * 60_000, 5 * 60_000);
     this.profileStore = options.profileStore ?? new ProfileStore(options.profileRoot ?? '.browser-data/profiles');
     this.extensionStore = options.extensionStore;
     if (options.cluster !== false) {
@@ -198,6 +222,14 @@ export class SessionManager {
         startLocalWorker: false,
         ...(options.cluster ?? {}),
       });
+    }
+    if (options.profileLeaseManager) {
+      this.profileLeaseManager = options.profileLeaseManager;
+    } else if (this.clusterScheduler?.getAdapter().underlyingRedisClient) {
+      const redis = this.clusterScheduler.getAdapter().underlyingRedisClient as Redis | Cluster;
+      this.profileLeaseManager = new RedisLeaseManager(redis);
+    } else {
+      this.profileLeaseManager = new MemoryLeaseManager();
     }
   }
 
@@ -233,6 +265,41 @@ export class SessionManager {
   public async deleteProfile(profileId: string): Promise<boolean> {
     return this.profileStore.deleteProfile(profileId);
   }
+  public async getAccountHealth(profileId: string): Promise<AccountHealthSnapshot | null> {
+    if (!this.options.accountHealthStore) return null;
+    return this.options.accountHealthStore.getHealth(profileId);
+  }
+
+  public async setAccountHealth(profileId: string, snapshot: AccountHealthSnapshot): Promise<void> {
+    if (!this.options.accountHealthStore) throw new Error('ACCOUNT_HEALTH_UNAVAILABLE');
+    await this.options.accountHealthStore.setHealth(profileId, snapshot);
+  }
+
+  public async updateAccountHealth(
+    profileId: string,
+    state: AccountHealthState,
+    reason?: string,
+  ): Promise<AccountHealthSnapshot> {
+    if (!this.options.accountHealthStore) throw new Error('ACCOUNT_HEALTH_UNAVAILABLE');
+    if (!await this.profileStore.getProfile(profileId)) throw new Error('PROFILE_NOT_FOUND');
+    return this.options.accountHealthStore.updateHealth(profileId, (snapshot) => {
+      const health = new AccountHealth(() => this.readNow(), snapshot ?? undefined);
+      if (state === AccountHealthState.HEALTHY) health.recover(reason);
+      else if (state === AccountHealthState.QUARANTINED) health.quarantine(reason);
+      else if (state === AccountHealthState.DISABLED) health.disable(reason);
+      else health.recordFailure(state, reason);
+      return health.getSnapshot();
+    });
+  }
+
+  public async stopProfileSessions(profileId: string, reason = 'profile-maintenance'): Promise<number> {
+    const sessionIds = [...this.profileIdBySession.entries()]
+      .filter(([, activeProfileId]) => activeProfileId === profileId)
+      .map(([sessionId]) => sessionId);
+    await Promise.all(sessionIds.map((sessionId) => this.stop(sessionId, reason)));
+    return sessionIds.length;
+  }
+
 
   public async listDeletedProfiles() { return this.profileStore.listDeletedProfiles(); }
   public async restoreProfile(profileId: string) { return this.profileStore.restoreProfile(profileId); }
@@ -269,12 +336,30 @@ export class SessionManager {
     let effectiveFingerprint: FingerprintConfig | boolean | undefined = options.fingerprint ?? this.options.fingerprint;
     let effectiveFingerprintSeed = options.fingerprintSeed ?? this.options.fingerprintSeed;
     let initialCookies: CookieRecord[] | undefined;
+    let initialStorageState: BrowserStorageState | undefined;
     let managedExtensions: BrowserSessionOptions['managedExtensions'];
     let savedProfile: ProfileMetadata | undefined;
+    let checkpointVersion = 0;
+    let initialAccountHealth: AccountHealthSnapshot | null = null;
     if (options.profileId) {
       const profileMeta = await this.profileStore.getProfile(options.profileId);
       if (!profileMeta) {
         throw new BrowserSessionError('SESSION_NOT_FOUND', `Profile with ID "${options.profileId}" not found.`);
+      }
+      if (this.options.accountHealthStore) {
+        initialAccountHealth = await this.options.accountHealthStore.getHealth(profileMeta.profileId);
+        const health = new AccountHealth(() => this.readNow(), initialAccountHealth ?? undefined);
+        if (!health.isRetryEligible()) {
+          this.options.accountMetrics?.increment('admission_rejection', {});
+          const snapshot = health.getSnapshot();
+          throw new BrowserSessionError('RESOURCE_EXHAUSTED', 'The requested account is not eligible to start', {
+            retryable: snapshot.state !== AccountHealthState.DISABLED && snapshot.state !== AccountHealthState.QUARANTINED,
+            details: {
+              accountState: snapshot.state,
+              nextRetryAvailableAt: snapshot.nextRetryAvailableAt,
+            },
+          });
+        }
       }
       if (!effectiveProxy && profileMeta.proxy) {
         effectiveProxy = profileMeta.proxy;
@@ -294,6 +379,24 @@ export class SessionManager {
       savedProfile = profileMeta;
       effectiveFingerprintSeed ??= profileMeta.fingerprint?.seed ?? stableProfileSeed(profileMeta.profileId);
       initialCookies = await this.profileStore.getCookies(profileMeta.profileId);
+      initialStorageState = await this.profileStore.getStorageState(profileMeta.profileId);
+      if (this.options.checkpointStore) {
+        try {
+          const latest = await this.options.checkpointStore.getLatestState(profileMeta.profileId);
+          if (latest) {
+            checkpointVersion = latest.version;
+            initialStorageState = latest.state;
+            this.options.accountMetrics?.increment('login_restore', {});
+          } else if (initialStorageState) {
+            this.options.accountMetrics?.increment('login_restore', {});
+          }
+        } catch {
+          this.options.accountMetrics?.increment('checkpoint_failures', {});
+          if (initialStorageState) this.options.accountMetrics?.increment('login_restore', {});
+        }
+      } else if (initialStorageState) {
+        this.options.accountMetrics?.increment('login_restore', {});
+      }
     }
 
     if (effectiveFingerprint === true && savedProfile) {
@@ -311,6 +414,13 @@ export class SessionManager {
       managedExtensions = this.extensionStore
         ? await this.extensionStore.resolveForLaunch(extensionIds, effectiveEngine ?? savedProfile.engine ?? 'firefox')
         : [];
+    }
+
+    if (effectiveProxy && effectiveFingerprint && !geoTimezone) {
+      throw new BrowserSessionError(
+        'INVALID_ARGUMENT',
+        'Proxy-backed fingerprint sessions require an explicit IANA timezone matching the verified proxy exit',
+      );
     }
 
     let normalizedProxy;
@@ -334,9 +444,6 @@ export class SessionManager {
     const profileKey = persistBrowserProfile
       ? persistentProfileKey(effectiveProfileName)
       : undefined;
-    if (profileKey !== undefined && this.persistentProfileOwners.has(profileKey)) {
-      throw new BrowserSessionError('RESOURCE_EXHAUSTED', 'The requested persistent profile is already in use', { retryable: true });
-    }
     // Construct an explicit allowlist of per-session fields. Policy, audit,
     // launcher, detector, scheduler and server-owned roots always come from
     // the manager and cannot be replaced by a session caller.
@@ -364,17 +471,46 @@ export class SessionManager {
       ...(geoAlignment ? {
         timezoneId: geoAlignment.timezoneId,
         locale: geoAlignment.locale,
+        languages: geoAlignment.languages,
         geolocation: geoAlignment.geolocation,
         permissions: ['geolocation'],
-        extraHTTPHeaders: geoAlignment.extraHeaders,
+        extraHTTPHeaders: { ...geoAlignment.extraHeaders, ...this.options.extraHTTPHeaders },
       } : {}),
       ...(effectiveUserAgent !== undefined ? { userAgent: effectiveUserAgent } : {}),
       ...(effectiveFingerprint !== undefined ? { fingerprint: effectiveFingerprint } : {}),
       ...(effectiveFingerprintSeed !== undefined ? { fingerprintSeed: effectiveFingerprintSeed } : {}),
       ...(initialCookies !== undefined ? { initialCookies } : {}),
+      ...(initialStorageState !== undefined ? { initialStorageState } : {}),
       ...(managedExtensions !== undefined ? { managedExtensions } : {}),
       ...(options.profileId !== undefined ? {
         onCookiesPersist: (cookies: readonly CookieRecord[]) => this.profileStore.saveCookies(options.profileId!, cookies),
+        onStorageStatePersist: async (state: BrowserStorageState) => {
+          try {
+            if (this.options.checkpointStore) {
+              checkpointVersion = await this.options.checkpointStore.saveState(options.profileId!, state, checkpointVersion);
+            }
+            await this.profileStore.saveStorageState(options.profileId!, state);
+          } catch (error) {
+            this.options.accountMetrics?.increment('checkpoint_failures', {});
+            throw error;
+          }
+        },
+        onChallengeStateChange: async (detection) => {
+          if (!this.options.accountHealthStore) return;
+          await this.options.accountHealthStore.updateHealth(options.profileId!, (snapshot) => {
+            const health = new AccountHealth(() => this.readNow(), snapshot ?? undefined);
+            const current = health.getSnapshot().state;
+            if (current === AccountHealthState.DISABLED || current === AccountHealthState.QUARANTINED) {
+              return health.getSnapshot();
+            }
+            if (detection.detected) {
+              health.recordFailure(AccountHealthState.CHALLENGE_REQUIRED, detection.category ?? 'challenge detected');
+            } else {
+              health.recover('challenge cleared');
+            }
+            return health.getSnapshot();
+          });
+        },
       } : {}),
       ...(options.challengePolicy !== undefined ? { challengePolicy: options.challengePolicy } : {}),
     };
@@ -388,14 +524,33 @@ export class SessionManager {
     delete (merged as { privateNetworkEnabled?: unknown }).privateNetworkEnabled;
     delete (merged as { clock?: unknown }).clock;
     delete (merged as { extensionStore?: unknown }).extensionStore;
+    delete (merged as { profileStore?: unknown }).profileStore;
+    delete (merged as { checkpointStore?: unknown }).checkpointStore;
+    delete (merged as { accountHealthStore?: unknown }).accountHealthStore;
+    delete (merged as { accountMetrics?: unknown }).accountMetrics;
+    delete (merged as { checkpointIntervalMs?: unknown }).checkpointIntervalMs;
+    delete (merged as { profileLeaseManager?: unknown }).profileLeaseManager;
     const session = this.options.sessionFactory
       ? this.options.sessionFactory(merged)
       : new BrowserSession(merged);
-    if (profileKey !== undefined) this.persistentProfileOwners.set(profileKey, session.sessionId);
+    if (profileKey !== undefined) {
+      await this.acquireProfileLease(session.sessionId, tenantId, profileKey);
+    }
     this.expiredSessionIds.delete(session.sessionId);
     this.sessions.set(session.sessionId, session);
+    if (options.profileId) this.profileIdBySession.set(session.sessionId, options.profileId);
     try {
       await session.start();
+      if (options.profileId) {
+        if (this.options.accountHealthStore && initialAccountHealth === null) {
+          await this.options.accountHealthStore.setHealth(
+            options.profileId,
+            new AccountHealth(() => this.readNow()).getSnapshot(),
+          );
+        }
+        this.options.accountMetrics?.increment('starts', {});
+        this.scheduleCheckpoint(session.sessionId);
+      }
       this.scheduleExpiry(session.sessionId);
       const now = this.readNow();
       const expiresAt = retention === 'destroy' ? undefined : now + this.workspaceTtlMs;
@@ -417,10 +572,11 @@ export class SessionManager {
       return session;
     } catch (error) {
       this.clearExpiryTimer(session.sessionId);
+      this.clearCheckpointTimer(session.sessionId);
       this.sessions.delete(session.sessionId);
-      if (profileKey !== undefined && this.persistentProfileOwners.get(profileKey) === session.sessionId) {
-        this.persistentProfileOwners.delete(profileKey);
-      }
+      await session.stop('session-start-failed').catch(() => undefined);
+      this.profileIdBySession.delete(session.sessionId);
+      await this.releasePersistentProfile(session.sessionId).catch(() => undefined);
       throw error;
     }
   }
@@ -433,6 +589,7 @@ export class SessionManager {
     if (this.expiredSessionIds.has(sessionId) || (expiry?.expiresAt !== undefined && this.readNow() >= expiry.expiresAt)) {
       if (expiry?.expiresAt !== undefined && this.readNow() >= expiry.expiresAt) {
         this.clearExpiryTimer(sessionId);
+        this.clearCheckpointTimer(sessionId);
         this.rememberExpired(sessionId);
         void this.expireSession(sessionId).catch(() => undefined);
       }
@@ -512,7 +669,8 @@ export class SessionManager {
         firefox: managedBrowserIdentity('firefox').fullVersion,
         chromium: managedBrowserIdentity('chromium').fullVersion,
       },
-      serviceWorkerFingerprintInjectionByEngine: { firefox: true, chromium: true },
+      serviceWorkerFingerprintInjectionByEngine: { firefox: false, chromium: true },
+      workerBootstrapByEngine: { firefox: false, chromium: true },
     };
   }
 
@@ -597,23 +755,27 @@ export class SessionManager {
       throw new Error('SESSION_NOT_FOUND');
     }
     if (tenantId !== undefined) this.assertSessionTenant(sessionId, tenantId);
+    const profileId = this.profileIdBySession.get(sessionId);
     this.clearExpiryTimer(sessionId);
+    this.clearCheckpointTimer(sessionId);
     try {
       const status = await session.stop(reason);
       this.sessions.delete(sessionId);
-      this.releasePersistentProfile(sessionId);
+      this.profileIdBySession.delete(sessionId);
+      await this.releasePersistentProfile(sessionId);
       this.deactivateWorkspace(sessionId);
       this.rememberClosed(status);
+      if (profileId) this.options.accountMetrics?.increment('stops', {});
       return status;
     } catch (error) {
-      // 无论何种原因导致的 stop 失败（如底层进程卡死、I/O 超时或审计落盘异常），
-      // 只要该会话已不可用，强制清理槽位与释放 Profile 锁，防止并发资源永久泄漏
       this.sessions.delete(sessionId);
-      this.releasePersistentProfile(sessionId);
+      this.profileIdBySession.delete(sessionId);
+      await this.releasePersistentProfile(sessionId).catch(() => undefined);
       this.deactivateWorkspace(sessionId);
       try {
         this.rememberClosed(session.status());
-      } catch (_) {}
+      } catch {}
+      if (profileId) this.options.accountMetrics?.increment('stops', {});
       throw error;
     }
   }
@@ -772,21 +934,36 @@ export class SessionManager {
   }
 
   public async shutdown(reason = 'shutdown'): Promise<void> {
-    await this.shutdownSessions(reason);
-    await this.clusterScheduler?.shutdown();
+    const failures: unknown[] = [];
+    await this.shutdownSessions(reason).catch((error) => failures.push(error));
+    await this.clusterScheduler?.shutdown().catch((error) => failures.push(error));
+    await this.profileLeaseManager.shutdown().catch((error) => failures.push(error));
+    if (failures.length > 0) throw new AggregateError(failures, 'Session manager shutdown was incomplete');
   }
 
   /** Close browser sessions without shutting down the cluster coordinator. */
   public async shutdownSessions(reason = 'shutdown'): Promise<void> {
     this.clearAllExpiryTimers();
+    this.clearAllCheckpointTimers();
     const sessions = [...this.sessions.values()];
-    await Promise.all(sessions.map((session) => session.stop(reason).catch(() => undefined)));
+    const failures: unknown[] = [];
+    await Promise.all(sessions.map(async (session) => {
+      const profileId = this.profileIdBySession.get(session.sessionId);
+      await session.stop(reason).catch((error) => failures.push(error));
+      if (profileId) this.options.accountMetrics?.increment('stops', {});
+      await this.releasePersistentProfile(session.sessionId).catch((error) => failures.push(error));
+    }));
     for (const session of sessions) {
-      this.releasePersistentProfile(session.sessionId);
+      this.profileIdBySession.delete(session.sessionId);
       this.deactivateWorkspace(session.sessionId);
-      this.rememberClosed(session.status());
+      try {
+        this.rememberClosed(session.status());
+      } catch (error) {
+        failures.push(error);
+      }
     }
     this.sessions.clear();
+    if (failures.length > 0) throw new AggregateError(failures, 'One or more browser sessions failed to shut down cleanly');
   }
 
   private rememberClosed(status: BrowserSessionStatus): void {
@@ -820,6 +997,39 @@ export class SessionManager {
       void this.expireSession(sessionId).catch(() => undefined);
     }, delayMs);
     this.expiryTimers.set(sessionId, { handle, generation, expiresAt });
+    unrefTimer(handle);
+  }
+
+  private clearCheckpointTimer(sessionId: string): void {
+    const timer = this.checkpointTimers.get(sessionId);
+    if (timer !== undefined) {
+      this.checkpointTimers.delete(sessionId);
+      this.cancelTimer(timer);
+    }
+  }
+
+  private clearAllCheckpointTimers(): void {
+    for (const sessionId of [...this.checkpointTimers.keys()]) this.clearCheckpointTimer(sessionId);
+  }
+
+  private scheduleCheckpoint(sessionId: string): void {
+    if (this.checkpointIntervalMs === undefined) return;
+    this.clearCheckpointTimer(sessionId);
+    let handle: unknown;
+    handle = this.scheduleTimer(async () => {
+      const session = this.sessions.get(sessionId);
+      if (!session || this.checkpointTimers.get(sessionId) !== handle) return;
+      try {
+        await session.checkpointStorageState();
+      } catch {
+        // The storage callback records persistence failures. BrowserSession
+        // separately audits context-level capture failures.
+      }
+      if (this.sessions.has(sessionId) && this.checkpointTimers.get(sessionId) === handle) {
+        this.scheduleCheckpoint(sessionId);
+      }
+    }, this.checkpointIntervalMs);
+    this.checkpointTimers.set(sessionId, handle);
     unrefTimer(handle);
   }
 
@@ -1003,10 +1213,82 @@ export class SessionManager {
     return this.clusterScheduler;
   }
 
-  private releasePersistentProfile(sessionId: string): void {
-    for (const [profileKey, owner] of this.persistentProfileOwners.entries()) {
-      if (owner === sessionId) this.persistentProfileOwners.delete(profileKey);
+  private async acquireProfileLease(sessionId: string, tenantId: string, profileKey: string): Promise<void> {
+    try {
+      const lease = await this.profileLeaseManager.acquire(tenantId, profileKey);
+      this.activeProfileLeases.set(sessionId, { tenantId, lease });
+      this.scheduleProfileLeaseRenewal(sessionId);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'LEASE_ALREADY_ACQUIRED') {
+        throw new BrowserSessionError('RESOURCE_EXHAUSTED', 'The requested persistent profile is already in use', { retryable: true });
+      }
+      throw error;
     }
+  }
+
+  private scheduleProfileLeaseRenewal(sessionId: string): void {
+    const existing = this.leaseRenewalTimers.get(sessionId);
+    if (existing !== undefined) this.cancelTimer(existing);
+    const handle = this.scheduleTimer(() => {
+      void this.renewProfileLease(sessionId);
+    }, 15_000);
+    this.leaseRenewalTimers.set(sessionId, handle);
+    unrefTimer(handle);
+  }
+
+  private async renewProfileLease(sessionId: string): Promise<void> {
+    const owned = this.activeProfileLeases.get(sessionId);
+    if (!owned) return;
+
+    try {
+      const lease = await this.profileLeaseManager.renew(
+        owned.tenantId,
+        owned.lease.profileId,
+        owned.lease.leaseToken,
+      );
+      if (this.activeProfileLeases.get(sessionId) !== owned || !this.sessions.has(sessionId)) {
+        await this.profileLeaseManager.release(owned.tenantId, lease.profileId, lease.leaseToken).catch(() => undefined);
+        return;
+      }
+      this.activeProfileLeases.set(sessionId, { tenantId: owned.tenantId, lease });
+      this.scheduleProfileLeaseRenewal(sessionId);
+    } catch {
+      if (this.activeProfileLeases.get(sessionId) !== owned) return;
+      this.activeProfileLeases.delete(sessionId);
+      const timer = this.leaseRenewalTimers.get(sessionId);
+      if (timer !== undefined) {
+        this.cancelTimer(timer);
+        this.leaseRenewalTimers.delete(sessionId);
+      }
+      this.options.accountMetrics?.increment('lease_loss', {});
+      const profileId = this.profileIdBySession.get(sessionId);
+      if (profileId && this.options.accountHealthStore) {
+        await this.options.accountHealthStore.updateHealth(profileId, (snapshot) => {
+          const health = new AccountHealth(() => this.readNow(), snapshot ?? undefined);
+          if (health.getSnapshot().state !== AccountHealthState.DISABLED) {
+            health.quarantine('persistent profile lease lost');
+          }
+          return health.getSnapshot();
+        }).catch(() => undefined);
+      }
+      void this.stop(sessionId, 'Profile lease renewal failed').catch(() => undefined);
+    }
+  }
+
+  private async releasePersistentProfile(sessionId: string): Promise<void> {
+    const owned = this.activeProfileLeases.get(sessionId);
+    if (!owned) return;
+    this.activeProfileLeases.delete(sessionId);
+    const timer = this.leaseRenewalTimers.get(sessionId);
+    if (timer !== undefined) {
+      this.cancelTimer(timer);
+      this.leaseRenewalTimers.delete(sessionId);
+    }
+    await this.profileLeaseManager.release(
+      owned.tenantId,
+      owned.lease.profileId,
+      owned.lease.leaseToken,
+    );
   }
 }
 
