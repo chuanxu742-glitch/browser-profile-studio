@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { generateFingerprint } from '../../src/fingerprint/generator.js';
-import { buildStealthInjectionScript } from '../../src/fingerprint/stealth-scripts.js';
 import { managedBrowserIdentity } from '../../src/fingerprint/runtime-identity.js';
 
 describe('Fingerprint and Stealth Engine Unit Tests', () => {
@@ -64,36 +63,4 @@ describe('Fingerprint and Stealth Engine Unit Tests', () => {
 
   });
 
-  describe('buildStealthInjectionScript', () => {
-    it('should produce valid executable JavaScript containing all anti-detect hooks', () => {
-      const fp = generateFingerprint(42, 'windows');
-      const script = buildStealthInjectionScript(fp);
-
-      // Verify webdriver removal hook
-      expect(script).toContain('Navigator.prototype');
-      expect(script).toContain('webdriver');
-      // Verify plugins spoofing
-      expect(script).toContain('PDF Viewer');
-      expect(script).toContain('PluginArray');
-      // Verify hardware spoofing
-      expect(script).toContain('hardwareConcurrency');
-      expect(script).toContain('deviceMemory');
-      // Verify chrome runtime mocking
-      expect(script).toContain('window.chrome');
-      expect(script).toContain('loadTimes');
-      // Verify Canvas 2D noise hook
-      expect(script).toContain('getImageData');
-      // Verify WebGL hook
-      expect(script).toContain('UNMASKED_VENDOR_WEBGL');
-      expect(script).toContain('UNMASKED_RENDERER_WEBGL');
-      // Verify WebRTC shield hook
-      expect(script).toContain('RTCPeerConnection');
-      // Verify Function.prototype.toString defense
-      expect(script).toContain('native code');
-      expect(script).toContain('if (!isFirefoxEngine && navigatorObject)');
-      expect(script).toContain("config.os === 'linux' ? 'Linux' : 'Windows'");
-      expect(script).toContain("String(config.browserVersion).split('.')[0]");
-      expect(script).not.toContain("version: '126'");
-    });
-  });
 });

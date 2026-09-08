@@ -16,6 +16,9 @@ describe('managed Chromium startup', () => {
   beforeEach(() => vi.resetAllMocks());
   function fixture() {
     const context = { browser: () => ({ version: () => managedBrowserIdentity('chromium').fullVersion }),
+      _connection: { toImpl: () => ({ _browser: { _connection: {
+        _transport: { send: vi.fn(), onmessage: vi.fn() }, _sessions: new Map(),
+      } } }) },
       close: vi.fn().mockResolvedValue(undefined), on: vi.fn(), pages: () => [],
       addInitScript: vi.fn().mockResolvedValue(undefined) };
     mocks.launch.mockResolvedValue(context);
@@ -47,7 +50,7 @@ describe('managed Chromium startup', () => {
     expect(config.args).toContain('--abs-timezone=Europe/Paris');
     expect(config.args).toContain('--accept-lang=fr-FR');
   });
-  it('fails startup if both worker identity override methods fail', async () => {
+  it('closes the browser if the worker identity override fails', async () => {
     const context = fixture();
     const close = vi.fn();
     mocks.connect.mockResolvedValue({ close, onEvent: vi.fn(), send: vi.fn(async (method: string) => {
@@ -57,7 +60,7 @@ describe('managed Chromium startup', () => {
       return {};
     }) });
     await expect(launchPersistentChromium('fixture-profile', { headless: true,
-      fingerprintProfile: generateFingerprint({ engine: 'chromium' }) })).rejects.toThrow('SERVICE_WORKER_FINGERPRINT_SETUP_FAILED');
+      fingerprintProfile: generateFingerprint({ engine: 'chromium' }) })).rejects.toThrow('WORKER_FINGERPRINT_SETUP_FAILED');
     expect(close).toHaveBeenCalled();
     expect(context.close).toHaveBeenCalled();
   });

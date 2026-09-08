@@ -11,6 +11,8 @@ let state = {
   profiles: [],
   profilePage: 0,
   profilesPerPage: 50,
+  profileCursors: [],
+  totalProfiles: 0,
   profileFilter: '',
   proxies: [],
   workflows: [],
@@ -264,7 +266,7 @@ function initFormInteractions() {
         showToast('没有待启动的浏览器环境', 'info');
         return;
       }
-      showToast(`正在批量拉起 ${profileIds.length} 个独立 Profile 窗口...`, 'info');
+      showToast(`正在批量拉起当前页 ${profileIds.length} 个独立 Profile 窗口...`, 'info');
       btnBatchStart.disabled = true;
       btnBatchStart.textContent = '🚀 批量多开中...';
       try {
@@ -276,7 +278,7 @@ function initFormInteractions() {
         showToast(`批量多开异常: ${err.message}`, 'error');
       } finally {
         btnBatchStart.disabled = false;
-        btnBatchStart.textContent = '▶ 批量多开窗口';
+        btnBatchStart.textContent = '▶ 启动当前页';
       }
     });
   }
@@ -306,13 +308,12 @@ function initFormInteractions() {
     });
   }
 
-  // 搜索和分页只影响表格，不影响 RPA/扩展中心使用的完整 Profile 目录。
+  // 表格、批量启动、RPA 和扩展分配均以当前搜索结果页为操作边界。
   const filterInput = document.getElementById('filter-profiles-input');
   if (filterInput) {
     const handleProfileFilter = debounce((val) => {
       state.profileFilter = val.toLowerCase().trim();
-      state.profilePage = 0;
-      renderProfilePage();
+      loadProfiles(true);
     }, 150);
     filterInput.addEventListener('input', (event) => {
       handleProfileFilter(event.target.value);
@@ -321,12 +322,12 @@ function initFormInteractions() {
   document.getElementById('profiles-page-prev').addEventListener('click', () => {
     if (state.profilePage > 0) {
       state.profilePage -= 1;
-      renderProfilePage();
+      loadProfiles(false);
     }
   });
   document.getElementById('profiles-page-next').addEventListener('click', () => {
     state.profilePage += 1;
-    renderProfilePage();
+    loadProfiles(false);
   });
 }
 
@@ -442,16 +443,40 @@ async function saveProfileForm() {
   }
 }
 
-// 5. 加载所有环境
-async function loadProfiles() {
+// 5. 加载环境分页
+async function loadProfiles(resetPage = true) {
+  if (resetPage) {
+    state.profilePage = 0;
+    state.profileCursors = [];
+  }
+
+  const params = new URLSearchParams();
+  params.set('limit', state.profilesPerPage);
+  if (state.profileFilter) {
+    params.set('q', state.profileFilter);
+  }
+
+  const cursor = state.profilePage > 0 ? state.profileCursors[state.profilePage - 1] : null;
+  if (cursor) {
+    params.set('cursor', cursor);
+  }
+
   try {
-    const res = await fetch(`${API_BASE}/profiles`);
+    const res = await fetch(`${API_BASE}/profiles?${params.toString()}`);
     const json = await res.json();
     if (json.success) {
-      state.profiles = json.data || [];
-      document.getElementById('profiles-count').textContent = state.profiles.length;
-      document.getElementById('stat-total-profiles').textContent = state.profiles.length;
-      const proxyCount = state.profiles.filter(p => p.proxyServer).length;
+      state.profiles = json.data.items || [];
+      state.totalProfiles = json.data.total || 0;
+
+      if (json.data.nextCursor) {
+        state.profileCursors[state.profilePage] = json.data.nextCursor;
+      } else {
+        state.profileCursors[state.profilePage] = null;
+      }
+
+      document.getElementById('profiles-count').textContent = state.totalProfiles;
+      document.getElementById('stat-total-profiles').textContent = state.totalProfiles;
+      const proxyCount = state.profiles.filter((p) => p.proxyServer).length;
       document.getElementById('stat-proxy-count').textContent = proxyCount;
       renderProfilePage();
       refreshRpaProfileOptions();
@@ -464,27 +489,22 @@ async function loadProfiles() {
 }
 
 function getFilteredProfiles() {
-  const query = state.profileFilter;
-  if (!query) return state.profiles;
-  return state.profiles.filter((profile) =>
-    profile.name.toLowerCase().includes(query)
-    || profile.profileId.toLowerCase().includes(query)
-    || profile.tags?.some((tag) => tag.toLowerCase().includes(query))
-  );
+  return state.profiles;
 }
 
 function renderProfilePage() {
-  const filtered = getFilteredProfiles();
-  const pageCount = Math.max(1, Math.ceil(filtered.length / state.profilesPerPage));
-  state.profilePage = Math.min(state.profilePage, pageCount - 1);
+  const filtered = state.profiles;
   const start = state.profilePage * state.profilesPerPage;
-  renderProfilesTable(filtered.slice(start, start + state.profilesPerPage), start);
-  const first = filtered.length ? start + 1 : 0;
-  const last = Math.min(start + state.profilesPerPage, filtered.length);
-  document.getElementById('profiles-page-summary').textContent = `${first}-${last} / ${filtered.length}`;
+  renderProfilesTable(filtered, start);
+
+  const pageCount = Math.max(1, Math.ceil(state.totalProfiles / state.profilesPerPage));
+  const first = state.totalProfiles ? start + 1 : 0;
+  const last = Math.min(start + filtered.length, state.totalProfiles);
+
+  document.getElementById('profiles-page-summary').textContent = `${first}-${last} / ${state.totalProfiles}`;
   document.getElementById('profiles-page-info').textContent = `第 ${state.profilePage + 1} / ${pageCount} 页`;
   document.getElementById('profiles-page-prev').disabled = state.profilePage === 0;
-  document.getElementById('profiles-page-next').disabled = state.profilePage >= pageCount - 1;
+  document.getElementById('profiles-page-next').disabled = !state.profileCursors[state.profilePage] || (state.profilePage >= pageCount - 1);
 }
 
 // 加载活跃会话状态
@@ -714,7 +734,7 @@ function attachTableEvents() {
       if (!name?.trim()) return;
       try {
         const response = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profileId)}/clone`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), includeCookies: true }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
         });
         const json = await response.json();
         if (!json.success) throw new Error(json.message || '克隆失败');

@@ -1,15 +1,7 @@
 import { SessionManager } from '../src/browser/session-manager.js';
 import { UrlPolicy } from '../src/policy/url-policy.js';
 import { ChallengePolicy } from '../src/challenge/policy.js';
-import { join } from 'node:path';
-import { mkdir, writeFile } from 'node:fs/promises';
-
-interface BenchmarkSite {
-  readonly name: string;
-  readonly url: string;
-  readonly category: string;
-  readonly focus: string;
-}
+import { runBenchmarkSuite, type BenchmarkSite } from './benchmark-results.js';
 
 const BENCHMARK_SITES: readonly BenchmarkSite[] = [
   {
@@ -62,7 +54,7 @@ const BENCHMARK_SITES: readonly BenchmarkSite[] = [
   },
   {
     name: 'AmIUnique',
-    url: 'https://amiunique.org/',
+    url: 'https://amiunique.org/fingerprint',
     category: '⭐⭐⭐ 样本库指纹分布',
     focus: '浏览器样本库对比、Canvas/Audio 特征',
   },
@@ -81,13 +73,7 @@ const BENCHMARK_SITES: readonly BenchmarkSite[] = [
 ];
 
 async function runBenchmarks() {
-  console.log('===============================================================');
-  console.log('🧪 启动【公开测试靶场全量在线巡检】');
-  console.log('===============================================================');
-
-  const artifactsDir = join(process.cwd(), 'artifacts', 'benchmarks');
-  await mkdir(artifactsDir, { recursive: true });
-
+  console.log('公开测试靶场巡检：加载页面不等于检测通过');
   const manager = new SessionManager({
     maxSessions: 2,
     urlPolicy: new UrlPolicy({
@@ -166,88 +152,7 @@ async function runBenchmarks() {
     challengePolicy: new ChallengePolicy(),
   });
 
-  console.log('🚀 正在启动带有指纹伪装和拟人交互环境的浏览器会话...');
-  const session = await manager.start({
-    headless: true,
-    inputProfile: 'paced',
-    fingerprint: true,
-    fingerprintSeed: 987654,
-    countryCode: 'US',
-  });
-
-  const results: Array<{
-    name: string;
-    url: string;
-    category: string;
-    focus: string;
-    status: 'SUCCESS' | 'TIMEOUT' | 'NETWORK_ERROR';
-    details: string;
-    screenshotPath?: string;
-  }> = [];
-
-  for (const site of BENCHMARK_SITES) {
-    console.log(`\n🔍 [${site.category}] 正在测试: ${site.name} (${site.url})...`);
-    try {
-      // 访问测试站点
-      await manager.open(session.sessionId, site.url, { timeoutMs: 45_000, waitUntil: 'domcontentloaded' });
-
-      // 提取页面快照文本
-      const snapshot = await manager.snapshot(session.sessionId, { includeText: true, maxChars: 3000 });
-      
-      // 截取页面屏幕证据
-      const screenshot = await manager.screenshot(session.sessionId, { fullPage: false });
-      const imgFileName = `${site.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}.png`;
-      const imgFilePath = join(artifactsDir, imgFileName);
-      await writeFile(imgFilePath, Buffer.from(screenshot.image.data, 'base64'));
-
-      // 简单提取页面核心文本特征
-      const snippet = snapshot.text
-        ? snapshot.text.slice(0, 300).replace(/\s+/g, ' ').trim()
-        : 'Page loaded successfully';
-
-      console.log(`   ✅ 页面加载并检测成功! 截图已保存至: artifacts/benchmarks/${imgFileName}`);
-      console.log(`   📝 页面内容摘要: ${snippet}`);
-
-      results.push({
-        name: site.name,
-        url: site.url,
-        category: site.category,
-        focus: site.focus,
-        status: 'SUCCESS',
-        details: snippet,
-        screenshotPath: imgFilePath,
-      });
-    } catch (error: any) {
-      const msg = error?.message || String(error);
-      console.log(`   ⚠️ 测试访问跳过/网络超时: ${msg}`);
-      results.push({
-        name: site.name,
-        url: site.url,
-        category: site.category,
-        focus: site.focus,
-        status: msg.includes('timeout') ? 'TIMEOUT' : 'NETWORK_ERROR',
-        details: `网络连接受限: ${msg}`,
-      });
-    }
-  }
-
-  await manager.stop(session.sessionId, 'benchmark_finished');
-  await manager.shutdown();
-
-  // 输出巡检汇总表格
-  console.log('\n===============================================================');
-  console.log('📋 【公开测试靶场全量在线巡检结果汇总】');
-  console.log('===============================================================');
-  console.table(
-    results.map((r) => ({
-      靶场名称: r.name,
-      评级与分类: r.category.slice(0, 10),
-      核心检测重点: r.focus,
-      测试状态: r.status,
-    }))
-  );
-
-  return results;
+  await runBenchmarkSuite(manager, BENCHMARK_SITES, 'online', 987654);
 }
 
 runBenchmarks().catch((err) => {

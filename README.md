@@ -12,7 +12,9 @@
 
 检测到挑战时，自动化立即暂停。生产挑战的标准结果是 `CHALLENGE_DETECTED`/`SESSION_PAUSED_CHALLENGE`，等待受信任人员处理；服务不会刷新、重试、切换环境或与挑战控件交互。
 
-Service Worker 身份链路：Chromium 会通过仅绑定回环地址的浏览器级 CDP 通道，在网站代码执行前暂停目标，统一 UA、平台、Client Hints 与后续网络请求；Firefox 不依赖页面脚本注入，而是使用 Gecko 原生 Profile 首选项统一 Window、Worker、Service Worker 和 HTTP 通道中的 UA、平台、appVersion、语言、硬件并发数及相关请求头。stock Firefox 的 Playwright 时区覆盖不会进入 Service Worker，因此完整时区覆盖仍只在 `browser-core/firefox` 的版本锁定内核补丁中提供，产品能力接口对此保持 `false`，不会把部分覆盖冒充为全覆盖。
+Worker 身份链路：受管 Chromium 使用回环 CDP 通道和单一目标暂停所有者，在 URL、module、Blob、嵌套、SharedWorker 与 Service Worker 首段脚本执行前配置实际运行域；不改写应用消息。UA/UAData、语言、时区与 GPU/Canvas 需要用 Worker 内序列化的真实结果验证，而非页面回显。
+
+Firefox 使用 Gecko 原生首选项对齐可支持的身份字段；stock 内核的并发数受宿主上限约束，异地时区会话通过真实引擎设置禁用 Service Worker。当前已验证的定制补丁仅覆盖原生 CPU/时区，不包含首脚本 Worker Canvas bootstrap。因此 **Firefox 深层 Worker Canvas 全一致性验收仍为 NOT PASSED**，`workerBootstrapByEngine.firefox` 及完整 Service Worker 注入能力保持 `false`；自定义可执行文件路径本身不是完整支持证明。页面 Canvas 保护仍启用，诊断必须保留不支持项及实际像素差异。
 
 ## 安装
 
@@ -45,12 +47,60 @@ npm run studio
 
 首次启动会在 `data/` 创建本机主密钥和 owner token，并通过一次性启动链接写入 HttpOnly Cookie。Windows 上两个启动机密以当前用户 DPAPI 密文保存，旧明文启动文件会自动迁移；业务密文仍使用 AES-256-GCM。可用 `STUDIO_MASTER_KEY`、`STUDIO_ACCESS_TOKEN` 和 `STUDIO_USERS_JSON` 接入外部 KMS 或配置静态多角色凭据。`data/` 必须作为敏感目录备份与保护；主密钥丢失后已有密文无法恢复。
 
+### Windows 未签名 source+build 测试包
+
+仓库的 **Unsigned Windows test package** GitHub Actions 工作流只能从 `main` 手动触发，
+操作入口：**Actions → Unsigned Windows test package → Run workflow**，选择 `main`；
+成功后由维护者在 **Releases** 查看草稿与下载资产。
+在标准 Windows 托管 runner 上构建并解压验证后，创建 **draft + prerelease**；不会创建公开稳定版，
+也不会从 PR 发布。草稿仅对有权限的仓库维护者可见。所有工作流使用公开仓库标准托管 runner，
+不需要付费证书、自托管 runner 或外部部署。
+为避免 Actions artifact/cache 存储额度可能产生费用，所有工作流不使用 Actions artifact
+上传/下载或依赖缓存；运行证明通过日志/步骤摘要提供，分发与截图直接作为 GitHub Release assets 保存。
+
+此 ZIP 是 **源码 + `dist/` 开发者测试包，不是安装器、独立 EXE 或离线发行版**。
+需要 Windows x64、PATH 中的 Node.js 22 LTS/npm，以及访问 npm 和 Playwright 下载站点的网络。
+解压到可写目录后，在该目录运行：
+
+```powershell
+npm ci
+npm run install:browsers
+npm run studio
+```
+
+`npm ci` 必须包含开发依赖：现有 Studio 入口 `scripts/start-studio.ts` 通过 `tsx` 加载 `src/`。
+完成依赖与浏览器安装后，也可双击包内 `start-browser-studio.bat`；自动桌面窗口需要本机
+Edge/Chrome 或已配置的默认浏览器。不要只复制 `dist/` 后声称可以运行 Studio UI。
+首次启动的本地鉴权与 `data/` 保护要求同上；不要把运行后的目录重新打包上传。
+
+包内包含 `public/` UI、源码/脚本/测试/文档、构建产物、锁定的 npm 清单、浏览器桥接扩展、
+定制 Firefox 的源码补丁与 core lock，以及 `LICENSE`、`NOTICE`、第三方声明。
+不包含 Node、npm 依赖、浏览器二进制、`Launcher.exe`、自定义内核构建、用户 Profile 或凭据。
+`INSTALL-WINDOWS.txt` 记录首次运行步骤，`RELEASE-METADATA.json` 记录版本与源提交，
+`PACKAGE-CONTENTS.sha256` 列出文件摘要；使用 `Get-FileHash -Algorithm SHA256 <下载的ZIP>`
+与同一 Release 的 `SHA256SUMS.txt` 比较。摘要不是数字签名，不能代替发布者身份验证。
+
+默认下载项目锁定的 stock Playwright Firefox/Chromium；不能任意替换内核版本。
+**Firefox 深层 Worker Canvas 一致性仍为 NOT PASSED**；基本启动、UI、页面导航或 CI 成功
+不代表定制内核、完整指纹、生产网络、登录或长期稳定性已经验收。常规 integration 的 opt-in
+用例仍可能跳过；Windows CI 另显式运行 `test:firefox` 和 `test:fingerprint-runtime`，
+保留真实 Worker 诊断。手动发布会在独立解压目录执行首次安装，并验证真实 Studio UI、
+鉴权、两个引擎的 Profile 启动/导航/停止；脱敏运行 JSON 与 UI 截图同分发文件保存在 GitHub Release，
+不上传 Studio 日志、`data/` 或凭据。CI 的真实 Worker 诊断保存在运行日志与步骤摘要中。
+
+依赖维护采用每周 Dependabot npm / GitHub Actions PR，minor/patch 分组并限制并发 PR 数；
+Playwright 不加入普通 npm 分组，内核相关更新必须人工核对 core lock 和真实运行回归。
+不启用自动合并。CodeQL 使用独立 JS/TS 工作流，不能同时开启重复的 default setup；
+初次扫描结果需要人工分流，扫描完成不等于没有安全问题。
+
 ### Studio 产品 API
 
 Studio API 默认只监听 `127.0.0.1`，除 `/api/v1/health` 外均需认证。主要端点包括：
 
-- `/api/v1/openapi.json`：OpenAPI 3.1 入口；Profile 列表支持 `q`、`offset`、`limit`，总数返回在 `X-Total-Count`。
+- `/api/v1/openapi.json`：OpenAPI 3.1 入口；Profile 列表支持 `q`、`name`、`tag`、`country`、`engine`、`cursor`、`limit`，响应为 `{ items, nextCursor, total }`，总数同时返回在 `X-Total-Count`。
 - `/api/v1/profiles/trash`、`/profiles/{id}/restore`、`/profiles/{id}/purge`：回收站、恢复与仅 owner 可用的永久清除。
+- `/api/v1/profiles/{id}/health`：仅 manager 和 owner 可用的读写接口，维护 Profile 的健康快照。
+- `/api/v1/profiles/{id}/backups`、`/api/v1/profiles/{id}/backups/{backupId}/restore`：仅 owner 可用；备份只返回不含服务器路径的 opaque `backupId`，恢复会停止该 Profile 的活动会话并校验清单中的 Profile ID。
 - `/api/v1/team/*`：工作区、成员、资源 grants 以及只在创建时返回明文的可撤销 API Key。
 - `/api/v1/extensions`、`/extensions/import`、`/profiles/{id}/extensions`：仅 owner 可导入的受管 ZIP/XPI 仓库，以及按 Profile 分配扩展。
 - `/api/v1/migration/local-browsers`、`/migration/import-local`：仅 owner 可用的本机 Chrome、Edge、Firefox Profile 扫描与网站会话迁移。
@@ -58,7 +108,9 @@ Studio API 默认只监听 `127.0.0.1`，除 `/api/v1/health` 外均需认证。
 - `/api/v1/synchronizer/captures`：显式启停主窗口动作捕获。只同步可解析的语义目标，密码字段被排除。
 - `/api/v1/product/capabilities`、`/product/runtime-health`、`/metrics`：真实能力边界、外部云运行时适配器状态和本机运行指标。
 
-小状态文件使用同目录临时文件、`fsync`、原子替换和 `.bak` 上一版本恢复。该方案为单 Studio 进程设计，不等于支持多个进程同时写入，也不等于已经提供云数据库。云浏览器与 Android 云手机提供标准 provider 适配边界，以及经过鉴权的创建、停止和健康检查 API；未注册并配置真实供应商与凭据时，能力接口会返回未配置，不会创建模拟设备或伪造连接地址。
+受管 Profile 在安全停止时原子保存 cookies、localStorage、IndexedDB 与虚拟 WebAuthn 凭据；最新登录态还会按版本写入有界检查点。配置主密钥后，检查点和备份均使用 AES-256-GCM 认证加密；损坏的最新检查点会回退到更早的有效版本。服务端失效、验证码和站点主动登出仍会使登录态失效。
+
+小状态文件使用同目录临时文件、`fsync`、原子替换和 `.bak` 上一版本恢复。多进程写同一 Profile 时必须启用共享 Redis Profile lease；版本化登录检查点另有 CAS 冲突检测。云浏览器与 Android 云手机只提供标准 provider 适配边界，以及经过鉴权的创建、停止和健康检查 API；未注册并配置真实供应商与凭据时，能力接口会返回未配置，不会创建模拟设备或伪造连接地址。
 
 ### 本机浏览器数据导入
 
@@ -220,7 +272,7 @@ npm run acceptance:egress
   "mcpServers": {
     "compliant-firefox": {
       "command": "node",
-      "args": ["C:\\path\\to\\antigravity-browser\\dist\\index.js"],
+      "args": ["C:\\path\\to\\browser-profile-studio\\dist\\index.js"],
       "env": {
         "BROWSER_ALLOWED_HOSTS": "test.example.com",
         "BROWSER_ALLOW_PRIVATE_NETWORK": "false"
@@ -371,18 +423,28 @@ popup、原生 dialog 和 download 仍默认关闭、dismiss 或 cancel，不会
 
 ## 集群运行
 
-Master 仍是本地 stdio MCP 进程；集群模式只把任务队列放到 Redis。先启动 Redis 和 Worker：
+Master 仍是本地 stdio MCP 进程；集群模式依赖 Redis 共享任务队列、Profile lease 与节点位置（placement/CAS scope）。Worker 未配置 `WORKER_STORAGE_NAMESPACE` 时使用节点唯一的本地 namespace，不会把本地磁盘误判成共享盘。只有确实挂载同一 Profile/检查点存储、配置相同 `BROWSER_MASTER_KEY`，并显式设置相同 namespace 的 Worker 才能进行账号任务故障转移。generation fence 会拒绝旧位置任务；当前版本仍不支持正在运行的浏览器工作区热迁移。
 
 ```sh
 docker compose -f docker-compose.cluster.yml up --build
 ```
 
+## 生产环境运维 (Production Operations)
+
+- **容量释放闸口**：先执行 `npm run capacity:release -- calibrate capacity-baseline.json` 生成同机基线，再执行 `npm run capacity:release -- gate capacity-baseline.json`。闸口比较五类延迟、RSS、任务失败及隔离不变量；`high_checkpoint_failures`、`high_proxy_quarantine` 是可观测告警，**不会自动修改准入阈值**。
+- **容量闸口测试说明（2026-09-06）**：单元测试验证确定性的准入判定边界；集成测试在临时目录中运行真实 CLI 校准，并验证不一致账户计数会被闸口拒绝。测试样本不改变生产闸口的性能阈值。
+- **外置依赖限制**：仓库不内置托管 Redis Cluster、KMS、共享文件系统、生产凭据或告警通知通道；多机发布必须由运维提供这些依赖，并确保共享存储 namespace 与主密钥一致。
+- **24–72 小时浸泡**：默认 `npm run soak` 只运行 5 秒烟测。长期释放验证需显式执行 `$env:LONG_MODE='true'; $env:SOAK_DURATION_MS='86400000'; npm run soak`（最长 `259200000` 毫秒），并保存最终 NDJSON 指标。短时运行不能证明长期稳定性。
+- **登录提供方矩阵**：`npm run acceptance:login -- login-acceptance.json` 只验证授权方提供的凭据/授权标记及人工采集证据，不会登录真实站点。缺凭据、缺授权或缺证据返回 `blocked` 和退出码 2；观察失败返回退出码 1。
+- **备份与密钥轮换**：
+  - 创建与恢复：Studio API `POST /api/v1/profiles/{id}/backups` 和 `POST /api/v1/profiles/{id}/backups/{backupId}/restore`。
+  - 轮换：设置 `OLD_STUDIO_MASTER_KEY`、`NEW_STUDIO_MASTER_KEY` 和可选 `BACKUP_DIR` 后运行 `npm run rekey:backups`。脚本先校验每个文件摘要，再以内存明文、磁盘密文方式原子替换；任一文件失败即返回非零退出码。
+
 这个 compose 文件提供的是单实例 Redis 开发环境；原生 Redis Cluster 通常连接已有的托管/运维集群，不要把该 compose 的单实例地址直接当作 Cluster 启动节点。
 
-启动前必须设置 `BROWSER_ALLOWED_HOSTS`。本地 MCP 配置还需要设置 `REDIS_URL`，Worker 使用 `npm run start:worker` 对 Redis 队列进行消费。当前集群 Worker 的 HTTP 模式只支持受策略约束的 GET/HEAD；浏览器模式使用服务端受控 Firefox 会话。调高 `WORKER_CONCURRENCY` 时应同步调高 `BROWSER_MAX_SESSIONS`。
+启动 compose 前必须设置 `BROWSER_ALLOWED_HOSTS`、32 字符以上的 `CONTROL_PLANE_TOKEN` 和 16 字节以上的 `BROWSER_MASTER_KEY`；两个 Worker 共享 compose 命名卷、storage namespace 和主密钥。本地 MCP 配置还需要设置 `REDIS_URL`，Worker 使用 `npm run start:worker` 对 Redis 队列进行消费。当前集群 Worker 的 HTTP 模式只支持受策略约束的 GET/HEAD；浏览器模式使用服务端受控 Firefox 会话。调高 `WORKER_CONCURRENCY` 时应同步调高 `BROWSER_MAX_SESSIONS`。
 
-Worker 与 MCP 进程都读取相同的 `BROWSER_SESSION_TTL_MS`，浏览器-only Worker 不会
-创建控制面 Redis 连接；请在所有 Worker 上保持会话 TTL、并发和 URL 策略配置一致。
+Worker 与 MCP 进程都读取相同的 `BROWSER_SESSION_TTL_MS`。Worker 的 `SessionManager` 禁用内置队列连接，并复用 entrypoint 创建的 Redis adapter 完成任务队列、Profile lease 和 placement fencing；请在所有 Worker 上保持会话 TTL、并发和 URL 策略配置一致。
 
 适配器支持两种 Redis 形态：
 
@@ -420,9 +482,37 @@ npm test
 npm run build
 ```
 
-MCP 契约测试覆盖 `tools/list` 的精确工具集合、严格 schema、注解、输入错误、截图路径隔离和 manager stub 调用。默认集成测试使用注入 launcher，不启动真实浏览器。安装项目锁定的 Firefox 后，可运行 `npm run test:firefox`，以本机真实 Firefox 访问本地 fixture；该测试不会访问、求解或统计真实 Cloudflare/CAPTCHA 页面。
+MCP 契约测试覆盖 `tools/list` 的精确工具集合、严格 schema、注解、输入错误、截图路径隔离和 manager stub 调用。集成目录同时包含注入 launcher 的契约测试与本机真实浏览器测试；安装项目锁定的内核后运行相应真实测试。`npm run test:firefox` 使用本机 Firefox 访问本地 fixture，不会访问、求解或统计真实 Cloudflare/CAPTCHA 页面。
 
 只有 `npm run test:firefox` 在部署宿主通过后，才可把该宿主标记为 Firefox 运行时就绪。单元测试、类型检查或 fake-launcher 集成测试通过，不等价于本机 Firefox 可启动。
+
+### 指纹运行时与线上验收（2026-09-05）
+
+本次修复保留原生非自动化 `navigator.webdriver === false` 属性、跨 realm 的原生函数外观与非法 receiver 异常；不伪造插件、媒体设备或消息载荷。Canvas 采用幂等像素投影，HTML/Offscreen 读取及无损导出保持一致，并仅移除已验证的非渲染 PNG `deBG` 随机元数据以保持同种子原始导出字节稳定。Audio 保留真实采样率、静音和可写 buffer 契约；普通 WebRTC offer/设置本地描述可执行，但这不证明实际 ICE/STUN 代理出口安全。
+
+- **网络契约**：默认 `Accept-Language` 与完整 Profile 语言列表一致；显式 locale 可收窄列表。Chromium 拒绝与 Profile 冲突的显式语言头，比较语言顺序时忽略大小写并允许合法权重。地理对齐不再向所有资源强塞 HTML `Accept`、`Sec-Fetch-*` 或 `Upgrade-Insecure-Requests`；文档、脚本、样式、fetch 与 Worker 的请求语义由浏览器原生生成。Client Hints 必须在文档及实际携带它们的请求上自洽，不要求浏览器原本不发送 hints 的 Worker 请求伪造这些头。
+- **诊断边界**：缺少证据、Service Worker 未实际执行、网络出口未验证时保留 `warning`，真实不一致为 `fail`。headed 原生合成器可能有亚像素舍入，CSS viewport 检查采用 ±0.5 CSS px，有限正 DPR 采用相对 `2^-23` 容差；原始测量值仍保留，明显尺寸/比例差异不会因此放行。
+- **本地验收**：`npm run test:fingerprint-runtime` 显式启用真实内核回归，覆盖原始 Worker 身份、请求头、公开 SessionManager 子资源执行、Canvas/Audio/WebRTC 与跨 realm 契约。Firefox 执行同样的像素探针，但将不支持的严格 Worker Canvas 验收单独记录为 `NOT PASSED`，不以单元测试或页面检测通过代替。完整修复需要匹配的 Gecko 源码、首脚本 Worker bootstrap 原生补丁及 MozillaBuild/Rust/Cargo/编译工具链；本次宿主缺少这些构建前提，现有 CPU/时区补丁不能代替。
+- **线上证据**：`npm run test:benchmarks` 保存实际选项、观测历史、截图和错误。通过 `BENCHMARK_ENGINE`、`BENCHMARK_HEADLESS`、`BENCHMARK_COUNTRY`、`BENCHMARK_RESULT_TIMEOUT_MS` 等环境变量选择条件；比较前须保持 engine、headed/headless、种子、OS、地区与出口条件一致。占位零分、未完成脚本、超时或挑战不能算通过；CreepJS 百分比只是站点启发式，不是封禁概率或全局通过率。
+- **退出码与独立结论**：结果 JSON 分开记录站点 `status` 与 `runtimeAssessment`。站点通过但运行时明确不一致，仍保留站点通过并将套件判失败；`warning` 仅表示未验证，不冒充失败或一致。退出码 `0` 表示站点验收完成且无已证明的运行时失败，`1` 表示站点/运行时明确失败或执行错误，`2` 表示无明确失败但验收未完成或无可验证的二元结论。即使退出 `0`，仍须阅读未验证警告。
+
+本次证据保存在 `artifacts/fingerprint-repair-20260905/`，此前审计保留于 `artifacts/fingerprint-audit-20260905/`。本地支持项通过不代表 Firefox 原生阻塞项已修复，也不承诺第三方站点评分、挑战绕过或账号安全。
+
+### CI 跨 realm 回归修正（2026-09-06）
+
+Linux CI 的 Firefox 跨 realm 用例此前由种子生成 16 核配置，而 runner 原生 Worker 只能报告 4 核。该支持范围用例现使用明确的 2 核持久化 Profile，并逐个验证页面、iframe、Blob/URL Worker 的请求值；不修改生产配置、不按宿主静默钳制配置。不可用 WebGL renderer 按值比较，不要求 `undefined` 经 JSON 序列化后仍保留属性。真实超宿主核数探针仍报告 Worker CPU 不一致，Firefox 首脚本 Worker Canvas 仍为 **NOT PASSED**。诊断与验证证据保存在 `artifacts/ci-repair-20260906/`；本地通过不等于 GitHub CI 已通过。
+
+### CodeQL 安全修复与告警分流（2026-09-06）
+
+- **已修复 #3–#6**：IPhey、Whoer、BrowserScan、AmIUnique 的结果解析仅匹配根域或以点分隔的子域，不再把 `notiphey.com` 等前缀相似域当作目标站点。原有通过、未定与等待判据不变；这修复的是基准证据归属，不是网络授权规则。
+- **已修复 #10**：实时画面、直接交互、恢复会话三个错误响应 DTO 不再返回原始异常消息或异常字符串。公开失败契约分别保留 HTTP `500` / `SCREENSHOT_FAILED`、`500` / `INTERACTION_FAILED`、`400` / `RESUME_FAILED`，仅提供通用失败说明；客户端应依赖状态和 `code`，不依赖说明措辞。正常业务载荷（包括名为 `stack` 的字段）不被通用序列化器删改。
+- **保留 #1、#2 的上下文判定**：测试内 GET/POST 请求的绝对源固定为新建的环回服务器，浏览器标识由服务器生成；实际恶意标识请求仍到达同一环回监听器，未证明任意主机 SSRF。但若消息生产者被替换，未编码标识仍可能改变本地路径、查询或片段，不能据此宣称任意来源标识都安全。
+- **保留 #7 的数值边界**：扩展滚动参数先经 `Number` 和限幅，再被 JSON 序列化为数值或 `null`，不是把攻击者文本直接当作代码。实际函数的 VM 烟测未触发注入；这不是实际浏览器/扩展验收，也不证明所有页面操作都安全。
+- **保留 #8、#9 的摘要用途**：SnapshotHistory 的 SHA-256 用于内部省略文本变更检测，不是密码验证，公开结果不包含摘要；密码 fixture 的 `value` 被脱敏且没有目标 `text`。若内部内存中的摘要对应低熵秘密文本，仍有离线猜测风险。团队 API Key 来自 `randomBytes(32)`，其 SHA-256 验证保留 256 位随机令牌的持久化兼容性，不为扫描器改用密码慢哈希；安全性依赖随机源和令牌保密。
+- **挑战暂停竞态**：首次检测到挑战仍中止不安全输入；已经暂停后重复的页面事件不再二次中止获准的只读截图。确定性事件回归已复现旧异常并验证修复，真实 Firefox 冒烟通过；不关闭检测、不重试动作，也不改变 Worker Canvas 的 `NOT PASSED` 结论。
+- **无缓存完整扫描**：PR 首次 CodeQL 使用了上游默认 overlay 缓存和变更范围分析，其零结果不代表剩余告警清零。工作流显式关闭 overlay、独立的缓存版本匹配与 dry-run、diff-informed 查询，保留全部既有查询；新的 PR 和主分支扫描应按完整分析结果验收，而不是依赖局部零结果。
+
+十项告警的来源路径、修复前复现和运行时证据保存在 `artifacts/codeql-remediation/`。以上五项未改动的上下文相关告警可能继续出现在 CodeQL 中；本次不自动关闭告警、不排除查询或规则。局部通过不等于云端扫描清零、PR 已合并或真实浏览器验收通过；漏洞报告政策仍见 [SECURITY.md](SECURITY.md)。
 
 ## 故障排查
 

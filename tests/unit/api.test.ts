@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +32,7 @@ describe('Local REST API Server Unit Tests', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await server.stop();
     await manager.shutdown();
     await rm(tempDir, { recursive: true, force: true });
@@ -43,6 +44,34 @@ describe('Local REST API Server Unit Tests', () => {
     const json = await res.json();
     expect(json.success).toBe(true);
     expect(json.data.status).toBe('healthy');
+  });
+
+  it('keeps internal exceptions out of live-view, interaction, and resume responses', async () => {
+    const privateTrace = 'Error: secret-token at C:\\private\\browser-profile\\session.js:42:7';
+    vi.spyOn(manager, 'status').mockImplementation(() => { throw new Error(privateTrace); });
+    vi.spyOn(manager, 'dispatchDirectMouse').mockRejectedValue(privateTrace);
+    vi.spyOn(manager, 'resume').mockRejectedValue({ toString: () => privateTrace });
+    const routes = [
+      { path: 'live-view', method: 'GET', status: 500, code: 'SCREENSHOT_FAILED' },
+      { path: 'interact', method: 'POST', status: 500, code: 'INTERACTION_FAILED' },
+      { path: 'resume', method: 'POST', status: 400, code: 'RESUME_FAILED' },
+    ];
+
+    for (const route of routes) {
+      const response = await fetch(`${baseUrl}/api/v1/sessions/private-session/${route.path}`, {
+        method: route.method,
+        ...(route.method === 'POST' ? {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'mouse', humanConfirmed: true }),
+        } : {}),
+      });
+      expect(response.status).toBe(route.status);
+      const text = await response.text();
+      expect(JSON.parse(text)).toMatchObject({ success: false, code: route.code });
+      for (const secret of ['secret-token', 'browser-profile', 'session.js', '42:7']) {
+        expect.soft(text).not.toContain(secret);
+      }
+    }
   });
 
   it('should create, get, list and delete profiles via REST API', async () => {
@@ -76,8 +105,11 @@ describe('Local REST API Server Unit Tests', () => {
     // 3. List Profiles
     const listRes = await fetch(`${baseUrl}/api/v1/profiles`);
     expect(listRes.status).toBe(200);
-    const listJson = await listRes.json();
-    expect(listJson.data.some((p: any) => p.profileId === profileId)).toBe(true);
+    const listJson = await listRes.json() as {
+      data: { items: Array<{ profileId: string }>; total: number };
+    };
+    expect(listJson.data.items.some((profile) => profile.profileId === profileId)).toBe(true);
+    expect(typeof listJson.data.total).toBe('number');
 
     // 4. Proxy check
     const checkRes = await fetch(`${baseUrl}/api/v1/proxy/check`, {
@@ -128,6 +160,74 @@ describe('Local REST API Server Unit Tests', () => {
     const result = await batch.json() as { data?: unknown };
     expect(result.data).toEqual(profileIds.map((profileId) => ({ profileId, success: true })));
   });
+
+  it('does not duplicate login cookies when cloning unless explicitly requested', async () => {
+    await manager.createProfile({
+      profileId: 'clone_source',
+      name: 'Clone source',
+      initialCookies: [{ name: 'session', value: 'secret', domain: 'example.com', path: '/' }],
+    });
+
+    const isolatedResponse = await fetch(`${baseUrl}/api/v1/profiles/clone_source/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Isolated clone' }),
+    });
+    const isolated = await isolatedResponse.json() as { data?: { profileId?: unknown } };
+    if (typeof isolated.data?.profileId !== 'string') throw new Error('Clone profile ID missing');
+    await expect(manager.getStore().getCookies(isolated.data.profileId)).resolves.toEqual([]);
+
+    const sharedResponse = await fetch(`${baseUrl}/api/v1/profiles/clone_source/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Explicit cookie clone', includeCookies: true }),
+    });
+    const shared = await sharedResponse.json() as { data?: { profileId?: unknown } };
+    if (typeof shared.data?.profileId !== 'string') throw new Error('Clone profile ID missing');
+    await expect(manager.getStore().getCookies(shared.data.profileId)).resolves.toEqual([
+      { name: 'session', value: 'secret', domain: 'example.com', path: '/' },
+    ]);
+  });
+
+  it('filters profiles and follows an opaque cursor without duplicates', async () => {
+    await Promise.all([
+      manager.createProfile({ profileId: 'page_alpha', name: 'Alpha', tags: ['group-a'] }),
+      manager.createProfile({ profileId: 'page_beta', name: 'Beta', tags: ['group-b'] }),
+      manager.createProfile({ profileId: 'page_gamma', name: 'Gamma', tags: ['group-a'] }),
+    ]);
+
+    const firstResponse = await fetch(`${baseUrl}/api/v1/profiles?limit=2`);
+    const first = await firstResponse.json() as {
+      data: { items: Array<{ profileId: string }>; nextCursor: string | null; total: number };
+    };
+    expect(firstResponse.status).toBe(200);
+    expect(first.data.items).toHaveLength(2);
+    expect(first.data.total).toBe(3);
+    expect(typeof first.data.nextCursor).toBe('string');
+
+    const secondResponse = await fetch(
+      `${baseUrl}/api/v1/profiles?limit=2&cursor=${encodeURIComponent(first.data.nextCursor!)}`,
+    );
+    const second = await secondResponse.json() as {
+      data: { items: Array<{ profileId: string }>; nextCursor: string | null; total: number };
+    };
+    expect(second.data.items).toHaveLength(1);
+    expect(new Set([...first.data.items, ...second.data.items].map((profile) => profile.profileId)).size).toBe(3);
+    expect(second.data.nextCursor).toBeNull();
+
+    const filteredResponse = await fetch(`${baseUrl}/api/v1/profiles?tag=group-b`);
+    const filtered = await filteredResponse.json() as {
+      data: { items: Array<{ profileId: string }>; total: number };
+    };
+    expect(filtered.data).toEqual({
+      items: [expect.objectContaining({ profileId: 'page_beta' })],
+      total: 1,
+      nextCursor: null,
+    });
+
+    expect((await fetch(`${baseUrl}/api/v1/profiles?cursor=invalid`)).status).toBe(400);
+  });
+
   it('submits and filters distributed crawl tasks through the Studio API', async () => {
     const submit = await fetch(`${baseUrl}/api/v1/cluster/tasks`, {
       method: 'POST',

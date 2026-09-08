@@ -1,4 +1,8 @@
-import { SessionManager } from '../src/browser/session-manager.js';
+import { AccountMetrics } from '../src/operations/account-metrics.js';
+import { VersionedCheckpointStore } from '../src/profile/versioned-checkpoint-store.js';
+import { AccountHealthStore } from '../src/account/account-health-store.js';
+import { ProfileBackupService } from '../src/security/profile-backup.js';
+import { SessionManager, type SessionManagerOptions } from '../src/browser/session-manager.js';
 import { RestApiServer } from '../src/api/server.js';
 import { ProfileStore } from '../src/profile/index.js';
 import { spawn, execSync } from 'node:child_process';
@@ -84,17 +88,33 @@ async function main() {
   await profileStore.init();
   const extensionStore = new ManagedExtensionStore(join(dataDir, 'extensions'));
   await extensionStore.init();
+  const metrics = new AccountMetrics();
+  metrics.addAlertRule({ id: 'high_checkpoint_failures', metric: 'checkpoint_failures', threshold: 5, windowMs: 15 * 60 * 1000 });
+  metrics.addAlertRule({ id: 'high_proxy_quarantine', metric: 'proxy_quarantine', threshold: 10, windowMs: 15 * 60 * 1000 });
 
-  const manager = new SessionManager({
+  const checkpointStore = new VersionedCheckpointStore(join(dataDir, 'checkpoints'), { vault });
+  const accountHealthStore = new AccountHealthStore(profileStore);
+
+  const backupDir = join(dataDir, 'backups');
+  await mkdir(backupDir, { recursive: true, mode: 0o700 });
+  const backupService = new ProfileBackupService();
+
+
+  const managerOptions: SessionManagerOptions = {
     maxSessions: 32,
     persistentProfile: true,
     profileRoot: profileDir,
     artifactsRoot: artifactsDir,
     profileStore,
-    urlPolicy: urlPolicy as any,
+    urlPolicy: urlPolicy as unknown as { assertAllowed: (url: string) => boolean },
     audit,
     extensionStore,
-  });
+    accountMetrics: metrics,
+    checkpointStore,
+    checkpointIntervalMs: 60_000,
+    accountHealthStore,
+  };
+  const manager = new SessionManager(managerOptions);
   const proxyPool = new ProxyPoolStore(join(dataDir, 'proxy-pool.json'), vault);
   const rpa = new RpaService(manager, join(dataDir, 'rpa-state.json'));
   const teamAccess = new TeamAccessStore(join(dataDir, 'team-access.json'));
@@ -119,6 +139,10 @@ async function main() {
     teamAccess,
     externalRuntimes,
     extensionStore,
+    metrics,
+    backupService,
+    backupDir,
+    vault,
   });
 
   try {

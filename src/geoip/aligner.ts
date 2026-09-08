@@ -27,6 +27,9 @@ export function alignGeoEnvironment(options: GeoAlignmentOptions = {}): GeoAlign
     })
     .join(',');
 
+  // Fetch metadata, Accept and navigation-only headers are request-context
+  // dependent. Leave them to the engine rather than applying document values
+  // to every script, fetch, image and worker request in the context.
   const extraHeaders: Record<string, string> = {
     'Accept-Language': acceptLanguageHeader,
   };

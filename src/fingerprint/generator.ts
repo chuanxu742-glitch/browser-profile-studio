@@ -300,10 +300,13 @@ export function generateFingerprint(
   };
 
   // 2. Screen & Viewport Coherence
-  const screen = COMMON_RESOLUTIONS[Math.floor(rng() * COMMON_RESOLUTIONS.length)] ?? COMMON_RESOLUTIONS[0]!;
+  const resolution = COMMON_RESOLUTIONS[Math.floor(rng() * COMMON_RESOLUTIONS.length)] ?? COMMON_RESOLUTIONS[0]!;
+  // Managed virtual displays expose the entire display as the native work area.
+  // Keep browser chrome allowance in viewport, not fictitious Screen getters.
+  const screen = { ...resolution, availWidth: resolution.width, availHeight: resolution.height };
   const viewport: ViewportDimension = {
-    width: screen.availWidth,
-    height: screen.availHeight,
+    width: resolution.availWidth,
+    height: resolution.availHeight,
   };
 
   // 3. Hardware concurrency & memory
