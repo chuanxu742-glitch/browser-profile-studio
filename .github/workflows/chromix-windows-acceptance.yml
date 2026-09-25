@@ -1,0 +1,102 @@
+name: Chromix 152 Windows x64 compatibility and gated acceptance
+
+on:
+  push:
+    branches:
+      - 'chromix-acceptance/**'
+  workflow_dispatch:
+    inputs:
+      run_physical_gpu:
+        description: 'Also run strict app-profile acceptance on trusted isolated Windows x64 physical-GPU runner'
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-compatibility:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          architecture: x64
+          package-manager-cache: false
+      - name: Exercise PowerShell 5.1 installer security scenarios
+        shell: powershell
+        run: .\scripts\test-install-chromix.ps1
+      - name: Install dependencies without downloading a stock browser
+        run: npm ci --include=dev
+      - name: Install independently verified official Chromix archive in runner scratch
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Environment]::Is64BitOperatingSystem -ne $true -or [Environment]::Is64BitProcess -ne $true) { throw 'Windows x64 runner required.' }
+          if ($env:CHROMIX_INSTALL_FIXTURE_TEST) { throw 'Fixture digest overrides are forbidden in hosted acceptance.' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'chromix-download-scratch'
+          $install = Join-Path $env:RUNNER_TEMP 'chromix-install'
+          New-Item -ItemType Directory -Path $scratch, $install -ErrorAction Stop | Out-Null
+          $exe = & .\scripts\install-chromix.ps1 -ScratchDirectory $scratch -InstallRoot $install
+          if (!$? -or !(Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Pinned Chromix installation failed.' }
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "CHROMIX_EXECUTABLE_PATH=$exe`n", (New-Object System.Text.UTF8Encoding($false)))
+          Write-Output 'Verified pinned Chromix ZIP and installed full-inventory manifest; no browser launched in this step.'
+      - name: Probe actual installed browser compatibility only
+        shell: pwsh
+        run: |
+          if (!$env:CHROMIX_EXECUTABLE_PATH) { throw 'Verified Chromix executable missing.' }
+          node scripts/smoke-chromix-windows.mjs "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP/chromix-compatibility.json" compatibility-only
+          if ($LASTEXITCODE -ne 0) { throw 'Chromix direct compatibility probe failed.' }
+          $result = Get-Content "$env:RUNNER_TEMP/chromix-compatibility.json" -Raw | ConvertFrom-Json
+          if ($result.result -cne 'compatibility_only') { throw 'Hosted runner cannot report product acceptance.' }
+          Get-Content "$env:RUNNER_TEMP/chromix-compatibility.json" -Raw >> $env:GITHUB_STEP_SUMMARY
+          'Product/Profile acceptance: NOT RUN on hosted virtual-GPU runner. Physical-GPU Canvas/WebGL/WebGPU: UNVERIFIED. No production release authorized.' >> $env:GITHUB_STEP_SUMMARY
+  isolated-physical-gpu-acceptance:
+    if: inputs.run_physical_gpu == true
+    needs: hosted-compatibility
+    runs-on: [self-hosted, Windows, X64, studio-gpu, isolated]
+    timeout-minutes: 90
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          architecture: x64
+          package-manager-cache: false
+      - name: Install app dependencies without stock browser fallback
+        run: npm ci --include=dev
+      - name: Build application
+        run: npm run build
+      - name: Verify official Chromix archive and install outside user data
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Environment]::Is64BitOperatingSystem -ne $true -or [Environment]::Is64BitProcess -ne $true) { throw 'Windows x64 runner required.' }
+          if ($env:CHROMIX_INSTALL_FIXTURE_TEST) { throw 'Fixture digest overrides are forbidden in app acceptance.' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'chromix-download-scratch'
+          $install = Join-Path $env:RUNNER_TEMP 'chromix-install'
+          New-Item -ItemType Directory -Path $scratch, $install -ErrorAction Stop | Out-Null
+          $exe = & .\scripts\install-chromix.ps1 -ScratchDirectory $scratch -InstallRoot $install
+          if (!$? -or !(Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Pinned Chromix installation failed.' }
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "CHROMIX_EXECUTABLE_PATH=$exe`n", (New-Object System.Text.UTF8Encoding($false)))
+      - name: Require real Studio saved-profile native GPU admission and browser continuity
+        shell: pwsh
+        run: |
+          if (!$env:CHROMIX_EXECUTABLE_PATH) { throw 'Verified Chromix executable missing.' }
+          node scripts/smoke-chromix-windows.mjs "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP/chromix-app-acceptance.json" app-acceptance
+          if ($LASTEXITCODE -ne 0) { throw 'Strict Chromix application acceptance failed.' }
+          $result = Get-Content "$env:RUNNER_TEMP/chromix-app-acceptance.json" -Raw | ConvertFrom-Json
+          if ($result.result -cne 'passed') { throw 'Application acceptance did not pass.' }
+          Get-Content "$env:RUNNER_TEMP/chromix-app-acceptance.json" -Raw >> $env:GITHUB_STEP_SUMMARY
+          'Strict local GPU admission and loopback network/realm/storage acceptance passed; external sites, physical shader fidelity and full upstream acceptance remain unverified; no artifact published.' >> $env:GITHUB_STEP_SUMMARY
