@@ -95,7 +95,13 @@ function validateIdentity(value, label) {
 
 function assertHeaders(headers, label, userAgent) {
   assert.equal(headers['user-agent'], userAgent, `${label}: HTTP and JS user agents differ`);
-  assert.match(headers['sec-ch-ua'] ?? '', /(?:Chromium|Google Chrome)";v="152"/, `${label}: HTTP Chromium 152 UA-CH missing`);
+  assert.match(headers['sec-ch-ua'] ?? '', /(?:Chromium|Google Chrome)";v="152"/,
+    `${label}: HTTP Chromium 152 UA-CH missing; observed=${JSON.stringify({
+      userAgent: headers['user-agent'] ?? null,
+      secChUa: headers['sec-ch-ua'] ?? null,
+      platform: headers['sec-ch-ua-platform'] ?? null,
+      mobile: headers['sec-ch-ua-mobile'] ?? null,
+    })}`);
   assert.equal(headers['sec-ch-ua-platform'], '"Windows"', `${label}: HTTP UA-CH platform`);
   assert.equal(headers['sec-ch-ua-mobile'], '?0', `${label}: HTTP UA-CH mobile`);
 }
