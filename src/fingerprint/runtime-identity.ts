@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { BrowserEngineType } from './types.js';
+import type { BrowserDistribution } from '../profile/types.js';
+
 
 interface PlaywrightBrowserRegistry {
   readonly browsers?: ReadonlyArray<{ readonly name?: string; readonly browserVersion?: string }>;
@@ -18,6 +20,24 @@ const identities = loadManagedBrowserIdentities();
 /** The exact versions shipped by the pinned Playwright dependency. */
 export function managedBrowserIdentity(engine: BrowserEngineType): ManagedBrowserIdentity {
   return identities[engine];
+}
+
+export const CHROMIX_RELEASE = Object.freeze({
+  distribution: 'chromix-152' as const,
+  browserVersion: '152.0.7977.82',
+  archiveSha256: '1cfbe638212ba4d463a8c3330fcfbd8c88f9844ff6dfc0722f2c40745e0bc7f8',
+});
+
+export function distributionBrowserIdentity(
+  engine: BrowserEngineType,
+  distribution?: BrowserDistribution,
+): ManagedBrowserIdentity {
+  if (distribution === 'chromix-152') {
+    if (engine !== 'chromium') throw new Error('CHROMIX_ENGINE_MISMATCH');
+    return { engine, fullVersion: CHROMIX_RELEASE.browserVersion, majorVersion: '152' };
+  }
+  if (distribution && engine !== 'chromium') throw new Error('BROWSER_DISTRIBUTION_ENGINE_MISMATCH');
+  return managedBrowserIdentity(engine);
 }
 
 export function browserVersionFromUserAgent(userAgent: string, engine: BrowserEngineType): string | undefined {

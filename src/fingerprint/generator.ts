@@ -11,7 +11,8 @@ import type {
   GeoFingerprintConfig,
 } from './types.js';
 import { findGeoByCountryCode, findCoordinatesByTimezone } from '../geoip/database.js';
-import { managedBrowserIdentity } from './runtime-identity.js';
+import { distributionBrowserIdentity } from './runtime-identity.js';
+import type { BrowserDistribution } from '../profile/types.js';
 
 export const COMMON_GPUS: readonly {
   vendor: string;
@@ -208,6 +209,7 @@ function createSeededRandom(seed: number) {
 export interface GenerateFingerprintOptions {
   seed?: number | undefined;
   engine?: BrowserEngineType | undefined;
+  browserDistribution?: BrowserDistribution | undefined;
   os?: OSPlatform | undefined;
   countryCode?: string | undefined;
   browserVersion?: string | undefined;
@@ -216,6 +218,19 @@ export interface GenerateFingerprintOptions {
   languages?: string[] | undefined;
   latitude?: number | undefined;
   longitude?: number | undefined;
+  platformVersion?: string | undefined;
+  screen?: ScreenDimension | undefined;
+  viewport?: ViewportDimension | undefined;
+  hardwareConcurrency?: number | undefined;
+  deviceMemory?: number | undefined;
+  webgl?: WebGLFingerprint | undefined;
+  /** Persisted hardware selection, independent from WebGL rendering limits. */
+  gpu?: Pick<WebGLFingerprint, 'unmaskedVendor' | 'unmaskedRenderer'> | undefined;
+  webgpu?: WebGPUFingerprint | undefined;
+  expectedPublicIp?: string | undefined;
+  expectedWebRtcIp?: string | undefined;
+  fontAllowlist?: readonly string[] | undefined;
+  syntheticDeviceTests?: boolean | undefined;
 }
 
 export function generateFingerprint(
@@ -232,6 +247,7 @@ export function generateFingerprint(
   let explicitLanguages: string[] | undefined;
   let explicitLatitude: number | undefined;
   let explicitLongitude: number | undefined;
+  const requested = typeof seedOrOptions === 'number' ? undefined : seedOrOptions;
 
   if (typeof seedOrOptions === 'number') {
     seed = seedOrOptions;
@@ -248,8 +264,11 @@ export function generateFingerprint(
     explicitLongitude = seedOrOptions.longitude;
   }
 
-  const browserIdentity = managedBrowserIdentity(engine);
+  const browserIdentity = distributionBrowserIdentity(engine, requested?.browserDistribution);
   const browserVersion = requestedBrowserVersion ?? browserIdentity.fullVersion;
+  if (requested?.browserDistribution === 'chromix-152' && browserVersion !== browserIdentity.fullVersion) {
+    throw new Error('CHROMIX_PROFILE_VERSION_MISMATCH');
+  }
   if (!/^\d+(?:\.\d+){1,3}$/.test(browserVersion)) throw new Error('BROWSER_VERSION_INVALID');
   const browserMajorVersion = browserVersion.split('.')[0]!;
 
@@ -271,40 +290,44 @@ export function generateFingerprint(
   const defaultVendor = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : gpu.vendor;
   const defaultRenderer = (engine === 'firefox' && os !== 'macos') ? 'Mozilla' : gpu.renderer;
 
-  const webgl: WebGLFingerprint = {
-    vendor: defaultVendor,
-    renderer: defaultRenderer,
-    unmaskedVendor: gpu.unmaskedVendor,
-    unmaskedRenderer: gpu.unmaskedRenderer,
-    maxTextureSize: 16384,
-    shaderPrecision: {
-      rangeMin: 127,
-      rangeMax: 127,
-      precision: 23,
-    },
-    noiseEnabled: true,
-  };
+  if (requested?.gpu && requested.webgl
+    && (requested.gpu.unmaskedVendor !== requested.webgl.unmaskedVendor
+      || requested.gpu.unmaskedRenderer !== requested.webgl.unmaskedRenderer)) {
+    throw new Error('GPU_PROFILE_OVERRIDE_MISMATCH: conflicting WebGL and physical GPU identity');
+  }
+  const webgl: WebGLFingerprint = requested?.webgl
+    ? { ...requested.webgl, shaderPrecision: { ...requested.webgl.shaderPrecision } }
+    : {
+      vendor: defaultVendor,
+      renderer: defaultRenderer,
+      unmaskedVendor: requested?.gpu?.unmaskedVendor ?? gpu.unmaskedVendor,
+      unmaskedRenderer: requested?.gpu?.unmaskedRenderer ?? gpu.unmaskedRenderer,
+      maxTextureSize: 16384,
+      shaderPrecision: { rangeMin: 127, rangeMax: 127, precision: 23 },
+      noiseEnabled: true,
+    };
 
-  const webgpu: WebGPUFingerprint = {
+  const webgpu: WebGPUFingerprint = requested?.webgpu
+    ? { ...requested.webgpu, ...(requested.webgpu.adapterInfo ? { adapterInfo: { ...requested.webgpu.adapterInfo } } : {}) } : {
     // Firefox does not expose navigator.gpu in the managed runtime. Do not
     // advertise a capability that the selected engine cannot provide.
     supported: engine === 'chromium',
     ...(engine === 'chromium' ? {
       adapterInfo: {
-        vendor: gpu.unmaskedVendor,
-        architecture: 'common-3d',
-        device: gpu.unmaskedRenderer,
-        description: gpu.unmaskedRenderer,
+        vendor: webgl.unmaskedVendor,
+        // Unknown architecture must remain unknown until the real adapter is observed.
+        architecture: '',
+        device: webgl.unmaskedRenderer,
+        description: webgl.unmaskedRenderer,
       },
     } : {}),
   };
 
   // 2. Screen & Viewport Coherence
-  const resolution = COMMON_RESOLUTIONS[Math.floor(rng() * COMMON_RESOLUTIONS.length)] ?? COMMON_RESOLUTIONS[0]!;
-  // Managed virtual displays expose the entire display as the native work area.
-  // Keep browser chrome allowance in viewport, not fictitious Screen getters.
-  const screen = { ...resolution, availWidth: resolution.width, availHeight: resolution.height };
-  const viewport: ViewportDimension = {
+  const resolution = requested?.screen ?? COMMON_RESOLUTIONS[Math.floor(rng() * COMMON_RESOLUTIONS.length)] ?? COMMON_RESOLUTIONS[0]!;
+  const screen = { ...resolution, availWidth: requested?.screen?.availWidth ?? resolution.width,
+    availHeight: requested?.screen?.availHeight ?? resolution.height };
+  const viewport: ViewportDimension = requested?.viewport ? { ...requested.viewport } : {
     width: resolution.availWidth,
     height: resolution.availHeight,
   };
@@ -313,8 +336,8 @@ export function generateFingerprint(
   const concurrencyChoices = [4, 6, 8, 12, 16, 20, 24, 32];
   // Conservative web-exposed buckets; this is not physical RAM capacity.
   const memoryChoices = [4, 8];
-  const hardwareConcurrency = concurrencyChoices[Math.floor(rng() * concurrencyChoices.length)] ?? 8;
-  const deviceMemory = memoryChoices[Math.floor(rng() * memoryChoices.length)] ?? 16;
+  const hardwareConcurrency = requested?.hardwareConcurrency ?? concurrencyChoices[Math.floor(rng() * concurrencyChoices.length)] ?? 8;
+  const deviceMemory = requested?.deviceMemory ?? memoryChoices[Math.floor(rng() * memoryChoices.length)] ?? 8;
 
   let platform = 'Win32';
   let oscpu: string | undefined = 'Windows NT 10.0; Win64; x64';
@@ -349,7 +372,7 @@ export function generateFingerprint(
   } else {
     // Windows
     if (engine === 'chromium') {
-      userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browserMajorVersion}.0.0.0 Safari/537.36`;
+      userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${requested?.browserDistribution === 'chromix-152' ? browserVersion : `${browserMajorVersion}.0.0.0`} Safari/537.36`;
       vendor = 'Google Inc.';
       oscpu = undefined;
       buildID = undefined;
@@ -429,9 +452,12 @@ export function generateFingerprint(
     devicePixelRatio: screen.devicePixelRatio,
   };
 
-  return {
+  return freezeProfile({
     engine,
+    ...(requested?.browserDistribution ? { browserDistribution: requested.browserDistribution } : {}),
     browserVersion,
+    ...(engine === 'chromium' ? { platformVersion: requested?.platformVersion
+      ?? (os === 'windows' ? '15.0.0' : os === 'macos' ? '10.15.7' : '6.8.0') } : {}),
     os,
     userAgent,
     appVersion: userAgent.replace(/^Mozilla\//, ''),
@@ -446,14 +472,20 @@ export function generateFingerprint(
     webgl,
     webgpu,
     canvas: {
-      enabled: true,
+      enabled: requested?.browserDistribution !== 'chromix-152',
       seed: Math.floor(rng() * 65535) + 1,
     },
     audio: {
-      enabled: true,
+      enabled: requested?.browserDistribution !== 'chromix-152',
       seed: Math.floor(rng() * 65535) + 1,
     },
     webrtc: 'block_leak',
+    ...(requested?.expectedPublicIp || requested?.expectedWebRtcIp ? { network: {
+      ...(requested.expectedPublicIp ? { expectedPublicIp: requested.expectedPublicIp } : {}),
+      ...(requested.expectedWebRtcIp ? { expectedWebRtcIp: requested.expectedWebRtcIp } : {}),
+    } } : {}),
+    ...(requested?.fontAllowlist ? { fontPolicy: { allowlist: [...requested.fontAllowlist] } } : {}),
+    ...(requested?.syntheticDeviceTests ? { syntheticDeviceTests: true } : {}),
     plugins,
     stealth: {
       removeWebdriver: true,
@@ -463,5 +495,12 @@ export function generateFingerprint(
       protectToString: true,
       blockServiceWorkers: false,
     },
-  };
+  });
+}
+
+function freezeProfile<T extends object>(value: T): T {
+  for (const nested of Object.values(value)) {
+    if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freezeProfile(nested);
+  }
+  return Object.freeze(value);
 }

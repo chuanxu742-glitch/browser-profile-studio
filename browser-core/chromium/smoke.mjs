@@ -33,9 +33,12 @@ function probe() {
 const source = `const probe = ${probe.toString()}; const initial = probe();`;
 const server = createServer((request, response) => {
   response.setHeader('Cache-Control', 'no-store');
+  response.setHeader('Accept-CH', 'Sec-CH-Device-Memory, Device-Memory');
   if (request.url === '/headers') {
     response.setHeader('Content-Type', 'application/json');
-    response.end(JSON.stringify({ language: request.headers['accept-language'] }));
+    response.end(JSON.stringify({ language: request.headers['accept-language'],
+      deviceMemory: request.headers['sec-ch-device-memory'],
+      legacyDeviceMemory: request.headers['device-memory'] }));
   } else if (request.url === '/dedicated.js') {
     response.setHeader('Content-Type', 'text/javascript');
     response.end(`${source} postMessage(initial);`);
@@ -58,9 +61,9 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const report = { chromiumRevision: lock.chromiumRevision, results: [] };
 const profiles = [
   { locale: 'fr-FR', languages: ['fr-FR', 'fr'], timezone: 'Europe/Paris', cores: 3, memory: 4,
-    seed: 0, gpuVendor: 'abs-test-vendor-a', gpuRenderer: 'abs-test-renderer-a', offsets: [-60, -120] },
+    seed: 0, offsets: [-60, -120] },
   { locale: 'ja-JP', languages: ['ja-JP', 'ja'], timezone: 'Asia/Tokyo', cores: 7, memory: 8,
-    seed: 927, gpuVendor: 'abs-test-vendor-b', gpuRenderer: 'abs-test-renderer-b', offsets: [-540, -540] },
+    seed: 927, offsets: [-540, -540] },
 ];
 
 async function runProfile(profile) {
@@ -74,8 +77,6 @@ async function runProfile(profile) {
     `--abs-locale=${profile.locale}`, `--abs-languages=${profile.languages.join(',')}`,
     `--abs-timezone=${profile.timezone}`, `--abs-hardware-concurrency=${profile.cores}`,
     `--abs-device-memory=${profile.memory}`, `--abs-canvas-seed=${profile.seed}`, `--abs-audio-seed=${profile.seed}`,
-    `--abs-webgl-vendor=${profile.gpuVendor}`, `--abs-webgl-renderer=${profile.gpuRenderer}`,
-    `--abs-webgpu-vendor=${profile.gpuVendor}`, `--abs-webgpu-description=${profile.gpuRenderer}`,
     '--abs-font-allowlist=Liberation Sans,Liberation Serif,Liberation Mono,Noto Color Emoji',
     ...(process.env.ABS_CHROMIUM_NO_SANDBOX === '1' ? ['--no-sandbox'] : []), 'about:blank',
   ], { env: { ...process.env, TZ: 'UTC', LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -145,6 +146,8 @@ async function runProfile(profile) {
     }
     const headers = await page.evaluate(async () => (await fetch('/headers')).json());
     assert.equal(headers.language.split(',')[0], profile.locale);
+    assert.equal(headers.deviceMemory, String(profile.memory), 'Sec-CH-Device-Memory must match all realms');
+    assert.equal(headers.legacyDeviceMemory, String(profile.memory), 'Device-Memory must match all realms');
     const session = await context.newCDPSession(page);
     await session.send('Emulation.setTimezoneOverride', { timezoneId: 'America/New_York' });
     assert.equal((await page.evaluate(probe)).timezone, 'America/New_York');
@@ -173,12 +176,19 @@ try {
     'Different seeds must change rendered Audio samples');
   for (const kind of ['webgl', 'webgl2', 'webgpu']) {
     const a = report.results[0].rendering.gpu[kind], b = report.results[1].rendering.gpu[kind];
-    if (!a.skipped && !b.skipped) assert.equal(a.maxTexture, b.maxTexture, 'Metadata must not alter real GPU limits');
+    if (!a.skipped && !b.skipped) {
+      assert.equal(a.maxTexture, b.maxTexture, 'Profiles must not alter real GPU limits');
+      for (const field of kind === 'webgpu'
+        ? ['vendor', 'architecture', 'device', 'description', 'fallback']
+        : ['vendor', 'renderer']) {
+        assert.equal(a[field], b[field], 'Profiles must not invent different physical GPU identities');
+      }
+    }
   }
   if (process.env.ABS_CHROMIUM_SMOKE_REPORT) {
     await writeFile(process.env.ABS_CHROMIUM_SMOKE_REPORT, JSON.stringify(report, null, 2) + '\n');
   }
-  console.log('PASS: native realms, Canvas/Audio read paths, available GPU metadata, fonts and CDP restore. Check report for unavailable GPU backends.');
+  console.log('PASS: native realms, opted-in device-memory hints, Canvas/Audio read paths, GPU observation only (not adapter parity), fonts and CDP restore. Inspect report for unavailable or software GPU backends.');
 } finally {
   await new Promise(resolve => server.close(resolve));
 }

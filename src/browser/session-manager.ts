@@ -1,3 +1,4 @@
+import { dirname } from 'node:path';
 import type { VersionedCheckpointStore } from '../profile/versioned-checkpoint-store.js';
 import type { AccountHealthStore } from '../account/account-health-store.js';
 import { AccountHealth, AccountHealthState, type AccountHealthSnapshot } from '../account/account-health.js';
@@ -41,8 +42,10 @@ import {
 } from '../profile/index.js';
 import { normalizeProxyConfig, checkProxy, type ProxyConfig, type ProxyCheckResult } from '../proxy/index.js';
 import { alignGeoEnvironment, type GeoAlignmentOptions } from '../geoip/index.js';
-import { generateFingerprint, managedBrowserIdentity, type FingerprintConfig, type UnifiedFingerprintProfile } from '../fingerprint/index.js';
+import { assertNativeGpuIdentity, discoverNativeChromiumGpu, generateFingerprint, managedBrowserIdentity, type FingerprintConfig, type UnifiedFingerprintProfile } from '../fingerprint/index.js';
 import type { ManagedExtensionStore } from '../extension/managed-extension-store.js';
+import { CHROMIX_RELEASE } from '../fingerprint/runtime-identity.js';
+import type { BrowserDistribution } from '../profile/types.js';
 
 export interface SessionManagerOptions extends Omit<BrowserSessionOptions, 'sessionId' | 'automationPolicy'> {
   maxSessions?: number;
@@ -60,6 +63,8 @@ export interface SessionManagerOptions extends Omit<BrowserSessionOptions, 'sess
   /** Injectable wall clock and timer primitives for deterministic lifecycle tests. */
   clock?: SessionManagerClock;
   sessionFactory?: (options: BrowserSessionOptions) => BrowserSession;
+  /** Trusted probe seam for an otherwise unavailable native GPU during isolated persistence tests. */
+  nativeGpuDiscovery?: typeof discoverNativeChromiumGpu;
   profileStore?: ProfileStore;
   extensionStore?: ManagedExtensionStore;
   checkpointStore?: VersionedCheckpointStore;
@@ -84,7 +89,7 @@ export interface SessionManagerClock {
 
 export type SessionStartOptions = Pick<
   BrowserSessionOptions,
-  'headless' | 'runtimeMode' | 'viewport' | 'profileName' | 'inputProfile' | 'seed' | 'engine' | 'cdpEndpoint'
+  'headless' | 'runtimeMode' | 'viewport' | 'profileName' | 'inputProfile' | 'seed' | 'engine' | 'browserDistribution' | 'cdpEndpoint'
 > & {
   workspaceName?: string;
   workspaceRetention?: WorkspaceRetention;
@@ -137,6 +142,9 @@ export interface BrowserCapabilities {
   privateNetworkEnabled: boolean;
   forbiddenCapabilities: readonly string[];
   managedBrowserVersions: Readonly<Record<'firefox' | 'chromium', string>>;
+  browserDistributions: Readonly<Record<'playwright-stock' | 'project-native-151' | 'chromix-152', string>>;
+  chromixFingerprintFlags: { readonly releasedSourceRevision: string; readonly runtimeAcceptance: 'unverified' };
+  serviceWorkerFingerprintInjectionByDistribution: Readonly<Record<BrowserDistribution, boolean>>;
   serviceWorkerFingerprintInjectionByEngine: Readonly<Record<'firefox' | 'chromium', boolean>>;
   workerBootstrapByEngine: Readonly<Record<'firefox' | 'chromium', boolean>>;
 }
@@ -319,6 +327,16 @@ export class SessionManager {
 
   /** Create and launch one isolated persistent Firefox context and workspace. */
   public async start(options: SessionStartOptions = {}): Promise<BrowserSession> {
+    if (options.profileId) {
+      const profile = await this.profileStore.getProfile(options.profileId);
+      if (profile?.browserDistribution === 'chromix-152') {
+        return this.profileStore.withChromixIdentityAdmission(options.profileId, () => this.startUnlocked(options));
+      }
+    }
+    return this.startUnlocked(options);
+  }
+
+  private async startUnlocked(options: SessionStartOptions): Promise<BrowserSession> {
     if (this.sessions.size >= this.maxSessions) {
       throw new BrowserSessionError('RESOURCE_EXHAUSTED', 'Maximum concurrent browser sessions reached', { retryable: true });
     }
@@ -332,6 +350,7 @@ export class SessionManager {
     let geoLocale = options.locale ?? this.options.locale;
     let geoLoc = options.geolocation ?? this.options.geolocation;
     let effectiveEngine = options.engine ?? this.options.engine;
+    let effectiveDistribution = options.browserDistribution ?? this.options.browserDistribution;
     let effectiveUserAgent = options.userAgent ?? this.options.userAgent;
     let effectiveFingerprint: FingerprintConfig | boolean | undefined = options.fingerprint ?? this.options.fingerprint;
     let effectiveFingerprintSeed = options.fingerprintSeed ?? this.options.fingerprintSeed;
@@ -346,6 +365,21 @@ export class SessionManager {
       if (!profileMeta) {
         throw new BrowserSessionError('SESSION_NOT_FOUND', `Profile with ID "${options.profileId}" not found.`);
       }
+      if (options.engine !== undefined && options.engine !== (profileMeta.engine ?? 'firefox')
+        || options.browserDistribution !== undefined && options.browserDistribution !== profileMeta.browserDistribution) {
+        throw new BrowserSessionError('INVALID_ARGUMENT', 'Saved profile engine and distribution cannot be overridden');
+      }
+      if (profileMeta.browserDistribution === 'chromix-152'
+        && (options.fingerprint === false || typeof options.fingerprint === 'object'
+          || options.fingerprintSeed !== undefined || options.seed !== undefined || options.userAgent !== undefined
+          || options.cdpEndpoint !== undefined || options.viewport !== undefined
+          || options.countryCode !== undefined || options.timezone !== undefined
+          || options.locale !== undefined || options.geolocation !== undefined)) {
+        throw new BrowserSessionError('INVALID_ARGUMENT', 'Chromix saved profile identity cannot be overridden');
+      }
+      effectiveEngine = profileMeta.engine ?? 'firefox';
+      effectiveDistribution = profileMeta.browserDistribution;
+      if (effectiveDistribution === 'chromix-152') effectiveFingerprint = true;
       if (this.options.accountHealthStore) {
         initialAccountHealth = await this.options.accountHealthStore.getHealth(profileMeta.profileId);
         const health = new AccountHealth(() => this.readNow(), initialAccountHealth ?? undefined);
@@ -364,7 +398,12 @@ export class SessionManager {
       if (!effectiveProxy && profileMeta.proxy) {
         effectiveProxy = profileMeta.proxy;
       }
-      if (profileMeta.geo) {
+      if (profileMeta.browserDistribution === 'chromix-152') {
+        geoCountry = profileMeta.geo?.countryCode;
+        geoTimezone = profileMeta.geo?.timezone;
+        geoLocale = profileMeta.geo?.locale;
+        geoLoc = profileMeta.geo?.geolocation;
+      } else if (profileMeta.geo) {
         if (!geoCountry && profileMeta.geo.countryCode) geoCountry = profileMeta.geo.countryCode;
         if (!geoTimezone && profileMeta.geo.timezone) geoTimezone = profileMeta.geo.timezone;
         if (!geoLocale && profileMeta.geo.locale) geoLocale = profileMeta.geo.locale;
@@ -377,7 +416,9 @@ export class SessionManager {
         effectiveUserAgent = profileMeta.userAgent;
       }
       savedProfile = profileMeta;
-      effectiveFingerprintSeed ??= profileMeta.fingerprint?.seed ?? stableProfileSeed(profileMeta.profileId);
+      effectiveFingerprintSeed = profileMeta.browserDistribution === 'chromix-152'
+        ? profileMeta.fingerprint?.seed ?? stableProfileSeed(profileMeta.profileId)
+        : effectiveFingerprintSeed ?? profileMeta.fingerprint?.seed ?? stableProfileSeed(profileMeta.profileId);
       initialCookies = await this.profileStore.getCookies(profileMeta.profileId);
       initialStorageState = await this.profileStore.getStorageState(profileMeta.profileId);
       if (this.options.checkpointStore) {
@@ -398,12 +439,48 @@ export class SessionManager {
         this.options.accountMetrics?.increment('login_restore', {});
       }
     }
+    if (effectiveDistribution === 'chromix-152' && effectiveEngine !== 'chromium') {
+      throw new BrowserSessionError('INVALID_ARGUMENT', 'Chromix distribution requires Chromium');
+    }
+    if (effectiveDistribution === 'chromix-152' && (options.cdpEndpoint || effectiveUserAgent)) {
+      throw new BrowserSessionError('INVALID_ARGUMENT', 'Chromix requires its own managed native identity, not CDP attachment or User-Agent override');
+    }
+    if (effectiveDistribution === 'chromix-152') effectiveFingerprint ??= true;
+
+    if ((process.env.ABS_REQUIRE_NATIVE_CHROMIUM === '1' || effectiveDistribution === 'chromix-152') && effectiveFingerprint
+      && (effectiveEngine ?? savedProfile?.engine ?? this.options.engine) === 'chromium') {
+      if (process.platform !== 'win32'
+        || (savedProfile?.fingerprint?.os && savedProfile.fingerprint.os !== 'windows')
+        || (typeof effectiveFingerprint === 'object' && effectiveFingerprint.os !== 'windows')) {
+        throw new BrowserSessionError('INVALID_ARGUMENT', 'Native release persona requires Windows GPU identity');
+      }
+      const requestedGpu = typeof effectiveFingerprint === 'object'
+        ? effectiveFingerprint.webgl : savedProfile?.fingerprint?.gpu;
+      const observedGpu = await (this.options.nativeGpuDiscovery ?? discoverNativeChromiumGpu)(
+        options.headless ?? this.options.headless ?? false, requestedGpu, effectiveDistribution,
+      );
+      if (typeof effectiveFingerprint === 'object') {
+        assertNativeGpuIdentity(observedGpu, effectiveFingerprint.webgl);
+      } else if (savedProfile?.fingerprint?.gpu) {
+        assertNativeGpuIdentity(observedGpu, savedProfile.fingerprint.gpu);
+      } else if (savedProfile) {
+        savedProfile = await this.profileStore.saveDetectedGpu(savedProfile.profileId, observedGpu);
+      } else {
+        effectiveFingerprint = generateFingerprint({
+          seed: effectiveFingerprintSeed ?? options.seed,
+          engine: 'chromium', os: 'windows', ...(geoCountry ? { countryCode: geoCountry } : {}),
+          browserDistribution: effectiveDistribution,
+          gpu: observedGpu,
+        });
+      }
+    }
 
     if (effectiveFingerprint === true && savedProfile) {
       effectiveFingerprint = fingerprintForSavedProfile(
         savedProfile,
         effectiveFingerprintSeed ?? stableProfileSeed(savedProfile.profileId),
         effectiveEngine ?? savedProfile.engine ?? 'firefox',
+        effectiveDistribution,
         geoCountry ?? savedProfile.geo?.countryCode,
       );
     }
@@ -447,14 +524,18 @@ export class SessionManager {
     // Construct an explicit allowlist of per-session fields. Policy, audit,
     // launcher, detector, scheduler and server-owned roots always come from
     // the manager and cannot be replaced by a session caller.
+    const { browserDistribution: _configuredDistribution, ...configuredSessionOptions } = this.options;
     const merged: BrowserSessionOptions = {
-      ...this.options,
+      ...configuredSessionOptions,
+      ...(savedProfile?.browserDistribution === 'chromix-152'
+        ? { profileRoot: dirname(this.profileStore.getProfileDir(savedProfile.profileId)) } : {}),
       automationPolicy: this.automationPolicy,
       ...(options.headless !== undefined ? { headless: options.headless } : {}),
       ...(options.runtimeMode !== undefined ? { runtimeMode: options.runtimeMode } : {}),
       ...(options.viewport !== undefined ? { viewport: options.viewport } : {}),
       ...(effectiveProfileName !== undefined ? { profileName: effectiveProfileName } : {}),
       persistentProfile: persistBrowserProfile,
+      ...(effectiveDistribution !== undefined ? { browserDistribution: effectiveDistribution } : {}),
       ...(effectiveEngine !== undefined ? { engine: effectiveEngine } : {}),
       ...(options.cdpEndpoint !== undefined ? { cdpEndpoint: options.cdpEndpoint } : {}),
       ...(options.inputProfile !== undefined ? { inputProfile: options.inputProfile } : {}),
@@ -541,6 +622,9 @@ export class SessionManager {
     if (options.profileId) this.profileIdBySession.set(session.sessionId, options.profileId);
     try {
       await session.start();
+      if (savedProfile?.browserDistribution === 'chromix-152') {
+        await this.profileStore.commitChromixIdentity(savedProfile.profileId);
+      }
       if (options.profileId) {
         if (this.options.accountHealthStore && initialAccountHealth === null) {
           await this.options.accountHealthStore.setHealth(
@@ -668,6 +752,18 @@ export class SessionManager {
       managedBrowserVersions: {
         firefox: managedBrowserIdentity('firefox').fullVersion,
         chromium: managedBrowserIdentity('chromium').fullVersion,
+      },
+      browserDistributions: {
+        'playwright-stock': managedBrowserIdentity('chromium').fullVersion,
+        'project-native-151': managedBrowserIdentity('chromium').fullVersion,
+        'chromix-152': CHROMIX_RELEASE.browserVersion,
+      },
+      chromixFingerprintFlags: {
+        releasedSourceRevision: '93c8511ab187b97395a0a5b4160a47e7b7e412c3',
+        runtimeAcceptance: 'unverified',
+      },
+      serviceWorkerFingerprintInjectionByDistribution: {
+        'playwright-stock': true, 'project-native-151': true, 'chromix-152': false,
       },
       serviceWorkerFingerprintInjectionByEngine: { firefox: false, chromium: true },
       workerBootstrapByEngine: { firefox: false, chromium: true },
@@ -1311,13 +1407,16 @@ function fingerprintForSavedProfile(
   profile: ProfileMetadata,
   seed: number,
   engine: 'firefox' | 'chromium',
+  distribution?: BrowserDistribution,
   countryCode?: string,
 ): UnifiedFingerprintProfile {
   const settings = profile.fingerprint;
   const generated = generateFingerprint({
     seed,
     engine,
+    ...(distribution !== undefined ? { browserDistribution: distribution } : {}),
     ...(settings?.os !== undefined ? { os: settings.os } : {}),
+    ...(settings?.gpu ? { gpu: settings.gpu } : {}),
     ...(countryCode !== undefined ? { countryCode } : {}),
   });
   const screenSettings = settings?.screen;

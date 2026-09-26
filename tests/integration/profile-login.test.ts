@@ -1,22 +1,33 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProfileStore } from '../../src/profile/profile-store.js';
 import { SecretVault } from '../../src/security/secret-vault.js';
-import { BrowserSession } from '../../src/browser/browser-session.js';
+import { SessionManager } from '../../src/browser/session-manager.js';
+import { RestApiServer } from '../../src/api/server.js';
 import type { BrowserStorageState } from '../../src/profile/types.js';
 
 describe('Durable Saved-Account Login State', () => {
   let tempDir: string;
+  let manager: SessionManager | undefined;
+  let api: RestApiServer | undefined;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'profile-login-test-'));
   });
 
   afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
-  });
+    try {
+      await api?.stop();
+    } finally {
+      try {
+        await manager?.shutdown();
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }
+  }, 60_000);
 
   it('restores and atomically checkpoints storage state, with encryption and corrupt-primary backup recovery', async () => {
     const vault = new SecretVault('0123456789abcdef0123456789abcdef');
@@ -61,24 +72,101 @@ describe('Durable Saved-Account Login State', () => {
     expect(recovered?.cookies[0]?.name).toBe('test_cookie');
     if (!recovered) throw new Error('Expected backup storage state');
 
-    // A real browser restart restores and checkpoints the state.
-    let resolvePersisted!: (state: BrowserStorageState) => void;
-    const persisted = new Promise<BrowserStorageState>((resolve) => {
-      resolvePersisted = resolve;
-    });
-    const session1 = new BrowserSession({
-      sessionId: 'ses_test1234',
+    // REST and the real manager own the persistent Firefox profile and checkpoint.
+    manager = new SessionManager({
+      cluster: false,
       profileRoot: tempDir,
-      profileName: 'prof1',
-      persistentProfile: false,
-      initialStorageState: recovered,
-      onStorageStatePersist: resolvePersisted,
+      artifactsRoot: join(tempDir, 'artifacts'),
+      profileStore: store,
+    });
+    api = new RestApiServer(manager, { port: 0, host: '127.0.0.1' });
+    const { host, port } = await api.start();
+    const endpoint = `http://${host}:${port}/api/v1/profiles/prof1`;
+    const start = async (): Promise<string> => {
+      const response = await fetch(`${endpoint}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ headless: true }),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json() as { data: { sessionId: string; state: string } };
+      expect(result.data.state).toBe('READY');
+      return result.data.sessionId;
+    };
+    const stop = async (): Promise<void> => {
+      const response = await fetch(`${endpoint}/stop`, { method: 'POST' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ data: { stopped: true, profileId: 'prof1' } });
+    };
+    const firstSessionId = await start();
+    expect(manager.get(firstSessionId).profileDirectory).toBe(store.getProfileDir('prof1'));
+    expect(manager.get(firstSessionId).status().profilePersistent).toBe(true);
+    await stop();
+    await access(store.getProfileDir('prof1'));
+
+    const checkpoint = await store.getStorageState('prof1');
+    expect(checkpoint?.cookies).toContainEqual(expect.objectContaining({
+      name: 'test_cookie',
+      value: 'secret_val',
+    }));
+    expect(checkpoint?.origins).toContainEqual(expect.objectContaining({
+      origin: 'https://example.com',
+      localStorage: [{ name: 'test_ls', value: 'ls_val' }],
+    }));
+    const encryptedCheckpoint = await readFile(statePath, 'utf8');
+    expect(encryptedCheckpoint.startsWith('enc:v1:')).toBe(true);
+    expect(encryptedCheckpoint).not.toContain('secret_val');
+
+    // A fresh browser process reopens the same persistent profile via REST.
+    const secondSessionId = await start();
+    expect(secondSessionId).not.toBe(firstSessionId);
+    expect(manager.get(secondSessionId).profileDirectory).toBe(store.getProfileDir('prof1'));
+    await stop();
+    const restarted = await store.getStorageState('prof1');
+    expect(restarted?.cookies).toContainEqual(expect.objectContaining({
+      name: 'test_cookie',
+      value: 'secret_val',
+    }));
+    expect(restarted?.origins).toContainEqual(expect.objectContaining({
+      origin: 'https://example.com',
+      localStorage: [{ name: 'test_ls', value: 'ls_val' }],
+    }));
+  }, 60_000);
+
+  it('reports a failed checkpoint and releases the persistent browser for restart', async () => {
+    const store = new ProfileStore(tempDir);
+    await store.createProfile({ profileId: 'prof1', name: 'Profile 1' });
+    manager = new SessionManager({
+      cluster: false,
+      profileRoot: tempDir,
+      artifactsRoot: join(tempDir, 'artifacts'),
+      profileStore: store,
+    });
+    api = new RestApiServer(manager, { port: 0, host: '127.0.0.1' });
+    const { host, port } = await api.start();
+    const endpoint = `http://${host}:${port}/api/v1/profiles/prof1`;
+    const start = () => fetch(`${endpoint}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ headless: true }),
     });
 
-    await session1.start();
-    await session1.stop();
+    const first = await start();
+    expect(first.status).toBe(200);
+    const firstSessionId = (await first.json() as { data: { sessionId: string } }).data.sessionId;
+    vi.spyOn(store, 'saveStorageState').mockRejectedValueOnce(new Error('checkpoint write failed'));
+    const failedStop = await fetch(`${endpoint}/stop`, { method: 'POST' });
+    expect(failedStop.status).toBe(500);
+    expect(await failedStop.json()).toMatchObject({ success: false, code: 'INTERNAL' });
+    expect(manager.size).toBe(0);
 
-    const persistedState = await persisted;
-    expect(persistedState.cookies.find((cookie) => cookie.name === 'test_cookie')).toBeDefined();
-  }, 30_000);
+    const second = await start();
+    expect(second.status).toBe(200);
+    const secondSessionId = (await second.json() as { data: { sessionId: string } }).data.sessionId;
+    expect(secondSessionId).not.toBe(firstSessionId);
+    expect(manager.get(secondSessionId).profileDirectory).toBe(store.getProfileDir('prof1'));
+    const stopped = await fetch(`${endpoint}/stop`, { method: 'POST' });
+    expect(stopped.status).toBe(200);
+    await access(store.getStorageStatePath('prof1'));
+  }, 60_000);
 });

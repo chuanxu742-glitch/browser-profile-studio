@@ -1,6 +1,6 @@
 # Chromium 原生内核
 
-状态：此前约定的语言、时区、硬件以及剩余六类渲染表面已完成源码实现与启动器接入。**按用户要求，本轮只做源码校验、静态检查和轻量单元测试，不执行 Chromium 编译、原生二进制运行或 Docker 构建。** 常规启动仍使用 Playwright 管理的 Chromium；只有显式配置自编译路径才启用新内核。源码检查通过不代表 C++ 已编译或行为已经过原生运行验证。
+状态：固定 Chromium 151 源码与两枚 `--abs-*` 补丁的 Linux、Windows x64 准备/构建/打包入口已实现；**尚无本仓 Windows 原生二进制编译或实机运行通过的证据**。源码校验和模拟目录的打包测试不等于 C++ 编译通过。常规启动仍使用 Playwright 管理的 Chromium；仅显式配置并通过来源校验的自编译可执行文件才启用此内核。
 
 源码固定为 Chromium `151.0.7922.34` / `782af9cb30a53f54487e5d2e44738645a8ec457c`，与本项目 Playwright `1.62.1` 的浏览器版本一致。源码、depot_tools 和补丁哈希见 [core.lock.json](core.lock.json)。
 
@@ -14,7 +14,7 @@
 | `--abs-locale=fr-FR` | Renderer 初始化 Blink 前设置 ICU 默认 locale，避免在 Worker 的 navigator getter 中修改进程全局 ICU 状态 |
 | `--abs-timezone=Europe/Paris` | `TimeZoneController` 初始化基准时区，宿主时区通知不覆盖它；CDP 时区覆盖清除后恢复该基准 |
 | `--abs-hardware-concurrency=3` | `NavigatorConcurrentHardware` 共用原生 getter，整数范围 1–256，不修改真实线程调度或物理核心数 |
-| `--abs-device-memory=4` | Window/Worker 共用的 `NavigatorDeviceMemory`；精确接受配置桶，不将错误输入四舍五入成另一种配置 |
+| `--abs-device-memory=4` | Blink common 的单一进程级桶供 Window/Worker getter 与浏览器生成的 `Sec-CH-Device-Memory`、旧版 `Device-Memory` 请求头共用；只接受 0.25、0.5、1、2、4、8，不将错误输入四舍五入 |
 | `--abs-canvas-seed=0` | 共用像素变换用于 getImageData、toDataURL、toBlob 和 OffscreenCanvas.convertToBlob；绝对坐标、RGBA/BGRA 顺序、行跨度一致，导出时只改私有副本 |
 | `--abs-audio-seed=0` | 离线渲染完成、事件和 Promise 暴露之前变换一次；Analyser 的 byte/float 输出共用变换，保留静音、特殊浮点值和应用自己创建的可写 Buffer |
 | `--abs-webgl-vendor` / `--abs-webgl-renderer` | WebGL1/2 共用原生查询路径，保留 debug extension 权限与错误处理；真实 limits、extensions、shader precision 不被虚构数值覆盖 |
@@ -22,13 +22,13 @@
 | `--abs-webgpu-disabled=1` | requestAdapter 原生返回 null；不把 API 是否存在与设备是否可用混为一谈 |
 | `--abs-font-allowlist` | 字体缓存查找前限制原生 family 和 local() 请求；保留通用字体、下载字体与缺字 fallback，不捆绑未授权商业字体 |
 
-浏览器进程向所有 Renderer 传递这些参数，包括跨站 iframe 与 Worker 使用的进程。无参数时保留上游行为。语言列表明确配置时不缩减到首项。HTTP 请求头沿用 Chromium 的 `--accept-lang` 和现有 CDP 设置，不伪称为新增网络内核补丁。
+浏览器进程向所有 Renderer 传递这些参数，包括跨站 iframe 与 Worker 使用的进程。无参数时保留上游行为。语言列表明确配置时不缩减到首项。HTTP 语言头沿用 Chromium 的 `--accept-lang` 和现有 CDP 设置；设备内存 Client Hint 仅在 Chromium 原有的安全上下文、服务端 `Accept-CH` 和权限策略允许发送时采用上述共同值，不增加头的发送范围，也不修改 TLS、代理或其它请求指纹。
 
 配置是**进程级且启动后固定**，不是每个 BrowserContext 一份；不同原生身份要启动不同浏览器实例。启动器会为受管指纹脚本选择原生模式，页面、iframe 和 Worker 不再叠加上述表面的 JS 覆盖，Studio 后续注册脚本也保持同一模式。调用方自己的 initScript 保留原样；屏幕、UA、WebRTC 等已有兼容逻辑仍沿用现有路径。
 
 Canvas 变换针对 8 位 RGB 不透明像素，保留 alpha、半透明像素、HDR/float16、精确黑白通道；重复处理同一内容不会累积扰动。这里提供的是读取/导出层的像素策略，不改变实际 GPU 渲染器，也不宣称覆盖 WebGL PBO、WebGPU buffer 等所有读回途径。Audio 只改低两位有效尾数，保留其余浮点位；离线输出和实时分析采用不同的接入点，避免读 getter 时修改仍在渲染的缓冲区。
 
-Linux 启动器默认字体列表是 `Liberation Sans,Liberation Serif,Liberation Mono,Noto Color Emoji`。可通过环境变量 `ABS_CHROMIUM_FONT_ALLOWLIST` 设置逗号分隔的 ASCII 字体 family/face 名；这些字体仍必须实际安装。这个策略限制显式字体查找，不模拟另一套字体字形，也不关闭本地字体访问 API 的权限流程。
+字体默认不限制（Linux 和 Windows 均如此）。只有 Profile 显式指定 `fontPolicy.allowlist` 或设置 `ABS_CHROMIUM_FONT_ALLOWLIST` 才传 `--abs-font-allowlist`，环境变量优先；所选字体仍必须实际安装。此策略限制显式字体查找，不模拟另一套字体字形，也不关闭本地字体访问 API 的权限流程。
 
 ## 本地轻量验证
 
@@ -39,11 +39,15 @@ node --check browser-core/chromium/smoke.mjs
 node --check browser-core/chromium/rendering-probe.mjs
 ```
 
-`check` 只下载 16 个修改点的上游文件，验证 SHA-256 后按顺序应用两个补丁；新 helper 和 C++ 测试文件由补丁提供，不下载完整 Chromium。它不能证明 C++ 编译通过。
+`check` 只下载锁文件列出的修改点上游文件，验证 SHA-256 后按顺序应用两枚补丁；新 helper 和 C++ 测试文件由补丁提供，不下载完整 Chromium。它不能证明 C++ 编译通过。
 
-日后编译后，`smoke.mjs` 通过原始浏览器进程和 Playwright CDP 连接读取主页面、跨站 iframe、Dedicated/Shared/Service Worker 的原生值，不设置 context locale/timezone，也不注入兼容脚本。扩展的 `rendering-probe.mjs` 检查 Canvas 多条读取/PNG 导出路径、子矩形、透明像素、Audio 重复读取/事件/Promise/copyFromChannel、字体查找以及可用 GPU 的身份和错误语义。两份 seed 的输出必须不同，真实 GPU limits 不随身份改变；没有 GPU backend 时会在报告中明确标记跳过，不能将其计为 GPU 通过。本轮未执行这些需要新内核的测试。
+编译后，`smoke.mjs` 通过原始浏览器进程和 Playwright CDP 连接读取主页面、跨站 iframe、Dedicated/Shared/Service Worker 的原生值，不设置 context locale/timezone，也不注入兼容脚本。它还用本机 HTTP 服务的 `Accept-CH` 协商检验两种设备内存请求头与各 realm 一致。扩展的 `rendering-probe.mjs` 检查 Canvas 多条读取/PNG 导出路径、子矩形、透明像素、Audio 重复读取/事件/Promise/copyFromChannel、字体查找以及可用 GPU 的原始身份、limits 与错误语义。两份 seed 的输出必须不同；测试不注入虚构 GPU 厂商/型号，比较两份身份下真实 GPU 信息是否稳定。没有 GPU backend 时会在报告中明确标记跳过，不能将其计为 GPU 通过；实际适配器匹配仍须另行核验。Windows 原生构建/运行仍待有资质的构建机执行。
 
 补丁内还加入了 `AbsProfileTest.*` 原生单元测试，覆盖 seed=0、非法 seed、音频幂等/有限扰动/特殊浮点值，以及像素坐标、字节顺序、alpha、padding 和副本所有权。这些 C++ 测试源码已加入 GN，留待日后编译执行。
+
+### 原生覆盖边界
+
+本补丁没有原生语音列表或屏幕几何模拟：`speechSynthesis.getVoices()` 受系统安装语音、异步枚举和语音服务影响；`screen`、`window` 尺寸及 CSS 媒体查询同时受显示设备与窗口/视口状态影响，单独改 JS getter 不能构成一致的显示器模拟。已有启动器/Playwright 层行为不等于原生覆盖，需在实际 Windows 构建上分别核验；无新增语音或屏幕 flag。WebGL/WebGPU 字符串修改不更换物理 GPU、驱动、功能集或 Widevine/CDM；只有主机实测适配器与所选身份相符时才可宣称 GPU 身份一致。未覆盖所有 Canvas/WebGPU 读取路径、WebRTC/媒体设备、TLS/HTTP2、扩展或安全限制，更不改变 Chromium 151 为 Chrome 153。静态补丁应用与源码单测不能替代 Windows C++ 编译及原生浏览器/CDP+HTTP 实测。
 
 ## GitHub 编译
 
@@ -101,6 +105,30 @@ const browser = await chromium.connectOverCDP('http://127.0.0.1:9222', {
 });
 const page = await browser.contexts()[0].newPage();
 await page.goto('https://example.com');
+```
+
+## Windows x64 手动构建及 CI 验收
+
+采用与 Linux 相同的 `core.lock.json`、两枚本仓补丁和 `args.gn`；不使用 Chromix 152 或下载的预编译 Chromium 代替本仓编译。遵循[锁定版本 Chromium 官方 Windows 指南](https://chromium.googlesource.com/chromium/src/+/782af9cb30a53f54487e5d2e44738645a8ec457c/docs/windows_build_instructions.md)：Windows 10+ x64、NTFS 无空格的短工作目录、Git、Python 3.11+、Visual Studio 2026 Desktop development with C++ 和 MFC/ATL、Windows SDK 10.0.26100.7705 及 SDK Debugging Tools >=10.0.26100.3323。源码同步前脚本要求至少 150 GiB 空闲；建议专用 16 核/64 GiB RAM、300 GiB 以上磁盘。`depot_tools` 由脚本获取并固定到锁定提交，在 PATH 首位运行；脚本设置 `DEPOT_TOOLS_WIN_TOOLCHAIN=0` 使用本机安装的 Visual Studio。必要时在构建机配置 `vs2026_install` 指向实际安装位置。不要把 Linux/WSL 和 Windows 工作区或 depot_tools 目录混用。
+首次 Windows `prepare` 会在锁定 `depot_tools` 提交上单独运行 `bootstrap/win_tools.bat`，安装该提交的 CIPD Python 并生成 `python3_bin_reldir.txt`；`DEPOT_TOOLS_UPDATE=0` 不会更新工具仓库。`build`/`package` 会再次检查 bootstrap 完整性。
+
+从已具备上述依赖的 **cmd.exe** 运行（下面为示例目录，需实际有足够空闲空间；首次同步可能耗时数小时）：
+
+```bat
+python browser-core\\chromium\\core.py prepare --workspace D:\\abs-chromium-151
+python browser-core\\chromium\\core.py build --workspace D:\\abs-chromium-151 --jobs 16
+python browser-core\\chromium\\core.py package --workspace D:\\abs-chromium-151 --output artifacts\\native-core
+```
+
+`build` 在 `gclient runhooks` 后使用 GN/autoninja 构建 `chrome` 和 `blink_platform_unittests` 并运行 `AbsProfileTest.*`。`package` 从 GN `runtime_deps` 复制 Windows 运行文件（如 DLL、pak、locales），另附上游和参考补丁许可、第三方 credits；缺失依赖会报错而非打包不完整目录。输出为 `artifacts/native-core/abs-chromium-151.0.7922.34-win-x64.zip` 与同名 `.zip.sha256`。解压根目录是 `chromium/chrome.exe`，同目录有 `build-provenance.json`；清单记录 `target=win-x64`、版本、源码/补丁哈希、可执行文件和包内文件的 SHA-256。自陈的哈希是完整性校验，不是签名或独立的构建者证明；不能从人工编写相同字段断言实际源码来源。
+
+在独立且仅运行可信代码的 self-hosted Windows x64 runner 注册 `self-hosted`、`Windows`、`X64`、`chromium-build` 标签；将 repository variable `CHROMIUM_WINDOWS_WORKSPACE` 配为真实充足磁盘上的短 NTFS 路径（不配置时默认 `C:\src\abs-chromium-151`）。在 Actions → `chromium-core-windows` → Run workflow 中设置 `build=true`、对应 runner 标签 JSON、并行 jobs；PR/push 仅运行轻量校验，不会自动耗费编译机。远程任务在同步源码前检查 x64、NTFS、150 GiB 空闲、Visual Studio 2026 C++/MFC/ATL、Windows SDK 26100 目录和 Debugging Tools 版本；**SDK 10.0.26100.7705 的 servicing revision 仍须构建机管理员核实，不能只凭目录名判断**。runner 授权、注册凭据和 Visual Studio/SDK 安装须由管理员完成，不写入仓库；避免将不可信 PR 代码授权给长期有特权的构建机。完整编译、包解压后 SHA 校验及 `node browser-core/chromium/smoke.mjs` 原生 CDP 测试成功后，工作流才上传 `chromium-win-x64-<commit>` Actions artifact（ZIP、侧车摘要与 `native-smoke.json`，保留 7 天）。2026-09-26 查询本仓 GitHub Actions 显示 **零个注册的 self-hosted runner**，远端工作流列表也尚无 `chromium-core-windows`（当前工作流文件尚未发布到远端）；必须先由授权者提交/发布当前源码和工作流、配置独立构建机，才可能手动触发实际构建。本轮没有执行 Windows Chromium 编译或实机原生验收，不能称作 Windows native 通过。
+
+本地提取后验证并以 `ABS_CHROMIUM_EXECUTABLE_PATH=<绝对路径>\\chromium\\chrome.exe` 运行；启动器只接受当前 win32 x64 对应 `win-x64` 的完整清单（Linux x64 对应 `linux-x64`），校验固定版本/补丁、清单中全部文件的 SHA-256 和目录中没有未列出的代码/资源（Windows 必须包含 `chrome.dll`），禁止拿 stock 浏览器或其它平台包冒充原生内核。Windows 下可在 PowerShell 中执行：
+
+```powershell
+$env:ABS_CHROMIUM_EXECUTABLE_PATH = (Resolve-Path '.\\artifacts\\native-core\\extracted\\chromium\\chrome.exe').Path
+node browser-core/chromium/smoke.mjs
 ```
 
 ## 来源与许可
