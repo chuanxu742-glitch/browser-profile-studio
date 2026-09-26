@@ -33,6 +33,7 @@ let isolatedProfileId;
 let api;
 let studioLog = '';
 const requestEvidence = new Map();
+let referenceWorkerHeaders;
 const reports = new Map();
 const execFileAsync = promisify(execFile);
 
@@ -119,7 +120,16 @@ function validatePhase(phase, result) {
   for (const route of ['page', 'frame', 'worker', 'headers']) {
     const headers = requestEvidence.get(`${phase}/${route}`);
     assert.ok(headers, `${phase}/${route}: no browser request reached fixture`);
-    assertHeaders(headers, `${phase}/${route}`, result.page.userAgent);
+    if (route === 'worker' && referenceWorkerHeaders) {
+      assert.equal(headers['user-agent'], result.page.userAgent, `${phase}/worker: HTTP and JS user agents differ`);
+      // The Edge reference on this same runner/fixture establishes whether dedicated Worker scripts carry UA-CH.
+      // An absent header is not an identity mismatch if the reference browser also omits that header.
+      for (const name of ['sec-ch-ua', 'sec-ch-ua-platform', 'sec-ch-ua-mobile']) {
+        assert.equal(Boolean(headers[name]), Boolean(referenceWorkerHeaders[name]),
+          `${phase}/worker: ${name} availability differs from reference Edge`);
+      }
+      if (referenceWorkerHeaders['sec-ch-ua']) assertHeaders(headers, `${phase}/worker`, result.page.userAgent);
+    } else assertHeaders(headers, `${phase}/${route}`, result.page.userAgent);
   }
   assertHeaders(result.headerProbe, `${phase}/header-probe`, result.page.userAgent);
   assert.match(result.headerProbe['sec-ch-ua-full-version-list'] ?? '',
@@ -155,7 +165,7 @@ function fixtureResponse(req, res) {
   const parsed = new URL(req.url, 'http://127.0.0.1');
   const phase = parsed.searchParams.get('phase');
   const route = parsed.pathname === '/' ? 'page' : parsed.pathname.slice(1).replace(/\.js$/, '');
-  if (['first', 'restart', 'isolated'].includes(phase) && ['page', 'frame', 'worker', 'headers'].includes(route)) {
+  if (['baseline', 'first', 'restart', 'isolated'].includes(phase) && ['page', 'frame', 'worker', 'headers'].includes(route)) {
     requestEvidence.set(`${phase}/${route}`, { 'user-agent': req.headers['user-agent'],
       'sec-ch-ua': req.headers['sec-ch-ua'], 'sec-ch-ua-platform': req.headers['sec-ch-ua-platform'],
       'sec-ch-ua-mobile': req.headers['sec-ch-ua-mobile'], 'sec-ch-ua-full-version-list': req.headers['sec-ch-ua-full-version-list'],
@@ -181,7 +191,7 @@ function fixtureResponse(req, res) {
     req.on('end', () => {
       try {
         const data = JSON.parse(body);
-        if (!['first', 'restart', 'isolated'].includes(data.phase) || reports.has(data.phase)) throw new Error('Invalid or repeated phase');
+        if (!['baseline', 'first', 'restart', 'isolated'].includes(data.phase) || reports.has(data.phase)) throw new Error('Invalid or repeated phase');
         reports.set(data.phase, data);
         res.writeHead(204).end();
       } catch { res.writeHead(400).end(); }
@@ -251,6 +261,33 @@ async function verifyInstalledChromix(executable) {
   report.archiveSha256 = manifest.archiveSha256;
 }
 
+async function runEdgeReference(cwd, fixtureOrigin, chromium) {
+  const edge = join(process.env['ProgramFiles(x86)'] ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe');
+  assert.ok(process.env['ProgramFiles(x86)'] && (await lstat(edge)).isFile(),
+    'Installed system Edge reference browser required to distinguish Worker UA-CH behavior');
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(join(cwd, 'edge-reference-data'), {
+      executablePath: edge, headless: true,
+    });
+    const page = context.pages()[0] ?? await context.newPage();
+    await page.goto(`${fixtureOrigin}/?phase=baseline`, { waitUntil: 'domcontentloaded' });
+    const observed = await waitForReport('baseline');
+    assert.ok(!observed.error, `Edge reference fixture failed: ${observed.error}`);
+    referenceWorkerHeaders = requestEvidence.get('baseline/worker');
+    assert.ok(referenceWorkerHeaders && observed.worker, 'Edge reference Worker request/identity missing');
+    assert.equal(referenceWorkerHeaders['user-agent'], observed.worker.userAgent,
+      'Edge reference Worker HTTP and JS user agents differ');
+    report.reference = {
+      browser: 'installed Microsoft Edge', workerHeaders: referenceWorkerHeaders,
+      pageHeaders: requestEvidence.get('baseline/page'),
+      workerIdentity: observed.worker,
+    };
+  } finally {
+    await context?.close();
+  }
+}
+
 async function runCompatibility(executable, cwd, fixtureOrigin) {
   const { chromium } = createRequire(join(root, 'package.json'))('playwright');
   const userDataDir = join(cwd, 'chromix-user-data');
@@ -299,6 +336,7 @@ async function run() {
   fixture = createServer(fixtureResponse);
   await new Promise((done, fail) => fixture.once('error', fail).listen(0, '127.0.0.1', done));
   const fixtureOrigin = `http://127.0.0.1:${fixture.address().port}`;
+  await runEdgeReference(cwd, fixtureOrigin, createRequire(join(root, 'package.json'))('playwright').chromium);
   if (mode === 'compatibility-only') {
     await runCompatibility(executable, cwd, fixtureOrigin);
     return;
