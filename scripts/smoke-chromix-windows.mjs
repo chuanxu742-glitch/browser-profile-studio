@@ -122,13 +122,11 @@ function validatePhase(phase, result) {
     assert.ok(headers, `${phase}/${route}: no browser request reached fixture`);
     if (route === 'worker' && referenceWorkerHeaders) {
       assert.equal(headers['user-agent'], result.page.userAgent, `${phase}/worker: HTTP and JS user agents differ`);
-      // The Edge reference on this same runner/fixture establishes whether dedicated Worker scripts carry UA-CH.
-      // An absent header is not an identity mismatch if the reference browser also omits that header.
+      // The same-run Edge reference establishes the dedicated Worker script's exact UA-CH omission.
       for (const name of ['sec-ch-ua', 'sec-ch-ua-platform', 'sec-ch-ua-mobile']) {
-        assert.equal(Boolean(headers[name]), Boolean(referenceWorkerHeaders[name]),
-          `${phase}/worker: ${name} availability differs from reference Edge`);
+        assert.equal(referenceWorkerHeaders[name], undefined, `Edge reference Worker unexpectedly sent ${name}`);
+        assert.equal(headers[name], undefined, `${phase}/worker: ${name} differs from reference Edge omission`);
       }
-      if (referenceWorkerHeaders['sec-ch-ua']) assertHeaders(headers, `${phase}/worker`, result.page.userAgent);
     } else assertHeaders(headers, `${phase}/${route}`, result.page.userAgent);
   }
   assertHeaders(result.headerProbe, `${phase}/header-probe`, result.page.userAgent);
@@ -271,18 +269,36 @@ async function runEdgeReference(cwd, fixtureOrigin, chromium) {
       executablePath: edge, headless: true,
     });
     const page = context.pages()[0] ?? await context.newPage();
+    const version = await (await context.newCDPSession(page)).send('Browser.getVersion');
     await page.goto(`${fixtureOrigin}/?phase=baseline`, { waitUntil: 'domcontentloaded' });
     const observed = await waitForReport('baseline');
     assert.ok(!observed.error, `Edge reference fixture failed: ${observed.error}`);
+    assert.match(observed.page.userAgent, /Edg\/\d+\./, 'Reference executable did not report Microsoft Edge');
     referenceWorkerHeaders = requestEvidence.get('baseline/worker');
     assert.ok(referenceWorkerHeaders && observed.worker, 'Edge reference Worker request/identity missing');
     assert.equal(referenceWorkerHeaders['user-agent'], observed.worker.userAgent,
       'Edge reference Worker HTTP and JS user agents differ');
+    for (const route of ['page', 'frame', 'headers']) {
+      const headers = requestEvidence.get(`baseline/${route}`);
+      assert.ok(headers?.['sec-ch-ua'] && headers['sec-ch-ua-platform'] === '"Windows"'
+        && headers['sec-ch-ua-mobile'] === '?0', `Edge reference ${route}: ordinary HTTP UA-CH missing`);
+    }
+    for (const name of ['sec-ch-ua', 'sec-ch-ua-platform', 'sec-ch-ua-mobile']) {
+      assert.equal(referenceWorkerHeaders[name], undefined, `Edge reference Worker unexpectedly sent ${name}`);
+    }
     report.reference = {
-      browser: 'installed Microsoft Edge', workerHeaders: referenceWorkerHeaders,
+      browser: 'installed Microsoft Edge', cdpBrowserVersion: version.product,
+      pageUserAgent: observed.page.userAgent, workerHeaders: referenceWorkerHeaders,
       pageHeaders: requestEvidence.get('baseline/page'),
       workerIdentity: observed.worker,
     };
+    console.log(`Edge reference ${version.product}: ${JSON.stringify({
+      workerUserAgent: referenceWorkerHeaders['user-agent'],
+      workerSecChUa: referenceWorkerHeaders['sec-ch-ua'] ?? null,
+      workerSecChUaPlatform: referenceWorkerHeaders['sec-ch-ua-platform'] ?? null,
+      workerSecChUaMobile: referenceWorkerHeaders['sec-ch-ua-mobile'] ?? null,
+      pageSecChUa: requestEvidence.get('baseline/page')['sec-ch-ua'],
+    })}`);
   } finally {
     await context?.close();
   }
