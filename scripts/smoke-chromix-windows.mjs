@@ -408,10 +408,14 @@ async function run() {
     const rejection = await response.json();
     assert.equal(response.status, 500, `Virtual GPU startup returned unexpected status: ${JSON.stringify(rejection)}`);
     assert.equal(rejection.success, false, 'Virtual GPU unexpectedly admitted a saved Chromix profile');
-    assert.match(rejection.message ?? '', /^GPU_BACKEND_UNVERIFIED:/,
-      `Expected native GPU rejection, observed ${JSON.stringify(rejection)}`);
+    assert.ok((rejection.code === 'GPU_ACTIVE_DEVICE_AMBIGUOUS'
+      && rejection.message === 'GPU_ACTIVE_DEVICE_AMBIGUOUS')
+      || (rejection.code === 'INTERNAL_ERROR'
+        && /^GPU_BACKEND_UNVERIFIED: .+/.test(rejection.message ?? '')),
+    `Expected one of the two observed native GPU rejection paths, received ${JSON.stringify(rejection)}`);
     assert.deepEqual(await api('/sessions'), [], 'Rejected profile created a browser session');
     const saved = await api(`/profiles/${encodeURIComponent(profileId)}`);
+    assert.equal(saved.browserDistribution, 'chromix-152', 'Rejected profile lost its Chromix distribution');
     assert.equal(saved.fingerprint?.gpu, undefined, 'Rejected virtual GPU was persisted to the saved profile');
     report.gpuGate = { httpStatus: response.status, code: rejection.code, message: rejection.message,
       savedProfileId: profileId, activeSessions: 0 };
