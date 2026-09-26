@@ -2,14 +2,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { managedBrowserIdentity } from '../../src/fingerprint/runtime-identity.js';
 import { generateFingerprint } from '../../src/fingerprint/generator.js';
 
-const mocks = vi.hoisted(() => ({ launch: vi.fn(), connect: vi.fn(), nativeCore: vi.fn() }));
+const mocks = vi.hoisted(() => ({ launch: vi.fn(), connect: vi.fn(), nativeCore: vi.fn(), chromixCore: vi.fn() }));
 vi.mock('playwright', () => ({ chromium: { launchPersistentContext: mocks.launch } }));
 vi.mock('../../src/browser/raw-cdp-connection.js', () => ({ RawCdpConnection: { connect: mocks.connect } }));
 vi.mock('../../src/browser/custom-chromium-runtime.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../src/browser/custom-chromium-runtime.js')>(),
   resolveVerifiedChromiumCore: mocks.nativeCore,
 }));
-import { launchPersistentChromium, usesNativeChromiumProfile } from '../../src/browser/chromium-launcher.js';
+vi.mock('../../src/browser/chromix-runtime.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/browser/chromix-runtime.js')>(),
+  resolveVerifiedChromix: mocks.chromixCore,
+}));
+import { launchPersistentChromium, observedChromiumVersion, usesNativeChromiumProfile } from '../../src/browser/chromium-launcher.js';
 import { buildStealthInjectionScript } from '../../src/fingerprint/stealth-scripts.js';
 
 describe('managed Chromium startup', () => {
@@ -84,5 +88,59 @@ describe('managed Chromium startup', () => {
     await launchPersistentChromium('native-profile', { headless: true, fingerprintProfile: profile,
       initScript: 'globalThis.applicationSetting = 42' });
     expect(context.addInitScript).toHaveBeenCalledWith('globalThis.applicationSetting = 42');
+  });
+  it('does not launch a stock browser when explicit Chromix installation is missing', async () => {
+    mocks.chromixCore.mockRejectedValue(new Error('CHROMIX_PATH_REQUIRED'));
+    await expect(launchPersistentChromium('chromix-data', {
+      headless: true, browserDistribution: 'chromix-152',
+    })).rejects.toThrow('CHROMIX_PATH_REQUIRED');
+    expect(mocks.nativeCore).not.toHaveBeenCalled();
+    expect(mocks.launch).not.toHaveBeenCalled();
+  });
+  it('refuses explicit project-native-151 when its verified core is absent', async () => {
+    mocks.nativeCore.mockResolvedValue(undefined);
+    await expect(launchPersistentChromium('native-data', {
+      headless: true, browserDistribution: 'project-native-151',
+    })).rejects.toThrow('NATIVE_CHROMIUM_REQUIRED');
+    expect(mocks.launch).not.toHaveBeenCalled();
+  });
+  it('closes a running Chromix context when actual browser-target CDP version differs', async () => {
+    const context = fixture();
+    mocks.chromixCore.mockResolvedValue({ executablePath: 'C:\\test\\chromix\\chrome.exe' });
+    mocks.connect.mockResolvedValue({
+      send: vi.fn().mockResolvedValue({ product: 'Chrome/153.0.0.0' }), close: vi.fn(),
+    });
+    const profile = generateFingerprint({ engine: 'chromium', browserDistribution: 'chromix-152', os: 'windows' });
+    await expect(launchPersistentChromium('chromix-data', {
+      headless: true, browserDistribution: 'chromix-152', fingerprintProfile: profile,
+      locale: profile.geo.locale, timezoneId: profile.geo.timezoneId,
+    })).rejects.toThrow('BROWSER_RUNTIME_VERSION_MISMATCH');
+    expect(context.close).toHaveBeenCalled();
+    expect(mocks.nativeCore).not.toHaveBeenCalled();
+  });
+  it('uses browser-target CDP identity and physical GPU before admitting the 152 persona', async () => {
+    const context = fixture();
+    mocks.chromixCore.mockResolvedValue({ executablePath: 'C:\\test\\chromix\\chrome.exe' });
+    const profile = generateFingerprint({ engine: 'chromium', browserDistribution: 'chromix-152',
+      os: 'windows', countryCode: 'JP', gpu: { unmaskedVendor: 'Google Inc. (NVIDIA)',
+        unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)' } });
+    const send = vi.fn(async (method: string) => method === 'Browser.getVersion'
+      ? { product: 'Chrome/152.0.7977.82' }
+      : { gpu: { devices: [{ vendorId: 0x10de, deviceString: 'NVIDIA GeForce RTX 4070', active: true }],
+        auxAttributes: { glRenderer: profile.webgl.unmaskedRenderer },
+        featureStatus: { gpu_compositing: 'enabled' } } });
+    mocks.connect.mockResolvedValue({ send, close: vi.fn() });
+    await launchPersistentChromium('chromix-data', {
+      headless: true, browserDistribution: 'chromix-152', fingerprintProfile: profile,
+      locale: profile.geo.locale, timezoneId: profile.geo.timezoneId,
+    });
+    expect(observedChromiumVersion(context)).toBe('152.0.7977.82');
+    expect(context.addInitScript).not.toHaveBeenCalled();
+    expect(mocks.connect).toHaveBeenCalledWith('chromix-data');
+    expect(mocks.launch.mock.calls[0]![1].executablePath).toBe('C:\\test\\chromix\\chrome.exe');
+    const config = mocks.launch.mock.calls[0]![1];
+    expect(config).not.toHaveProperty('locale');
+    expect(config.extraHTTPHeaders['Accept-Language']).toBe('ja-JP,ja,en-US,en');
+    expect(config.args).toContain('--uxr-languages=ja-JP,ja,en-US,en');
   });
 });

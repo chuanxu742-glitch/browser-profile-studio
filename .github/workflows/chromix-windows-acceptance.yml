@@ -35,6 +35,8 @@ jobs:
         run: .\scripts\test-install-chromix.ps1
       - name: Install dependencies without downloading a stock browser
         run: npm ci --include=dev
+      - name: Verify scoped Chromix profile and API contracts
+        run: npx vitest run tests/unit/api.test.ts tests/unit/chromix-distribution.test.ts tests/unit/native-gpu-selection.test.ts tests/unit/session-manager.test.ts tests/unit/chromium-launcher.test.ts
       - name: Compile isolated Chromix product-source snapshot
         run: npm run build
       - name: Install independently verified official Chromix archive in runner scratch

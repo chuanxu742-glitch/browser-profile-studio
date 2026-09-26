@@ -327,6 +327,16 @@ export class SessionManager {
 
   /** Create and launch one isolated persistent Firefox context and workspace. */
   public async start(options: SessionStartOptions = {}): Promise<BrowserSession> {
+    if (options.profileId) {
+      const profile = await this.profileStore.getProfile(options.profileId);
+      if (profile?.browserDistribution === 'chromix-152') {
+        return this.profileStore.withChromixIdentityAdmission(options.profileId, () => this.startUnlocked(options));
+      }
+    }
+    return this.startUnlocked(options);
+  }
+
+  private async startUnlocked(options: SessionStartOptions): Promise<BrowserSession> {
     if (this.sessions.size >= this.maxSessions) {
       throw new BrowserSessionError('RESOURCE_EXHAUSTED', 'Maximum concurrent browser sessions reached', { retryable: true });
     }
@@ -362,7 +372,9 @@ export class SessionManager {
       if (profileMeta.browserDistribution === 'chromix-152'
         && (options.fingerprint === false || typeof options.fingerprint === 'object'
           || options.fingerprintSeed !== undefined || options.seed !== undefined || options.userAgent !== undefined
-          || options.cdpEndpoint !== undefined)) {
+          || options.cdpEndpoint !== undefined || options.viewport !== undefined
+          || options.countryCode !== undefined || options.timezone !== undefined
+          || options.locale !== undefined || options.geolocation !== undefined)) {
         throw new BrowserSessionError('INVALID_ARGUMENT', 'Chromix saved profile identity cannot be overridden');
       }
       effectiveEngine = profileMeta.engine ?? 'firefox';
@@ -386,7 +398,12 @@ export class SessionManager {
       if (!effectiveProxy && profileMeta.proxy) {
         effectiveProxy = profileMeta.proxy;
       }
-      if (profileMeta.geo) {
+      if (profileMeta.browserDistribution === 'chromix-152') {
+        geoCountry = profileMeta.geo?.countryCode;
+        geoTimezone = profileMeta.geo?.timezone;
+        geoLocale = profileMeta.geo?.locale;
+        geoLoc = profileMeta.geo?.geolocation;
+      } else if (profileMeta.geo) {
         if (!geoCountry && profileMeta.geo.countryCode) geoCountry = profileMeta.geo.countryCode;
         if (!geoTimezone && profileMeta.geo.timezone) geoTimezone = profileMeta.geo.timezone;
         if (!geoLocale && profileMeta.geo.locale) geoLocale = profileMeta.geo.locale;
@@ -605,6 +622,9 @@ export class SessionManager {
     if (options.profileId) this.profileIdBySession.set(session.sessionId, options.profileId);
     try {
       await session.start();
+      if (savedProfile?.browserDistribution === 'chromix-152') {
+        await this.profileStore.commitChromixIdentity(savedProfile.profileId);
+      }
       if (options.profileId) {
         if (this.options.accountHealthStore && initialAccountHealth === null) {
           await this.options.accountHealthStore.setHealth(
