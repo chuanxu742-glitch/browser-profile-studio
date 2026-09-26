@@ -88,6 +88,15 @@ Profile 启动被 hosted 虚拟 GPU 以 HTTP 500 `GPU_ACTIVE_DEVICE_AMBIGUOUS` �
 没有活动会话或已保存 GPU 身份，结果为 `productAcceptance NOT RUN`。物理 GPU job
 因硬件 runner 不可用而跳过；硬件验收仍受阻，不能据此宣称产品或物理 GPU 验收通过。
 
+扩展覆盖的 hosted run [36219731789](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36219731789)
+（提交 `07ff604`）对直接 Chromix 页面、同源 iframe、Worker 及同一数据目录重启后的
+UA-CH、平台、语言/时区、核心数、可用的 deviceMemory 与页面屏幕/DPR 执行跨 realm
+一致性断言；Canvas 像素和页面/iframe 离线音频仅断言同一安装/档案的稳定性。
+原生扰动关闭，**未验证不同 Profile 的 Canvas/音频唯一性**。托管虚拟 GPU 上
+WebGL/WebGPU 只记录 API 可用性，不能证明物理后端、shader/readback 或设备身份；
+外部网络/代理与 WebRTC ICE/STUN 均未运行。Studio 保存档案仍在虚拟 GPU
+准入处 fail-closed，物理 GPU job 跳过，不得据此宣称产品验收通过。
+
 ### 隔离物理 GPU runner：人工验收操作卡（尚未执行）
 
 **先决安全门槛：**GitHub [明确警告](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners)自托管 runner 不保证每次作业后是干净环境，公开仓库几乎不应使用；`isolated` 只是本工作流的**路由标签**，并非安全沙箱。仅在管理员确认仓库/受控私有副本及其可运行工作流的人员可信、专用 Windows x64 物理 GPU 主机无用户资料/密钥/内网敏感服务、主机具备可恢复的隔离与清理机制后注册。不能把个人日常工作站或承载其他仓库作业的共享 runner 直接贴上标签；不要以关闭 Defender、防火墙、浏览器沙箱或扩大 `GITHUB_TOKEN` 权限换取通过。主机需要可用的显卡驱动、脚本用于同机 Worker 请求基线的 Microsoft Edge、可以访问物理 GPU 的 runner 运行环境，以及下载 GitHub Actions/npm/固定上游 Chromix ZIP 所必需的网络；工作流 `setup-node` 安装 Node.js 22。外部下载有供应链和网络风险，ZIP 哈希并非发布者签名。

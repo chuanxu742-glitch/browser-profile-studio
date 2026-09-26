@@ -107,6 +107,15 @@ Profile 启动被 hosted 虚拟 GPU 以 HTTP 500 `GPU_ACTIVE_DEVICE_AMBIGUOUS` �
 没有活动会话或已保存 GPU 身份，结果为 `productAcceptance NOT RUN`。物理 GPU job
 因硬件 runner 不可用而跳过；硬件验收仍受阻，不能据此宣称产品或物理 GPU 验收通过。
 
+扩展覆盖的 hosted run [36219731789](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36219731789)
+（`07ff604`）在**直接浏览器**夹具中对页面、同源 iframe、Worker 的 UA-CH、
+平台、语言/时区、CPU 核心数及可用的内存字段作一致性断言；对页面/iframe
+的屏幕/DPR 和离线音频、三个 realm 的 Canvas 像素作一致性断言，并在同一
+浏览器数据目录重启后检查身份及 Canvas/音频稳定性。Canvas/音频扰动关闭，
+**不宣称跨 Profile 唯一性**；虚拟 WebGL/WebGPU 仅记录 API 可用性，不作物理 GPU、
+shader 或设备身份通过断言。外部网络与 WebRTC ICE/STUN 未运行；该次 Studio
+依然只确认虚拟 GPU fail-closed，物理 GPU job 跳过，产品验收仍为 `NOT RUN`。
+
 ### Windows 未签名 source+build 测试包
 
 仓库的 **Unsigned Windows test package** GitHub Actions 工作流只能从 `main` 手动触发，
