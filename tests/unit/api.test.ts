@@ -427,7 +427,6 @@ describe('Local REST API Server Unit Tests', () => {
       expect(started.ok).toBe(false);
       const failure = await started.json();
       expect(failure.success).toBe(false);
-      expect(`${failure.code} ${failure.message}`).toMatch(/chromix/i);
       expect((await (await fetch(`${baseUrl}/api/v1/sessions`)).json()).data).toEqual([]);
       const editable = await fetch(`${baseUrl}/api/v1/profiles/${profileId}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },

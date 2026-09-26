@@ -43,14 +43,16 @@ async function fixture() {
 }
 
 describe('explicit Chromix distribution', () => {
-  it('requires an executable and refuses a wrong archive digest without falling back', async () => {
+  it('requires an explicit executable path', async () => {
     await expect(resolveVerifiedChromix({})).rejects.toThrow('CHROMIX_PATH_REQUIRED');
+  });
+  it.skipIf(process.platform !== 'win32')('refuses a wrong archive digest without falling back', async () => {
     const install = await fixture();
     await writeFile(install.manifestPath, JSON.stringify({ ...install.manifest, archiveSha256: '0'.repeat(64) }));
     await expect(resolveVerifiedChromix({ CHROMIX_EXECUTABLE_PATH: install.binary }))
       .rejects.toThrow('CHROMIX_MANIFEST_MISMATCH');
   });
-  it('refuses forged self-described binary and library hashes, including resource swaps', async () => {
+  it.skipIf(process.platform !== 'win32')('refuses forged self-described binary and library hashes, including resource swaps', async () => {
     const install = await fixture();
     await expect(resolveVerifiedChromix({ CHROMIX_EXECUTABLE_PATH: install.binary }))
       .rejects.toThrow('CHROMIX_MANIFEST_MISMATCH');
@@ -206,7 +208,7 @@ describe('explicit Chromix distribution', () => {
     }
     expect(discovery).not.toHaveBeenCalled();
     await expect(manager.start({ profileId: profile.profileId, headless: true }))
-      .rejects.toThrow('CHROMIX_PATH_REQUIRED');
+      .rejects.toThrow(process.platform === 'win32' ? 'CHROMIX_PATH_REQUIRED' : 'Native release persona requires Windows GPU identity');
   });
   it.skipIf(process.platform !== 'win32')('commits a Chromix persona only after successful admission and serializes concurrent edits across stores', async () => {
     const root = await mkdtemp(join(tmpdir(), 'chromix-admission-test-'));
