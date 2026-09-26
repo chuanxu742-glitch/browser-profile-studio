@@ -3,9 +3,12 @@ import { createRequire } from 'node:module';
 import { assertManagedRuntimeVersion } from './firefox-launcher.js';
 import type { FirefoxContextLike, FirefoxLaunchOptions, FirefoxLauncherLike, FirefoxPageLike } from './firefox-launcher.js';
 import type { UnifiedFingerprintProfile } from '../fingerprint/types.js';
+import { distributionBrowserIdentity } from '../fingerprint/runtime-identity.js';
+import { hasChromiumGpuSession, parseChromiumPhysicalGpu, probeChromiumGpuBackend } from '../fingerprint/runtime-probe.js';
 import { buildStealthInjectionScript, buildWorkerBootstrap } from '../fingerprint/stealth-scripts.js';
 import { RawCdpConnection, type RawCdpEvent } from './raw-cdp-connection.js';
 import { nativeChromiumProfileArgs, resolveVerifiedChromiumCore } from './custom-chromium-runtime.js';
+import { chromixProfileArgs, resolveVerifiedChromix } from './chromix-runtime.js';
 
 interface ChromiumCdpContext extends FirefoxContextLike {
   newCDPSession(page: FirefoxPageLike): Promise<{
@@ -18,6 +21,10 @@ export interface ChromiumLauncherLike extends FirefoxLauncherLike {
 }
 
 const nativeProfileContexts = new WeakSet<object>();
+const observedVersions = new WeakMap<object, string>();
+export function observedChromiumVersion(context: object): string | undefined {
+  return observedVersions.get(context);
+}
 export function usesNativeChromiumProfile(context: object): boolean {
   return nativeProfileContexts.has(context);
 }
@@ -27,7 +34,38 @@ export async function launchPersistentChromium(
   options: FirefoxLaunchOptions,
 ): Promise<FirefoxContextLike> {
   if (options.headless && options.managedExtensions?.length) throw new Error('EXTENSION_HEADED_REQUIRED');
-  const nativeCore = await resolveVerifiedChromiumCore();
+  const distribution = options.browserDistribution;
+  if (distribution && !['playwright-stock', 'project-native-151', 'chromix-152'].includes(distribution)) {
+    throw new Error('CHROMIUM_DISTRIBUTION_INVALID');
+  }
+  const nativeCore = distribution === 'playwright-stock' || distribution === 'chromix-152'
+    ? undefined : await resolveVerifiedChromiumCore();
+  if (distribution === 'project-native-151' && !nativeCore) throw new Error('NATIVE_CHROMIUM_REQUIRED: verified project-native-151 core missing');
+  const chromix = distribution === 'chromix-152' ? await resolveVerifiedChromix() : undefined;
+  const profile = options.fingerprintProfile;
+  if (profile?.syntheticDeviceTests) throw new Error('SYNTHETIC_DEVICE_TESTS_UNSUPPORTED: no verified native test-device consumer');
+  if (profile && process.env.ABS_REQUIRE_NATIVE_CHROMIUM === '1' && !nativeCore && !chromix) {
+    throw new Error('NATIVE_CHROMIUM_REQUIRED: release persona requires a verified native Chromium core');
+  }
+  if (profile?.engine !== undefined && profile.engine !== 'chromium') {
+    throw new Error('CHROMIUM_PROFILE_ENGINE_MISMATCH');
+  }
+  const expected = distributionBrowserIdentity('chromium', distribution);
+  if (profile && profile.browserVersion.split('.')[0] !== expected.majorVersion) {
+    throw new Error(`CHROMIUM_PROFILE_VERSION_MISMATCH: profile ${profile.browserVersion} differs from ${expected.fullVersion}`);
+  }
+  if (profile && (nativeCore || chromix) && profile.browserVersion !== expected.fullVersion) {
+    throw new Error(`CHROMIUM_PROFILE_VERSION_MISMATCH: native persona requires exact ${expected.fullVersion}`);
+  }
+  if (chromix && (!profile || profile.browserDistribution !== 'chromix-152' || options.userAgent)) {
+    throw new Error('CHROMIX_PERSONA_INVALID: explicit fingerprint and native User-Agent required');
+  }
+  if (profile && ((options.userAgent && options.userAgent !== profile.userAgent)
+    || (options.locale && options.locale !== profile.geo.locale)
+    || (options.timezoneId && options.timezoneId !== profile.geo.timezoneId)
+    || (options.viewport && (options.viewport.width !== profile.viewport.width || options.viewport.height !== profile.viewport.height)))) {
+    throw new Error('CHROMIUM_PROFILE_LAUNCH_MISMATCH: launch options differ from the immutable persona');
+  }
   if (options.fingerprintProfile) {
     const dependency = createRequire(import.meta.url)('playwright-core/package.json') as { version?: unknown };
     if (dependency.version !== '1.62.1') throw new Error('WORKER_FINGERPRINT_SETUP_FAILED: requires pinned Playwright 1.62.1');
@@ -49,7 +87,7 @@ export async function launchPersistentChromium(
     if (!explicitLanguages.length) extraHTTPHeaders['Accept-Language'] = languages.join(',');
   }
   const launchConfig = {
-    ...(nativeCore ? { executablePath: nativeCore.executablePath } : {}),
+    ...(nativeCore || chromix ? { executablePath: (nativeCore ?? chromix)!.executablePath } : {}),
     headless: options.headless,
     ...(options.handleProcessSignals === undefined ? {} : {
       handleSIGINT: options.handleProcessSignals,
@@ -63,11 +101,11 @@ export async function launchPersistentChromium(
     } : {}),
     ...(options.proxy ? { proxy: options.proxy } : {}),
     ...(options.timezoneId ? { timezoneId: options.timezoneId } : {}),
-    ...(options.locale ? { locale: options.locale } : {}),
+    ...(options.locale && !chromix ? { locale: options.locale } : {}),
     ...(options.geolocation ? { geolocation: options.geolocation } : {}),
     ...(options.permissions ? { permissions: options.permissions } : {}),
     ...(Object.keys(extraHTTPHeaders).length ? { extraHTTPHeaders } : {}),
-    ...(options.userAgent ? { userAgent: options.userAgent } : {}),
+    ...(options.userAgent && !chromix ? { userAgent: options.userAgent } : {}),
     args: [
       '--disable-blink-features=AutomationControlled',
       '--disable-infobars',
@@ -93,7 +131,7 @@ export async function launchPersistentChromium(
       ...(options.fingerprintProfile ? [
         '--remote-debugging-port=0',
         '--remote-debugging-address=127.0.0.1',
-        `--user-agent=${options.fingerprintProfile.userAgent}`,
+        ...(!chromix ? [`--user-agent=${options.fingerprintProfile.userAgent}`] : []),
         `--window-size=${options.fingerprintProfile.viewport?.width ?? 1920},${options.fingerprintProfile.viewport?.height ?? 1080}`,
         `--lang=${options.fingerprintProfile.geo.locale}`,
         `--accept-lang=${options.fingerprintProfile.geo.languages.join(',')}`,
@@ -103,6 +141,7 @@ export async function launchPersistentChromium(
       ] : []),
       ...managedChromiumArgs(options.managedExtensions),
       ...(nativeCore ? nativeChromiumProfileArgs(options) : []),
+      ...(chromix ? chromixProfileArgs(options) : []),
     ],
     ignoreDefaultArgs: ['--enable-automation'],
     acceptDownloads: false,
@@ -113,19 +152,42 @@ export async function launchPersistentChromium(
   // Both must match the exact browser version used to generate the profile.
   const context = await chromium.launchPersistentContext(profileDirectory, launchConfig);
   try {
-    await assertManagedRuntimeVersion(context, 'chromium');
-    if (options.fingerprintProfile) {
+    if (chromix) {
+      const cdp = await RawCdpConnection.connect(profileDirectory);
+      try {
+        const identity = await cdp.send('Browser.getVersion');
+        const version = typeof identity.product === 'string'
+          ? identity.product.match(/^(?:Chrome|Chromium)\/(\d+\.\d+\.\d+\.\d+)$/)?.[1] : undefined;
+        if (!version || version !== expected.fullVersion) {
+          throw new Error(`BROWSER_RUNTIME_VERSION_MISMATCH: expected Chromix ${expected.fullVersion}, received ${String(identity.product ?? 'unknown')}`);
+        }
+        observedVersions.set(context, version);
+        const physicalGpu = parseChromiumPhysicalGpu(await cdp.send('SystemInfo.getInfo') as Parameters<typeof parseChromiumPhysicalGpu>[0]);
+        const backend = await probeChromiumGpuBackend(undefined, profile!, physicalGpu);
+        if (backend.check.status !== 'pass') throw new Error(`GPU_BACKEND_NOT_VERIFIED: ${backend.check.detail}`);
+      } finally { cdp.close(); }
+    } else {
+      await assertManagedRuntimeVersion(context, 'chromium', distribution);
+    }
+    if (options.fingerprintProfile && !chromix) {
       await installManagedWorkerIdentity(context, options.fingerprintProfile, profileDirectory, !!nativeCore);
       await installManagedChromiumIdentity(context as ChromiumCdpContext, options.fingerprintProfile);
     }
 
-    if (options.initScript && typeof context?.addInitScript === 'function') {
+    if (!chromix && options.initScript && typeof context?.addInitScript === 'function') {
       await context.addInitScript(nativeCore && options.managedFingerprintInitScript && options.fingerprintProfile
         ? buildStealthInjectionScript(options.fingerprintProfile, { nativeChromium: true })
         : options.initScript);
     }
+    if (profile && !chromix && process.env.ABS_REQUIRE_NATIVE_CHROMIUM === '1') {
+      if (!hasChromiumGpuSession(context)) throw new Error('GPU_BACKEND_NOT_VERIFIED: browser CDP session unavailable');
+      const backend = await probeChromiumGpuBackend(context, profile);
+      if (backend.check.status !== 'pass') {
+        throw new Error(`GPU_BACKEND_NOT_VERIFIED: ${backend.check.detail}`);
+      }
+    }
 
-    if (nativeCore) nativeProfileContexts.add(context);
+    if (nativeCore || chromix) nativeProfileContexts.add(context);
     return context;
   } catch (error) {
     await context.close().catch(() => undefined);
@@ -375,7 +437,10 @@ async function installManagedChromiumIdentity(
 function managedChromiumUserAgentOverride(profile: UnifiedFingerprintProfile): Record<string, unknown> {
   const major = profile.browserVersion.split('.')[0]!;
   const platform = profile.os === 'macos' ? 'macOS' : profile.os === 'linux' ? 'Linux' : 'Windows';
-  const platformVersion = profile.os === 'macos' ? '10.15.7' : profile.os === 'linux' ? '6.8.0' : '10.0.0';
+  const platformVersion = profile.platformVersion;
+  if (!platformVersion || !/^\d+(?:\.\d+){1,3}$/.test(platformVersion)) {
+    throw new Error('CHROMIUM_PLATFORM_VERSION_INVALID: UA-CH platformVersion must come from the profile');
+  }
   return {
     userAgent: profile.userAgent,
     acceptLanguage: profile.geo.languages.join(','),

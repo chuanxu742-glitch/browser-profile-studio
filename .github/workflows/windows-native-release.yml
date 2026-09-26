@@ -1,0 +1,135 @@
+name: Unsigned Windows native offline release
+
+on:
+  workflow_dispatch:
+    inputs:
+      native_run_id:
+        description: 'Successful chromium-core-windows workflow run for this exact source commit'
+        required: true
+        type: string
+      native_archive_sha256:
+        description: '64-character SHA-256 from the native worker, independently checked before packaging'
+        required: true
+        type: string
+      runner:
+        description: 'Trusted Windows x64 release runner labels, with a real GPU (not SwiftShader)'
+        required: true
+        type: string
+        default: '["self-hosted", "Windows", "X64", "studio-gpu"]'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-windows-native-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      actions: read
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          architecture: x64
+          package-manager-cache: false
+      - name: Download the verified native build from the same commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN_ID: ${{ inputs.native_run_id }}
+          NATIVE_ARCHIVE_SHA256: ${{ inputs.native_archive_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:NATIVE_RUN_ID -notmatch '^[0-9]+$' -or $env:NATIVE_ARCHIVE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Native build run ID and independent SHA-256 are required.' }
+          $workflowPath = '.github/workflows/chromium-core-windows.yml'
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:NATIVE_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect native workflow run.' }
+          $workflow = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/chromium-core-windows.yml" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $workflow.path -cne $workflowPath -or
+              $run.workflow_id -ne $workflow.id -or $run.path -cne $workflowPath -or
+              $run.event -cne 'workflow_dispatch' -or $run.status -cne 'completed' -or
+              $run.conclusion -cne 'success' -or $run.head_sha -cne $env:GITHUB_SHA -or
+              $run.head_repository.full_name -cne $env:GITHUB_REPOSITORY) {
+            throw 'Native build must come from the exact trusted workflow file at this source commit.'
+          }
+          $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:NATIVE_RUN_ID/jobs?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($jobs.jobs | Where-Object { $_.name -ceq 'build-windows' -and $_.conclusion -ceq 'success' }).Count -ne 1) {
+            throw 'Trusted native build-windows job did not succeed.'
+          }
+          $artifactName = "chromium-win-x64-$env:GITHUB_SHA"
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:NATIVE_RUN_ID/artifacts?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($artifacts.artifacts | Where-Object { $_.name -ceq $artifactName -and !$_.expired }).Count -ne 1) {
+            throw 'Exactly one unexpired native-build artifact is required.'
+          }
+          $lock = Get-Content browser-core/chromium/core.lock.json -Raw | ConvertFrom-Json
+          $archive = "abs-chromium-$($lock.browserVersion)-win-x64.zip"
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/native-input" | Out-Null
+          gh run download "$env:NATIVE_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --name "$artifactName" --dir "$env:RUNNER_TEMP/native-input"
+          if ($LASTEXITCODE -ne 0) { throw 'Native artifact unavailable. No stock browser substitution is allowed.' }
+          $path = Join-Path "$env:RUNNER_TEMP/native-input" $archive
+          $sidecar = "$path.sha256"
+          if (!(Test-Path -LiteralPath $path -PathType Leaf) -or !(Test-Path -LiteralPath $sidecar -PathType Leaf)) { throw 'Native archive or digest sidecar missing.' }
+          $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+          $record = (Get-Content -LiteralPath $sidecar -Raw).Trim()
+          if ($actual -ine $env:NATIVE_ARCHIVE_SHA256 -or $record -cne "$($actual.ToLowerInvariant())  $archive") { throw 'Native archive differs from independent and native-worker SHA-256 digests.' }
+          "NATIVE_ARCHIVE=$path" >> $env:GITHUB_ENV
+      - run: npm ci --include=dev
+      - run: npm run build
+      - name: Package offline native runtime
+        shell: pwsh
+        env:
+          NATIVE_ARCHIVE_SHA256: ${{ inputs.native_archive_sha256 }}
+        run: ./scripts/package-windows-release.ps1 -OutputDirectory "$env:RUNNER_TEMP/distribution" -NativeArchive "$env:NATIVE_ARCHIVE" -NativeArchiveSha256 "$env:NATIVE_ARCHIVE_SHA256"
+      - name: Extract, install and run actual native-profile smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = @(Get-ChildItem "$env:RUNNER_TEMP/distribution/*.zip")
+          if ($zip.Count -ne 1) { throw 'Expected one production release ZIP.' }
+          $expected = ((Get-Content "$env:RUNNER_TEMP/distribution/SHA256SUMS.txt" -Raw).Trim() -split '  ')[0]
+          if ((Get-FileHash -LiteralPath $zip[0].FullName -Algorithm SHA256).Hash -ine $expected) { throw 'Release ZIP digest mismatch.' }
+          Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath "$env:RUNNER_TEMP/extracted"
+          $package = @(Get-ChildItem "$env:RUNNER_TEMP/extracted" -Directory)
+          if ($package.Count -ne 1) { throw 'Expected one package root.' }
+          $install = "$env:RUNNER_TEMP/studio-install"
+          & "$($package[0].FullName)/scripts/install-windows-release.ps1" -PackageRoot $package[0].FullName -InstallDirectory $install
+          if (!$?) { throw 'First installation failed.' }
+          & "$install/node.exe" "$install/scripts/smoke-windows-native-release.mjs" "$install" "$env:RUNNER_TEMP/native-smoke.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Installed native runtime smoke failed.' }
+          $master = "$install/data/.studio-master-key.dpapi"
+          $before = (Get-FileHash -LiteralPath $master -Algorithm SHA256).Hash
+          $priorId = (Get-Content "$env:RUNNER_TEMP/native-smoke.json" -Raw | ConvertFrom-Json).profileId
+          & "$($package[0].FullName)/scripts/install-windows-release.ps1" -PackageRoot $package[0].FullName -InstallDirectory $install
+          if (!$?) { throw 'Same-payload replacement failed.' }
+          if ((Get-FileHash -LiteralPath $master -Algorithm SHA256).Hash -cne $before) { throw 'Master key changed during replacement.' }
+          & "$install/node.exe" "$install/scripts/smoke-windows-native-release.mjs" "$install" "$env:RUNNER_TEMP/native-smoke-replacement.json" "$priorId"
+          if ($LASTEXITCODE -ne 0) { throw 'Native profile lost across package replacement.' }
+          Get-Content "$env:RUNNER_TEMP/native-smoke-replacement.json" -Raw >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP/native-smoke.json" -Raw >> $env:GITHUB_STEP_SUMMARY
+      - name: Create unsigned draft prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @((Get-ChildItem "$env:RUNNER_TEMP/distribution" -File).FullName)
+          $assets += "$env:RUNNER_TEMP/native-smoke.json"
+          $assets += "$env:RUNNER_TEMP/native-smoke-replacement.json"
+          $assets += "$env:RUNNER_TEMP/native-smoke-ui.png"
+          $assets += "$env:RUNNER_TEMP/native-smoke-replacement-ui.png"
+          $tag = "native/windows-unsigned-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          gh release create $tag @assets --target "$env:SOURCE_COMMIT" --draft --prerelease --title "UNSIGNED offline native Windows x64 Studio ($env:GITHUB_RUN_ID.$env:GITHUB_RUN_ATTEMPT)" --notes 'Unsigned prerelease. Windows x64 bundled Node and verified custom Chromium; SHA-256 is integrity only, not a publisher signature. See README for installation, upgrade, uninstall and data backup.'
+          if ($LASTEXITCODE -ne 0) { throw 'Draft prerelease creation failed.' }

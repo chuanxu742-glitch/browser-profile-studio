@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { BrowserContext, Page } from 'playwright';
-import { launchPersistentChromium } from '../../src/browser/chromium-launcher.js';
+import { launchPersistentChromium, usesNativeChromiumProfile } from '../../src/browser/chromium-launcher.js';
 import { launchPersistentFirefox } from '../../src/browser/firefox-launcher.js';
 import { generateFingerprint } from '../../src/fingerprint/generator.js';
 import { managedBrowserIdentity } from '../../src/fingerprint/runtime-identity.js';
+import { hasChromiumGpuSession, probeChromiumPersona } from '../../src/fingerprint/runtime-probe.js';
 import { buildStealthInjectionScript } from '../../src/fingerprint/stealth-scripts.js';
 import { ENVIRONMENT_PROBE } from '../../src/browser/environment-probe.js';
 import { buildEnvironmentDiagnostics, expectedEnvironment, type EnvironmentSurfaceSnapshot } from '../../src/browser/environment-diagnostics.js';
@@ -269,6 +270,129 @@ realRuntime('real managed fingerprint runtime identity', () => {
       }
     }, 120_000);
   }
+  it('observes one Windows/Tokyo persona across refresh, worker, headers and restart without claiming absent GPU/network proof', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fingerprint-windows-persona-'));
+    const fingerprint = generateFingerprint({
+      seed: 20260925, engine: 'chromium', os: 'windows', countryCode: 'JP',
+      locale: 'ja-JP', languages: ['ja-JP', 'ja'], timezone: 'Asia/Tokyo',
+      platformVersion: '15.0.0', hardwareConcurrency: 16, deviceMemory: 8,
+      screen: { width: 2560, height: 1440, availWidth: 2560, availHeight: 1440,
+        colorDepth: 24, pixelDepth: 24, devicePixelRatio: 1 },
+      viewport: { width: 2560, height: 1369 },
+      ...(process.env.ABS_PROFILE_EXPECTED_PUBLIC_IP ? { expectedPublicIp: process.env.ABS_PROFILE_EXPECTED_PUBLIC_IP } : {}),
+      ...(process.env.ABS_PROFILE_EXPECTED_WEBRTC_IP ? { expectedWebRtcIp: process.env.ABS_PROFILE_EXPECTED_WEBRTC_IP } : {}),
+    });
+    expect(() => (fingerprint.geo.languages as string[]).push('en-US')).toThrow(TypeError);
+    const snapshots: unknown[] = [];
+    try {
+      for (let iteration = 0; iteration < 2; iteration++) {
+        const launched = await launchPersistentChromium(join(root, 'profile'), {
+          headless: true, fingerprintProfile: fingerprint, viewport: fingerprint.viewport,
+          locale: fingerprint.geo.locale, timezoneId: fingerprint.geo.timezoneId,
+          userAgent: fingerprint.userAgent, initScript: buildStealthInjectionScript(fingerprint),
+          managedFingerprintInitScript: true,
+          ...(process.env.ABS_PROFILE_PROXY ? { proxy: { server: process.env.ABS_PROFILE_PROXY, bypass: '127.0.0.1' } } : {}),
+        });
+        if (!hasChromiumGpuSession(launched)) {
+          await launched.close();
+          throw new Error('Managed Chromium did not expose a browser CDP session');
+        }
+        const context: BrowserContext = launched;
+        try {
+          const page = await context.newPage();
+          await page.goto(`${origin}/warmup`);
+          for (let visit = 0; visit < 2; visit++) {
+            await page.goto(`${origin}/windows-persona?run=${iteration}&visit=${visit}`);
+            const observation = await page.evaluate(async () => {
+              const hints = await (navigator as Navigator & { userAgentData: {
+                getHighEntropyValues(keys: string[]): Promise<Record<string, unknown>>;
+              } }).userAgentData.getHighEntropyValues(['uaFullVersion', 'fullVersionList', 'platformVersion']);
+              const worker = new Worker('/worker.js');
+              const workerIdentity = await new Promise<Record<string, unknown>>((resolve, reject) => {
+                worker.onmessage = event => { worker.terminate(); resolve(JSON.parse(event.data)); };
+                worker.onerror = event => { worker.terminate(); reject(new Error(event.message)); };
+              });
+              const gl = document.createElement('canvas').getContext('webgl');
+              const debug = gl?.getExtension('WEBGL_debug_renderer_info');
+              const canvas = new OffscreenCanvas(8, 8);
+              const drawing = canvas.getContext('2d')!;
+              for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+                drawing.fillStyle = `rgb(${x * 27},${y * 29},59)`;
+                drawing.fillRect(x, y, 1, 1);
+              }
+              const pixels = Array.from(drawing.getImageData(0, 0, 8, 8).data);
+              const audio = new OfflineAudioContext(1, 128, 44100);
+              const oscillator = audio.createOscillator();
+              oscillator.frequency.value = 440;
+              oscillator.connect(audio.destination);
+              oscillator.start();
+              const rendered = await audio.startRendering();
+              const audioSamples = Array.from(rendered.getChannelData(0).slice(8, 24));
+              return { userAgent: navigator.userAgent, platform: navigator.platform, language: navigator.language,
+                languages: Array.from(navigator.languages), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                hardwareConcurrency: navigator.hardwareConcurrency, deviceMemory: (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
+                screen: { width: window.screen.width, height: window.screen.height },
+                viewport: { width: innerWidth, height: innerHeight }, hints, workerIdentity,
+                canvas: pixels, audioSamples,
+                webgl: debug && { vendor: gl!.getParameter(debug.UNMASKED_VENDOR_WEBGL),
+                  renderer: gl!.getParameter(debug.UNMASKED_RENDERER_WEBGL) } };
+            });
+            expect(observation).toMatchObject({
+              userAgent: fingerprint.userAgent, platform: fingerprint.platform, language: 'ja-JP',
+              languages: ['ja-JP', 'ja'], timezone: 'Asia/Tokyo', hardwareConcurrency: 16, deviceMemory: 8,
+              screen: { width: 2560, height: 1440 }, viewport: { width: 2560, height: 1369 },
+              hints: { uaFullVersion: fingerprint.browserVersion, platformVersion: fingerprint.platformVersion,
+                fullVersionList: expect.arrayContaining([{ brand: 'Chromium', version: fingerprint.browserVersion }]) },
+              workerIdentity: { userAgent: fingerprint.userAgent, platform: fingerprint.platform,
+                languages: ['ja-JP', 'ja'], timezone: 'Asia/Tokyo', hardwareConcurrency: 16, deviceMemory: 8 },
+            });
+            if (usesNativeChromiumProfile(context)) {
+              expect(observation.webgl).toEqual({ vendor: fingerprint.webgl.unmaskedVendor,
+                renderer: fingerprint.webgl.unmaskedRenderer });
+            }
+            expect(observation.canvas).toEqual(observation.workerIdentity.canvas);
+            expect(observation.audioSamples.some(sample => Math.abs(sample) > 0.001)).toBe(true);
+            snapshots.push(observation);
+            const headers = requests.filter(request => request.url === `/windows-persona?run=${iteration}&visit=${visit}`).at(-1)?.headers;
+            expect(headers?.['user-agent']).toBe(fingerprint.userAgent);
+            expect(headers?.['accept-language']?.toString().toLowerCase()).toContain('ja-jp');
+            expect(headers?.['sec-ch-ua-platform']).toBe('"Windows"');
+            expect(headers?.['sec-ch-ua-platform-version']).toBe('"15.0.0"');
+            expect(headers?.['sec-ch-ua-full-version-list']).toContain(`"Chromium";v="${fingerprint.browserVersion}"`);
+          }
+          const result = await probeChromiumPersona(context, page, fingerprint, {
+            proxyConfigured: Boolean(process.env.ABS_PROFILE_PROXY),
+            ...(process.env.ABS_PROFILE_EGRESS_URL ? { egressUrl: process.env.ABS_PROFILE_EGRESS_URL } : {}),
+            ...(process.env.ABS_PROFILE_STUN_URL ? { stunUrl: process.env.ABS_PROFILE_STUN_URL } : {}),
+          });
+          if (result.gpuBackend.status === 'pass') {
+            expect(result.observed.gpu?.deviceString).toBeTruthy();
+          } else {
+            expect(result.gpuBackend.detail).toMatch(/GPU|backend/i);
+          }
+          if (usesNativeChromiumProfile(context) && result.gpuBackend.status === 'fail') {
+            throw new Error(`Native persona physical GPU mismatch: ${result.gpuBackend.detail}`);
+          }
+          if (usesNativeChromiumProfile(context) && result.webgpuMetadata.status === 'fail') {
+            throw new Error(`Native persona WebGPU metadata mismatch: ${result.webgpuMetadata.detail}`);
+          }
+          if (!process.env.ABS_PROFILE_EGRESS_URL) expect(result.proxyEgress.status).toBe('unverified');
+          if (!process.env.ABS_PROFILE_STUN_URL) expect(result.webrtcIce.status).toBe('unverified');
+          if (result.proxyEgress.status === 'fail' || result.webrtcIce.status === 'fail') {
+            throw new Error(`Persona network mismatch: ${JSON.stringify(result)}`);
+          }
+          console.info('Windows persona physical/network probe:', JSON.stringify({
+            native: usesNativeChromiumProfile(context), gpuBackend: result.gpuBackend,
+            webgpuDevice: result.webgpuDevice, webgpuMetadata: result.webgpuMetadata,
+            proxyEgress: result.proxyEgress, webrtcIce: result.webrtcIce,
+          }));
+        } finally { await context.close(); }
+      }
+      expect(snapshots[0]).toEqual(snapshots[2]);
+      expect(snapshots[1]).toEqual(snapshots[3]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }, 120_000);
+
 
   it('rejects an explicit language header that disagrees with the managed profile', async () => {
     const root = await mkdtemp(join(tmpdir(), 'fingerprint-language-conflict-'));

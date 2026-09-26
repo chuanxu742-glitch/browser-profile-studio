@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EXPECTED_CHROMIUM_CORE, nativeChromiumProfileArgs, resolveVerifiedChromiumCore } from '../../src/browser/custom-chromium-runtime.js';
 import { generateFingerprint } from '../../src/fingerprint/generator.js';
@@ -13,9 +13,21 @@ afterEach(async () => { for (const directory of directories.splice(0)) await rm(
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'abs-core-test-'));
   directories.push(directory);
-  const executablePath = join(directory, 'chrome');
+  const executablePath = join(directory, process.platform === 'win32' ? 'chrome.exe' : 'chrome');
   await writeFile(executablePath, 'test executable');
-  const provenance = { schemaVersion: 1, engine: 'chromium', target: 'linux-x64',
+  const resourcePath = join(directory, 'locales', 'fr.pak');
+  await mkdir(dirname(resourcePath));
+  await writeFile(resourcePath, 'test resources');
+  const libraryPath = process.platform === 'win32' ? join(directory, 'chrome.dll') : undefined;
+  if (libraryPath) await writeFile(libraryPath, 'patched native library');
+  const executableSha256 = createHash('sha256').update('test executable').digest('hex');
+  const files: Record<string, string> = {
+    [process.platform === 'win32' ? 'chrome.exe' : 'chrome']: executableSha256,
+    'locales/fr.pak': createHash('sha256').update('test resources').digest('hex'),
+  };
+  if (libraryPath) files['chrome.dll'] = createHash('sha256').update('patched native library').digest('hex');
+  const provenance = { schemaVersion: 1, engine: 'chromium',
+    target: process.platform === 'win32' ? 'win-x64' : 'linux-x64',
     browserVersion: managedBrowserIdentity('chromium').fullVersion,
     chromiumRevision: EXPECTED_CHROMIUM_CORE.chromiumRevision,
     playwrightVersion: EXPECTED_CHROMIUM_CORE.playwrightVersion,
@@ -23,10 +35,10 @@ async function fixture() {
       { path: EXPECTED_CHROMIUM_CORE.patchPath, sha256: String(EXPECTED_CHROMIUM_CORE.patchSha256) },
       { path: EXPECTED_CHROMIUM_CORE.renderingPatchPath, sha256: String(EXPECTED_CHROMIUM_CORE.renderingPatchSha256) },
     ],
-    executableSha256: createHash('sha256').update('test executable').digest('hex') };
+    executableSha256, files };
   const provenancePath = join(directory, 'build-provenance.json');
   await writeFile(provenancePath, JSON.stringify(provenance));
-  return { executablePath, provenance, provenancePath };
+  return { executablePath, resourcePath, libraryPath, provenance, provenancePath };
 }
 
 describe('custom Chromium runtime', () => {
@@ -41,6 +53,54 @@ describe('custom Chromium runtime', () => {
     await writeFile(core.executablePath, 'changed executable');
     await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
       .rejects.toThrow('HASH_MISMATCH');
+  });
+  it('rejects replaced runtime resources while the executable remains unchanged', async () => {
+    const core = await fixture();
+    await writeFile(core.libraryPath ?? core.resourcePath, 'unpatched replacement');
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('HASH_MISMATCH');
+  });
+  it('rejects missing or undeclared runtime files and incomplete inventories', async () => {
+    const core = await fixture();
+    await rm(core.resourcePath);
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('PROVENANCE_MISMATCH');
+    await writeFile(core.resourcePath, 'test resources');
+    await writeFile(join(dirname(core.executablePath), 'chrome_extra.dll'), 'untracked code');
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('PROVENANCE_MISMATCH');
+    await rm(join(dirname(core.executablePath), 'chrome_extra.dll'));
+    delete core.provenance.files['locales/fr.pak'];
+    await writeFile(core.provenancePath, JSON.stringify(core.provenance));
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('PROVENANCE_MISMATCH');
+    await writeFile(core.provenancePath, JSON.stringify({ ...core.provenance, files: undefined }));
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('PROVENANCE_MISMATCH');
+  });
+  it('rejects a core built for another operating system', async () => {
+    const core = await fixture();
+    core.provenance.target = process.platform === 'win32' ? 'linux-x64' : 'win-x64';
+    await writeFile(core.provenancePath, JSON.stringify(core.provenance));
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('PROVENANCE_MISMATCH');
+  });
+  it('rejects a renamed executable and missing provenance instead of launching it', async () => {
+    const core = await fixture();
+    const renamed = join(dirname(core.executablePath), 'browser.exe');
+    await writeFile(renamed, 'test executable');
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: renamed }))
+      .rejects.toThrow('EXECUTABLE_MISMATCH');
+    await rm(core.provenancePath);
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow();
+  });
+  it('rejects a falsified browser version even if the executable hash matches', async () => {
+    const core = await fixture();
+    core.provenance.browserVersion = '152.0.0.0';
+    await writeFile(core.provenancePath, JSON.stringify(core.provenance));
+    await expect(resolveVerifiedChromiumCore({ ABS_CHROMIUM_EXECUTABLE_PATH: core.executablePath }))
+      .rejects.toThrow('PROVENANCE_MISMATCH');
   });
   it('rejects a different native patch despite a matching executable', async () => {
     const core = await fixture();
@@ -67,7 +127,7 @@ describe('custom Chromium runtime', () => {
     expect(args).toContain(`--abs-canvas-seed=${profile.canvas.seed}`);
     expect(args).toContain(`--abs-audio-seed=${profile.audio.seed}`);
     expect(args).toContain(`--abs-webgl-renderer=${profile.webgl.unmaskedRenderer}`);
-    expect(args.some(value => value.startsWith('--abs-font-allowlist='))).toBe(true);
+    expect(args.some(value => value.startsWith('--abs-font-allowlist='))).toBe(false);
     expect(() => nativeChromiumProfileArgs({ ...options, locale: 'ja-JP' })).toThrow('LANGUAGE_MISMATCH');
     expect(() => nativeChromiumProfileArgs({ ...options, timezoneId: 'Invalid/Zone' })).toThrow();
     expect(nativeChromiumProfileArgs({ headless: true, timezoneId: 'europe/paris' }))
@@ -94,6 +154,10 @@ describe('custom Chromium runtime', () => {
     expect(args.some(value => value.startsWith('--abs-audio-seed='))).toBe(false);
     expect(args).toContain('--abs-webgpu-disabled=1');
     expect(args).toContain('--abs-font-allowlist=Liberation Sans,Liberation Mono');
+    const policy = nativeChromiumProfileArgs({ headless: true, fingerprintProfile: {
+      ...profile, fontPolicy: { allowlist: ['Arial', 'Consolas'] },
+    } }, {});
+    expect(policy).toContain('--abs-font-allowlist=Arial,Consolas');
     expect(() => nativeChromiumProfileArgs({ headless: true, fingerprintProfile: profile },
       { ABS_CHROMIUM_FONT_ALLOWLIST: 'Arial,,Consolas' })).toThrow('FONTS_INVALID');
     expect(() => nativeChromiumProfileArgs({ headless: true, fingerprintProfile: {
