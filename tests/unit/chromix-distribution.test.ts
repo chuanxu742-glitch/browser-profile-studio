@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -22,7 +22,7 @@ afterEach(async () => {
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'chromix-runtime-test-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'chromix-runtime-test-')));
   scratch.push(root);
   const binary = join(root, 'chrome.exe');
   const library = join(root, 'chrome.dll');
