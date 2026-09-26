@@ -1,8 +1,8 @@
-# 浏览器 Profile 隔离工作台与策略约束自动化 MCP
+# 指纹浏览器、Profile 隔离与策略约束自动化 MCP
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> **产品定位**：面向自有、测试或已获授权网站的本地浏览器环境隔离、持久 Profile 管理与可审计自动化。项目不承诺绕过站点挑战、规避风控、账号不受限制或达到第三方检测站分数。
+> **产品目标**：面向自有、测试或已获授权网站的**指纹浏览器**；本地 Studio 是创建和管理浏览器 Profile 的控制面，而不是产品目标本身。当前可用功能与原生指纹一致性的验收状态必须分开看；项目不承诺绕过站点挑战、规避风控、账号不受限制或达到第三方检测站分数。
 >
 > **当前已交付核心能力**：
 > 1. **持久 Profile**：Firefox/Chromium 环境配置、稳定种子、Cookie 与存储目录生命周期管理；
@@ -27,7 +27,22 @@ Firefox 使用 Gecko 原生首选项对齐可支持的身份字段；stock 内�
 
 ### Chromium 原生内核
 
-已实现语言、ICU locale、时区、硬件并发数，以及 Canvas、音频、字体、WebGL/WebGPU 身份、设备内存的原生补丁与启动器接入。按当前要求只进行源码应用、静态检查和轻量测试，不编译内核；原生运行和 Docker 镜像验收留待之后执行。实现范围、验证状态和构建入口见 [Chromium 原生内核说明](browser-core/chromium/README.md)。
+Chromium 151.0.7922.34 源码层已加入语言、ICU locale、时区、硬件并发数、Canvas、音频、字体、WebGL/WebGPU 身份与设备内存补丁，并接入启动器；这不代表已编译或验收原生内核。Linux/Windows x64 构建入口已提供，Windows 构建仍需受信任的大型自托管 runner。实现边界、环境要求和构建流程见 [Chromium 原生内核说明](browser-core/chromium/README.md)。
+
+#### 当前交付验收（2026-09-26）
+
+| 范围 | 本轮证据与结论 |
+| --- | --- |
+| 本项目原生 151 源码与静态检查 | 固定版本 Chromium 151.0.7922.34 的补丁应用通过，10 项 Python 原生工具测试通过；未编译或执行原生 C++ 测试，不等于 Windows 原生运行通过。它与独立的 Chromix 152 不是同一个发行版。 |
+| 项目测试 | 当前 `npm test`：371 项 unit、35 项 MCP、36 项 integration 通过；另有 13 项 opt-in integration 跳过。`npm run build` 通过。这些不等于 Chromix 产品验收。 |
+| stock Studio 运行 | 已在 stock 浏览器上操作 Studio UI、验证本地代理转发、MV3 扩展激活、RPA，以及两轮 Cookie/localStorage 与代理重启恢复；这些不证明原生内核或 Chromix 发行包行为。 |
+| stock 指纹 | 6 项真实 stock 指纹检查通过，但 CDP 报告 SwiftShader，GPU 身份不匹配；不能据此宣称物理 GPU 或 WebGPU 身份一致。 |
+| Chromix 152 预编译包 | 独立下载上游 Windows x64 ZIP（214411666 字节）、核对固定 SHA-256 并清点 681 个文件；安装器与运行时校验路径已接入。本机**未执行该二进制**；另有 hosted run 使用固定 ZIP 直接验证浏览器及跨 realm 行为，不能混同为本机运行或发行验收。 |
+| Chromix 验收工作流 | 最新 hosted run [36219850042](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36219850042) 通过固定 ZIP 直接浏览器与跨 realm 检查；Studio/Profile 在 hosted 虚拟 GPU 上 fail-closed，物理 GPU job 跳过。此 hosted 兼容性证据不等于产品或物理 GPU 验收；本项目原生 151/发行边界见下行。 |
+| Windows 本项目原生 151 与发行 | 尚无本仓编译的 win-x64 原生 ZIP、物理 GPU runner 验收或真实发行包安装/启动；已有发行生命周期检查仅使用合成 PE，不能替代原生构建、运行及发行验收。 |
+| 尚待核验的边界 | 物理 GPU/WebGPU 身份、实际公共网络出口及 WebRTC 外部 STUN、原生语音列表、屏幕/媒体设备、CDM/Widevine 均未完成相应实机验收；本项目原生 151 锁未升级为 Chromix 152，更未升级或验证 Chrome 153。 |
+
+上述结果仅适用于自有、测试或已获授权的使用场景；当前不宣称与 AdsPower 等商业指纹浏览器等效，也不宣称原生 Windows 指纹浏览器发行已完成。
 
 ### 本地安装
 
@@ -45,7 +60,168 @@ npm run build
 npm run studio
 ```
 
+Studio 默认打开 **Profile 工作区**：用「创建 Profile」选择 Firefox 或 Chromium；
+选择 Chromium 时还需确认 stock、Project-native 151 或实验性 Chromix 152 发行版。
+发行版保存后不可切换；创建成功不表示对应二进制可用，未安装时点击「打开窗口」
+会显示启动错误且不会回退到其他发行版。列表可按名称、ID 或标签搜索，
+在每个 Profile 卡片/行中启动、编辑名称与标签、克隆（弹窗默认不复制 Cookie；
+只有明确勾选「复制源 Profile 的 Cookie」才复制登录 Cookie，取消不创建克隆）、
+轮换代理、管理 Cookie/2FA 或删除；「批量操作与工具」收纳当前结果页启动、
+CSV 导入导出等操作。窄屏以卡片呈现同一组操作，无需横向滚动 Profile 表格。
+只有实际运行的会话才显示浏览器版本和可获得的运行时诊断；地理设置不等于
+代理出口验证，诊断不可用不等于验证通过。顶部快速网址入口会创建独立
+Firefox Profile 再尝试启动，适用于已授权网站。
+
 首次启动会在 `data/` 创建本机主密钥和 owner token，并通过一次性启动链接写入 HttpOnly Cookie。Windows 上两个启动机密以当前用户 DPAPI 密文保存，旧明文启动文件会自动迁移；业务密文仍使用 AES-256-GCM。可用 `STUDIO_MASTER_KEY`、`STUDIO_ACCESS_TOKEN` 和 `STUDIO_USERS_JSON` 接入外部 KMS 或配置静态多角色凭据。`data/` 必须作为敏感目录备份与保护；主密钥丢失后已有密文无法恢复。
+
+### Windows x64 Chromix 152 实验性预编译浏览器
+
+此路径无需在开发机编译 Chromium；安装器从上游自行下载独立发行的
+[`v152.0.7977.82/chromix-win-x64.zip`](https://github.com/xiaozhou26/Chromix/releases/download/v152.0.7977.82/chromix-win-x64.zip)。
+项目仓库及 source+build 测试包**不内置**该浏览器。安装器固定校验 ZIP SHA-256
+`1cfbe638212ba4d463a8c3330fcfbd8c88f9844ff6dfc0722f2c40745e0bc7f8`，
+写出完整文件清单；运行时逐项校验安装内容。哈希校验不等于签名、来源可复现或浏览器运行验收；
+上游[发行说明](https://github.com/xiaozhou26/Chromix/releases/tag/v152.0.7977.82)明确 `full_acceptance=false`。
+来源与许可边界见 [Chromix 上游评估](docs/chromix-upstream-assessment.md)。
+
+在 **Windows x64 PowerShell** 中，从本仓根目录执行（须有 Node.js 20+、npm、
+网络和 `curl.exe`；`npm run studio` 使用开发依赖 `tsx`，无需下载 stock Chromium）：
+
+```powershell
+npm ci --include=dev
+$scratch = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChromixDownloadScratch'))
+$installRoot = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChromixExperimental'))
+New-Item -ItemType Directory -Path $scratch, $installRoot -Force | Out-Null
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-chromix.ps1 `
+  -ScratchDirectory $scratch -InstallRoot $installRoot
+if ($LASTEXITCODE -ne 0) { throw 'Chromix 安装失败' }
+$env:CHROMIX_EXECUTABLE_PATH = Join-Path $installRoot 'chromix\chrome.exe'
+if (!(Test-Path -LiteralPath $env:CHROMIX_EXECUTABLE_PATH -PathType Leaf)) { throw 'Chromix 可执行文件不存在' }
+npm run studio
+```
+
+`-ScratchDirectory` 和 `-InstallRoot` 都必须预先存在、互不包含且不能为根目录；
+安装结果严格为 `<InstallRoot>\chromix\chrome.exe`，`CHROMIX_EXECUTABLE_PATH`
+须是该文件的**绝对路径**，并在启动 Studio 的同一终端设置。已存在
+`<InstallRoot>\chromix` 时安装器会拒绝覆盖；请勿将其当作现有 Profile 的升级步骤。
+在 Studio 新建环境时选择 Chromium，再显式选择 **Chromix 152 (experimental)**，
+新建独立 Profile；已保存 Profile 的发行版和 ID 不可变，不能将 stock 或
+**Project-native Chromium 151** 的既有 Profile 改选为 Chromix。
+Chromix 已保存 Profile 在首次成功启动后固定种子、GPU、屏幕/硬件与地理身份；
+修改这些字段须创建新的独立 Profile（克隆会分配新 ID/种子），名称、标签、
+代理与扩展管理仍可正常更新。启动现有 Chromix Profile 时也不接受地理位置、
+语言、时区、视口、种子或其他指纹覆盖参数；须使用该 Profile 自身的身份配置。
+首次 GPU 探测由启动流程内部写入，启动失败
+不会提前提交身份；旧 Profile 只要已有浏览器数据或保存的状态即按已使用身份保护。
+同一 Profile 根目录只允许一个 Studio 进程写入；多个独立 Studio 进程共享此目录
+不受本地进程内序列化保护，不属于受支持部署方式。无法保证单写者时应停止
+启动第二个进程，而非继续操作；当前并无跨进程锁可替代这一人工门槛。
+Chromix 浏览器数据与其他发行版隔离，选中但未安装或校验失败时会报错，
+**不会回退到 Playwright stock 或项目原生 151**。Chromix 152 的 Canvas/音频原生扰动
+目前禁用，以优先保持物理一致性，**不**代表每个 Profile 具有独特扰动或抗检测能力。
+
+本仓 [Chromix Windows 验收工作流](.github/workflows/chromix-windows-acceptance.yml)
+默认托管 Windows runner 仅测试兼容性，不作物理 GPU 或产品验收。
+原始 hosted run [36160965923](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36160965923)
+的安装器 fixture 22 项通过，固定 Chromix 152.0.7977.82 ZIP 已安装并由直接
+Playwright 启动；该次兼容性 job 因 first 阶段 Worker 脚本请求缺少
+`sec-ch-ua`、`sec-ch-ua-platform`、`sec-ch-ua-mobile` 而失败。
+最终 source-aligned hosted run
+[36218295845](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36218295845)
+（提交 `0cf016b236a6fb322a586cd682e10b1104bf2b43`）通过 5 个文件、45 项 Windows
+scoped unit tests、`npm run build`、已验证 ZIP 及直接 Chromix 兼容性检查。Studio 保存的
+Profile 启动被 hosted 虚拟 GPU 以 HTTP 500 `GPU_ACTIVE_DEVICE_AMBIGUOUS` 拒绝；
+没有活动会话或已保存 GPU 身份，结果为 `productAcceptance NOT RUN`。物理 GPU job
+因硬件 runner 不可用而跳过；硬件验收仍受阻，不能据此宣称产品或物理 GPU 验收通过。
+
+扩展覆盖的 hosted run [36219731789](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36219731789)
+（`07ff604`）在**直接浏览器**夹具中对页面、同源 iframe、Worker 的 UA-CH、
+平台、语言/时区、CPU 核心数及可用的内存字段作一致性断言；对页面/iframe
+的屏幕/DPR 和离线音频、三个 realm 的 Canvas 像素作一致性断言，并在同一
+浏览器数据目录重启后检查身份及 Canvas/音频稳定性。Canvas/音频扰动关闭，
+**不宣称跨 Profile 唯一性**；虚拟 WebGL/WebGPU 仅记录 API 可用性，不作物理 GPU、
+shader 或设备身份通过断言。外部网络与 WebRTC ICE/STUN 未运行；该次 Studio
+依然只确认虚拟 GPU fail-closed，物理 GPU job 跳过，产品验收仍为 `NOT RUN`。
+
+### Windows x64 离线原生发行包（未签名）
+
+此路径与下面的 source+build **开发测试包**严格分开。生产打包只接受独立构建的
+`abs-chromium-151.0.7922.34-win-x64.zip`（根目录 `chromium/chrome.exe`、
+`chromium/chrome.dll`、同目录的 `build-provenance.json` 和完整运行依赖）以及
+**独立传入**的 SHA-256。打包脚本检查压缩包
+路径和哈希、`win-x64`/版本/源码 revision/两份补丁顺序与哈希、每个运行文件的 SHA-256；
+缺失或不匹配直接停止，绝不拿 Playwright stock Chromium 冒充定制内核。
+内嵌 provenance/文件清单与自行填写的摘要不能独立证明二进制来自该源码；工作流还必须
+核验原生构建的唯一 workflow 文件身份、成功的 build job、同一源码提交和唯一未过期产物。
+手工打包时请从受信任的原生构建记录独立取得摘要，不要把 ZIP 附带的摘要当作来源认证。
+原生 Windows 构建的工具链、磁盘与 runner 要求见 [Chromium 内核说明](browser-core/chromium/README.md)。
+当前本机没有编成的 Windows 原生 ZIP，也没有对真实原生 ZIP 执行打包、安装、升级、
+卸载或原生 Studio/GPU 实机验收；已执行的安装生命周期验证使用的是合成 PE 文件，
+不能替代真实内核发行验收。
+
+在 Windows x64 打包机安装 Node 22 并运行 `npm ci --include=dev`、`npm run build` 后：
+
+```powershell
+$nativeSha = '<来自构建方独立通道的64位SHA256>'
+./scripts/package-windows-release.ps1 -OutputDirectory ./release `
+  -NativeArchive ./native/abs-chromium-151.0.7922.34-win-x64.zip `
+  -NativeArchiveSha256 $nativeSha
+```
+
+手动触发 **Unsigned Windows native offline release** 工作流时，输入已成功的
+`chromium-core-windows` 原生构建 run ID 和从构建方独立获得的 ZIP SHA-256；工作流要求
+原生构建的源码提交与发行提交完全一致，核对两份摘要，再解压安装并通过
+`ABS_REQUIRE_NATIVE_CHROMIUM=1` 实际启动 Profile、导航、以包内 Chromium 渲染 Studio UI
+并截图，以及重启/同包替换后的数据检查。没有真实原生 ZIP
+不会产生发行包。生成的草稿 prerelease 和所有文件均**未签名**；`SHA256SUMS.txt` 是防
+误传的摘要，不提供发布者身份保证。维护者必须经可信渠道分发 ZIP 摘要。
+发行工作流默认选择可信、自托管的 Windows x64 `studio-gpu` runner：必须在可交互的桌面
+会话中提供真实 GPU/CDP GPU 合成能力，以便启动 headed 原生 Profile 并通过一致性检查；
+GitHub 托管 Windows runner 若只有 SwiftShader 就会失败，不能为了发布放宽校验。
+原生构建可使用独立的 `chromium-build` 大型 runner；两条工作流都应在受信任、
+专用 runner 上运行。
+
+用户在 Windows x64 上先从可信渠道核对 ZIP 摘要，再解压到临时目录，在解压包根目录运行：
+
+```powershell
+$expected = '<独立获得的发行ZIP SHA256>'
+$zip = @(Get-ChildItem .\browser-profile-studio-*-win-x64-unsigned-native.zip -File)
+if ($zip.Count -ne 1 -or (Get-FileHash -LiteralPath $zip[0].FullName -Algorithm SHA256).Hash -ine $expected) { throw '发行 ZIP 缺失或摘要不符' }
+Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath .\extracted
+$roots = @(Get-ChildItem .\extracted -Directory)
+if ($roots.Count -ne 1) { throw '发行包根目录不唯一' }
+$package = $roots[0].FullName
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$package\scripts\install-windows-release.ps1" -PackageRoot $package -InstallDirectory "$env:LOCALAPPDATA\BrowserProfileStudio"
+if ($LASTEXITCODE -ne 0) { throw '安装失败' }
+& "$env:LOCALAPPDATA\BrowserProfileStudio\Start-Studio.bat"
+```
+
+升级时以新版解压包重复 `-PackageRoot ... -InstallDirectory ...`；先关闭 Studio，脚本
+拒绝降级、冲突同版或损坏的安装，保留安装目录下 `data/`（包括 DPAPI 主密钥、
+Profile、Cookie、备份）。请另行安全备份 `data/`；Windows DPAPI 数据通常要求同一
+Windows 用户和机器恢复。卸载默认**保留 `data/`**：
+默认卸载还会留下 `INSTALL-STATE.json` 记录已验证的旧版本，以便重装时阻止针对保留数据的降级；
+不要单独删除该记录后尝试安装旧版。未知版本的孤立 `data/` 需要先人工备份并确认迁移策略。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:LOCALAPPDATA\BrowserProfileStudio\scripts\install-windows-release.ps1" `
+  -PackageRoot "$env:LOCALAPPDATA\BrowserProfileStudio" `
+  -InstallDirectory "$env:LOCALAPPDATA\BrowserProfileStudio" -Action Uninstall
+```
+
+仅在明确已经备份且确实要永久销毁本地用户数据时，为上述卸载命令额外传入
+`-RemoveData`；不要将运行后的 `data/` 上传到 Release/故障报告。发行 ZIP 包含
+Node 22 x64、`tsx` 和已安装 npm 依赖、UI、应用代码与定制 Chromium 完整运行目录，
+安装/启动**不需要下载 Node、npm 包或 Playwright 浏览器**。Firefox 不在此发行包中，
+不能把本机缓存中的 Firefox/stock Chromium 称为原生内核。`Start-Studio.bat` 每次
+校验发行文件并固定设置 `ABS_CHROMIUM_EXECUTABLE_PATH` 和
+`ABS_REQUIRE_NATIVE_CHROMIUM=1`；请从该入口启动，不要绕开校验。原生 Chromium
+基本启动不代表完整指纹/生产网络/登录长期稳定性验收。
+使用受管原生 Chromium 指纹档案时，安装目标也必须具备实际可用的 GPU/CDP 合成后端；
+档案的 GPU 厂商与型号从本机已验证的物理设备读取，并须唯一映射到受管型号，不允许随意
+指定与物理设备不符的 WebGL/WebGPU 身份。只有 SwiftShader、虚拟/未映射显卡的主机
+会被原生必需模式拒绝，不会自动改用 stock 内核。
 
 ### Windows 未签名 source+build 测试包
 
@@ -53,10 +229,10 @@ npm run studio
 操作入口：**Actions → Unsigned Windows test package → Run workflow**，选择 `main`；
 成功后由维护者在 **Releases** 查看草稿与下载资产。
 在标准 Windows 托管 runner 上构建并解压验证后，创建 **draft + prerelease**；不会创建公开稳定版，
-也不会从 PR 发布。草稿仅对有权限的仓库维护者可见。所有工作流使用公开仓库标准托管 runner，
-不需要付费证书、自托管 runner 或外部部署。
-为避免 Actions artifact/cache 存储额度可能产生费用，所有工作流不使用 Actions artifact
-上传/下载或依赖缓存；运行证明通过日志/步骤摘要提供，分发与截图直接作为 GitHub Release assets 保存。
+也不会从 PR 发布。草稿仅对有权限的仓库维护者可见。**此开发测试包工作流**使用公开仓库
+标准托管 runner，不需要付费证书、自托管 runner 或外部部署。为避免 Actions artifact/cache
+存储额度可能产生费用，该测试包工作流不使用 Actions artifact 上传/下载或依赖缓存；
+运行证明通过日志/步骤摘要提供，分发与截图直接作为 GitHub Release assets 保存。
 
 此 ZIP 是 **源码 + `dist/` 开发者测试包，不是安装器、独立 EXE 或离线发行版**。
 需要 Windows x64、PATH 中的 Node.js 22 LTS/npm，以及访问 npm 和 Playwright 下载站点的网络。
@@ -81,6 +257,8 @@ Edge/Chrome 或已配置的默认浏览器。不要只复制 `dist/` 后声称�
 与同一 Release 的 `SHA256SUMS.txt` 比较。摘要不是数字签名，不能代替发布者身份验证。
 
 默认下载项目锁定的 stock Playwright Firefox/Chromium；不能任意替换内核版本。
+该开发测试包的 stock 浏览器 smoke **不是** Windows 原生补丁/指纹档案一致性验收；
+只有上面的原生发行工作流实际执行定制核心和物理 GPU 门禁后才可报告相应结果。
 **Firefox 深层 Worker Canvas 一致性仍为 NOT PASSED**；基本启动、UI、页面导航或 CI 成功
 不代表定制内核、完整指纹、生产网络、登录或长期稳定性已经验收。常规 integration 的 opt-in
 用例仍可能跳过；Windows CI 另显式运行 `test:firefox` 和 `test:fingerprint-runtime`，

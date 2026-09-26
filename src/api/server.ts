@@ -6,6 +6,7 @@ import { join, resolve, extname } from 'node:path';
 import { URL } from 'node:url';
 import { z } from 'zod';
 import type { SessionManager } from '../browser/session-manager.js';
+import type { BrowserDistribution } from '../profile/types.js';
 import type { DistributedTaskDefinition, DistributedTaskRecord, TaskExecutionMode, TaskPriority, TaskState } from '../distributed/types.js';
 import type { ApiResponse } from './types.js';
 import { SERVER_VERSION } from '../capabilities.js';
@@ -560,6 +561,10 @@ export class RestApiServer {
           });
           return;
         }
+        if (!validBrowserDistribution(body.browserDistribution, body.engine ?? 'firefox')) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'browserDistribution requires Chromium and must be playwright-stock, project-native-151, or chromix-152', timestamp: Date.now() });
+          return;
+        }
         await this.validateExtensionIds(body.extensionIds, body.engine === 'chromium' ? 'chromium' : 'firefox', identity!);
         const created = await this.manager.createProfile(body as any);
         this.sendJson(res, 201, {
@@ -587,6 +592,10 @@ export class RestApiServer {
       if (profileStartMatch && method === 'POST') {
         const profileId = decodeURIComponent(profileStartMatch[1]!);
         const body = await this.readJsonBody(req);
+        if (body.engine !== undefined || body.browserDistribution !== undefined) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'Saved profile engine and browserDistribution cannot be overridden at start', timestamp: Date.now() });
+          return;
+        }
         
         // 检查是否已有活跃会话
         const existingSessionId = this.profileSessionMap.get(profileId);
@@ -760,11 +769,7 @@ export class RestApiServer {
         const profileId = decodeURIComponent(profileStopMatch[1]!);
         const sessionId = this.profileSessionMap.get(profileId);
         if (sessionId) {
-          try {
-            await this.manager.stop(sessionId, 'user_requested');
-          } catch {
-            // ignore
-          }
+          await this.manager.stop(sessionId, 'user_requested');
           this.profileSessionMap.delete(profileId);
         }
         this.sendJson(res, 200, {
@@ -801,7 +806,7 @@ export class RestApiServer {
         }
       }
 
-      const profileMatch = pathname.match(/^\/api\/v1\/profiles\/([^/]+)$/);
+      const profileMatch = pathname.match(/^\/api\/v1\/profiles\/(?!batch-(?:import|export)-csv$)([^/]+)$/);
       if (profileMatch && profileMatch[1]) {
         const profileId = decodeURIComponent(profileMatch[1]);
         if (method === 'GET') {
@@ -826,8 +831,12 @@ export class RestApiServer {
 
         if (method === 'PUT') {
           const body = await this.readJsonBody(req);
+          if (body.engine !== undefined || body.browserDistribution !== undefined || body.profileId !== undefined) {
+            this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'Saved profile engine, browserDistribution and profileId are immutable', timestamp: Date.now() });
+            return;
+          }
           const existing = await this.manager.getProfile(profileId);
-          if (body.extensionIds !== undefined || body.engine !== undefined) await this.validateExtensionIds(body.extensionIds ?? existing?.extensionIds ?? [], body.engine ?? existing?.engine ?? 'firefox', identity!);
+          if (body.extensionIds !== undefined) await this.validateExtensionIds(body.extensionIds, existing?.engine ?? 'firefox', identity!);
           const updated = await this.manager.updateProfile(profileId, body);
           this.sendJson(res, 200, { success: true, code: 'OK', data: publicProfile(updated), timestamp: Date.now() });
           return;
@@ -860,6 +869,10 @@ export class RestApiServer {
           return;
         }
         const body = await this.readJsonBody(req);
+        if (body.engine !== undefined || body.browserDistribution !== undefined || body.profileId !== undefined) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'Clone retains its source engine and browserDistribution and creates a new profileId', timestamp: Date.now() });
+          return;
+        }
         await this.validateExtensionIds(source.extensionIds ?? [], source.engine ?? 'firefox', identity!);
         const cookies = body.includeCookies === true ? await this.manager.getStore().getCookies(sourceId) : [];
         const created = await this.manager.createProfile({
@@ -871,6 +884,7 @@ export class RestApiServer {
           ...(source.extensionIds !== undefined ? { extensionIds: source.extensionIds } : {}),
           ...(source.geo !== undefined ? { geo: source.geo } : {}),
           engine: source.engine ?? 'firefox',
+          ...(source.browserDistribution !== undefined ? { browserDistribution: source.browserDistribution } : {}),
           ...(source.userAgent !== undefined ? { userAgent: source.userAgent } : {}),
           ...(source.customHeaders !== undefined ? { customHeaders: source.customHeaders } : {}),
           ...(source.twoFactorSecret !== undefined ? { twoFactorSecret: source.twoFactorSecret } : {}),
@@ -890,7 +904,7 @@ export class RestApiServer {
           this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'profileIds and a supported action are required', timestamp: Date.now() });
           return;
         }
-        const results: Array<{ profileId: string; success: boolean; sessionId?: string; code?: unknown }> = [];
+        const results: Array<{ profileId: string; success: boolean; sessionId?: string; code?: unknown; message?: string }> = [];
         for (const id of ids) {
           try {
             if (!this.canAccessResource(identity!, 'profile', id)) {
@@ -899,6 +913,20 @@ export class RestApiServer {
             }
             if (body.action === 'delete') results.push({ profileId: id, success: await this.manager.deleteProfile(id) });
             else if (body.action === 'start') {
+              if (!(await this.manager.getProfile(id))) {
+                results.push({ profileId: id, success: false, code: 'PROFILE_NOT_FOUND', message: 'Profile no longer exists; refresh the list' });
+                continue;
+              }
+              const existingSessionId = this.profileSessionMap.get(id);
+              if (existingSessionId) {
+                try {
+                  this.manager.status(existingSessionId);
+                  results.push({ profileId: id, success: true, sessionId: existingSessionId, code: 'ALREADY_RUNNING' });
+                  continue;
+                } catch {
+                  this.profileSessionMap.delete(id);
+                }
+              }
               const session = await this.manager.start({ profileId: id, headless: body.headless ?? false, fingerprint: true });
               this.profileSessionMap.set(id, session.sessionId);
               results.push({ profileId: id, success: true, sessionId: session.sessionId });
@@ -909,7 +937,7 @@ export class RestApiServer {
               results.push({ profileId: id, success: true });
             }
           } catch (error) {
-            results.push({ profileId: id, success: false, code: typeof error === 'object' && error && 'code' in error ? error.code : 'FAILED' });
+            results.push({ profileId: id, success: false, code: error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'FAILED', message: body.action === 'stop' ? 'Session stop failed; Profile state was not confirmed saved' : body.action === 'start' ? 'Browser launch failed' : 'Profile deletion failed' });
           }
         }
         this.sendJson(res, 200, { success: true, code: 'OK', data: results, timestamp: Date.now() });
@@ -918,7 +946,7 @@ export class RestApiServer {
 
       // Persistent proxy pool
       if (pathname === '/api/v1/proxies' && method === 'GET' && this.options.proxyPool) {
-        const proxies = await this.options.proxyPool.list();
+        const proxies = (await this.options.proxyPool.list()).filter((proxy) => this.canAccessResource(identity!, 'proxy', proxy.proxyId));
         this.sendJson(res, 200, { success: true, code: 'OK', data: proxies.map(publicProxy), timestamp: Date.now() });
         return;
       }
@@ -954,6 +982,10 @@ export class RestApiServer {
           this.sendJson(res, 409, { success: false, code: 'NO_PROXY_AVAILABLE', message: 'No healthy enabled proxy matched', timestamp: Date.now() });
           return;
         }
+        if (!this.canAccessResource(identity!, 'proxy', selected.proxyId)) {
+          this.sendJson(res, 403, { success: false, code: 'RESOURCE_ACCESS_DENIED', message: 'This API key has no grant for the selected proxy', timestamp: Date.now() });
+          return;
+        }
         const updated = await this.manager.updateProfile(decodeURIComponent(rotateProxyMatch[1]!), {
           proxyId: selected.proxyId,
           proxy: selected,
@@ -964,7 +996,8 @@ export class RestApiServer {
 
       // Declarative RPA workflows, schedules and task logs
       if (pathname === '/api/v1/rpa/workflows' && method === 'GET' && this.options.rpa) {
-        this.sendJson(res, 200, { success: true, code: 'OK', data: await this.options.rpa.listWorkflows(), timestamp: Date.now() });
+        const workflows = (await this.options.rpa.listWorkflows()).filter((workflow) => this.canAccessResource(identity!, 'workflow', workflow.workflowId));
+        this.sendJson(res, 200, { success: true, code: 'OK', data: workflows, timestamp: Date.now() });
         return;
       }
       if (pathname === '/api/v1/rpa/workflows' && method === 'POST' && this.options.rpa) {
@@ -1098,23 +1131,43 @@ export class RestApiServer {
         }
       }
       if (pathname === '/api/v1/rpa/tasks' && method === 'GET' && this.options.rpa) {
-        this.sendJson(res, 200, { success: true, code: 'OK', data: await this.options.rpa.listTasks(), timestamp: Date.now() });
+        const tasks = (await this.options.rpa.listTasks()).filter((task) =>
+          this.canAccessResource(identity!, 'workflow', task.workflowId) && this.canAccessResource(identity!, 'profile', task.profileId));
+        this.sendJson(res, 200, { success: true, code: 'OK', data: tasks, timestamp: Date.now() });
         return;
       }
       if (pathname === '/api/v1/rpa/tasks' && method === 'POST' && this.options.rpa) {
-        const task = await this.options.rpa.run(await this.readJsonBody(req) as any);
+        const body = await this.readJsonBody(req);
+        if (!this.canAccessResource(identity!, 'workflow', body.workflowId)
+          || !this.canAccessResource(identity!, 'profile', body.profileId)) {
+          this.sendJson(res, 403, { success: false, code: 'RESOURCE_ACCESS_DENIED', message: 'This API key has no grant for the workflow or Profile', timestamp: Date.now() });
+          return;
+        }
+        if (typeof body.profileId === 'string' && !(await this.manager.getProfile(body.profileId))) {
+          this.sendJson(res, 404, { success: false, code: 'PROFILE_NOT_FOUND', message: 'Profile was not found', timestamp: Date.now() });
+          return;
+        }
+        const task = await this.options.rpa.run(body as any);
         this.sendJson(res, 202, { success: true, code: 'ACCEPTED', data: task, timestamp: Date.now() });
         return;
       }
       const rpaTaskMatch = pathname.match(/^\/api\/v1\/rpa\/tasks\/([^/]+)$/);
       if (rpaTaskMatch && method === 'GET' && this.options.rpa) {
         const task = await this.options.rpa.getTask(decodeURIComponent(rpaTaskMatch[1]!));
+        if (task && (!this.canAccessResource(identity!, 'workflow', task.workflowId) || !this.canAccessResource(identity!, 'profile', task.profileId))) {
+          this.sendJson(res, 403, { success: false, code: 'RESOURCE_ACCESS_DENIED', message: 'This API key has no grant for this task', timestamp: Date.now() }); return;
+        }
         this.sendJson(res, task ? 200 : 404, { success: Boolean(task), code: task ? 'OK' : 'TASK_NOT_FOUND', ...(task ? { data: task } : { message: 'Task was not found' }), timestamp: Date.now() });
         return;
       }
       const rpaCancelMatch = pathname.match(/^\/api\/v1\/rpa\/tasks\/([^/]+)\/cancel$/);
       if (rpaCancelMatch && method === 'POST' && this.options.rpa) {
-        const task = await this.options.rpa.cancel(decodeURIComponent(rpaCancelMatch[1]!));
+        const taskId = decodeURIComponent(rpaCancelMatch[1]!);
+        const existing = await this.options.rpa.getTask(taskId);
+        if (existing && (!this.canAccessResource(identity!, 'workflow', existing.workflowId) || !this.canAccessResource(identity!, 'profile', existing.profileId))) {
+          this.sendJson(res, 403, { success: false, code: 'RESOURCE_ACCESS_DENIED', message: 'This API key has no grant for this task', timestamp: Date.now() }); return;
+        }
+        const task = await this.options.rpa.cancel(taskId);
         this.sendJson(res, 200, { success: true, code: 'OK', data: task, timestamp: Date.now() });
         return;
       }
@@ -1354,6 +1407,18 @@ export class RestApiServer {
         if (lines[0]?.toLowerCase().includes('name') || lines[0]?.includes('环境名称')) {
           startIndex = 1;
         }
+        const browserDistributions: Array<BrowserDistribution | undefined> = [];
+        for (let i = startIndex; i < lines.length; i++) {
+          const cols = parseCsvLine(lines[i]!);
+          if (!cols[0]) continue;
+          const engine = cols[2] === 'chromium' || cols[2] === 'chrome' ? 'chromium' : 'firefox';
+          const browserDistribution = cols[9] || undefined;
+          if (cols.length > 10 || !validBrowserDistribution(browserDistribution, engine)) {
+            this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: `Invalid browserDistribution in CSV row ${i + 1}`, timestamp: Date.now() });
+            return;
+          }
+          browserDistributions[i] = browserDistribution;
+        }
 
         for (let i = startIndex; i < lines.length; i++) {
           const cols = parseCsvLine(lines[i]!);
@@ -1368,11 +1433,13 @@ export class RestApiServer {
           const proxyPass = cols[6] || '';
           const twoFactorSecret = cols[7] || '';
           const initialCookies = cols[8] || '';
+          const browserDistribution = browserDistributions[i];
 
           const created = await this.manager.createProfile({
             name,
             tags,
             engine,
+            ...(browserDistribution === undefined ? {} : { browserDistribution }),
             ...(proxyType !== 'direct' && proxyServer ? {
               proxy: {
                 server: proxyServer.includes('://') ? proxyServer : `${proxyType}://${proxyServer}`,
@@ -1404,12 +1471,12 @@ export class RestApiServer {
         const summaries = await this.manager.listProfiles();
         const profiles = (await Promise.all(summaries.map((profile) => this.manager.getProfile(profile.profileId))))
           .filter((profile): profile is NonNullable<typeof profile> => profile !== null);
-        const header = '环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie\n';
+        const header = '环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie,browserDistribution\n';
         const rows = profiles.map((p) => {
           const tags = (p.tags || []).join('/');
           const proxyServer = p.proxy?.server || '';
           const proxyType = proxyServer.match(/^([a-z0-9]+):\/\//i)?.[1] || (proxyServer ? 'http' : 'direct');
-          return [p.name, tags, p.engine || 'firefox', proxyType, proxyServer, '', '', '', ''].map(csvCell).join(',');
+          return [p.name, tags, p.engine || 'firefox', proxyType, proxyServer, '', '', '', '', p.browserDistribution ?? ''].map(csvCell).join(',');
         }).join('\n');
 
         res.statusCode = 200;
@@ -1805,6 +1872,12 @@ function routeTemplate(pathname: string): string {
     .replace(/\/profiles\/[A-Za-z0-9_-]+/g, '/profiles/:id');
 }
 
+function validBrowserDistribution(value: unknown, engine: unknown): value is BrowserDistribution | undefined {
+  return value === undefined || (engine === 'chromium' && (
+    value === 'playwright-stock' || value === 'project-native-151' || value === 'chromix-152'
+  ));
+}
+
 function publicProfile(profile: unknown): Record<string, unknown> {
   const result = { ...(profile as Record<string, unknown>) };
   if (result.proxy && typeof result.proxy === 'object') {
@@ -1825,6 +1898,7 @@ function publicProfile(profile: unknown): Record<string, unknown> {
     result.hasTwoFactorSecret = true;
   }
   delete result.twoFactorSecret;
+  delete result.chromixIdentityCommitted;
   delete result.cookies;
   delete result.loginState;
   return result;

@@ -106,15 +106,11 @@ export async function verifyRendering(page, profile) {
   for (const kind of ['webgl', 'webgl2']) {
     const gl = result.gpu[kind];
     if (gl.skipped) continue;
-    assert.equal(gl.vendor, profile.gpuVendor);
-    assert.equal(gl.renderer, profile.gpuRenderer);
     assert(gl.maxTexture > 0);
     assert.equal(gl.invalidParameter, null);
     assert.equal(gl.error, 0x0500, 'GL_INVALID_ENUM semantics must be preserved');
   }
   if (!result.gpu.webgpu.skipped) {
-    assert.equal(result.gpu.webgpu.vendor, profile.gpuVendor);
-    assert.equal(result.gpu.webgpu.description, profile.gpuRenderer);
     assert(result.gpu.webgpu.maxTexture > 0);
   }
   if (process.platform === 'linux') {

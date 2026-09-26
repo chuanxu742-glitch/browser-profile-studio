@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionManager } from '../../src/browser/session-manager.js';
@@ -289,5 +289,154 @@ describe('Local REST API Server Unit Tests', () => {
     const detailJson = await detail.json();
     expect(detailJson.data.leaseId).toBeUndefined();
     expect(detailJson.data.events.at(-1)).toMatchObject({ phase: 'cancelled', state: 'CANCELLED' });
+  });
+  it('preserves explicit Chromium distribution across clone and CSV while rejecting mutation and mismatches', async () => {
+    const create = async (body: object) => fetch(`${baseUrl}/api/v1/profiles`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const createdResponse = await create({ name: 'Chromix fixture', engine: 'chromium', browserDistribution: 'chromix-152' });
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json()).data;
+    expect(created.browserDistribution).toBe('chromix-152');
+    expect((await (await fetch(`${baseUrl}/api/v1/profiles/${created.profileId}`)).json()).data.browserDistribution).toBe('chromix-152');
+    const listed = await (await fetch(`${baseUrl}/api/v1/profiles`)).json();
+    expect(listed.data.items.find((item: { profileId: string }) => item.profileId === created.profileId).browserDistribution).toBe('chromix-152');
+
+    const cloneResponse = await fetch(`${baseUrl}/api/v1/profiles/${created.profileId}/clone`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Chromix clone' }),
+    });
+    expect(cloneResponse.status).toBe(201);
+    const clone = (await cloneResponse.json()).data;
+    expect(clone.profileId).not.toBe(created.profileId);
+    expect(clone.browserDistribution).toBe('chromix-152');
+
+    for (const body of [
+      { name: 'Firefox mismatch', engine: 'firefox', browserDistribution: 'chromix-152' },
+      { name: 'Unknown Chromium', engine: 'chromium', browserDistribution: 'chromix-153' },
+    ]) {
+      const response = await create(body);
+      expect(response.status).toBe(400);
+      expect((await response.json()).code).toBe('INVALID_INPUT');
+    }
+    const reusedId = await create({ name: 'Cannot reuse Chromix data', engine: 'chromium', browserDistribution: 'chromix-152', profileId: created.profileId });
+    expect(reusedId.ok).toBe(false);
+    expect((await (await fetch(`${baseUrl}/api/v1/profiles/${created.profileId}`)).json()).data.name).toBe('Chromix fixture');
+    for (const body of [
+      { engine: 'firefox' }, { browserDistribution: 'playwright-stock' }, { profileId: 'another' },
+    ]) {
+      const response = await fetch(`${baseUrl}/api/v1/profiles/${created.profileId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+    }
+    const override = await fetch(`${baseUrl}/api/v1/profiles/${created.profileId}/start`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ browserDistribution: 'playwright-stock' }),
+    });
+    expect(override.status).toBe(400);
+    const cloneOverride = await fetch(`${baseUrl}/api/v1/profiles/${created.profileId}/clone`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ browserDistribution: 'playwright-stock' }),
+    });
+    expect(cloneOverride.status).toBe(400);
+
+    const exportResponse = await fetch(`${baseUrl}/api/v1/profiles/batch-export-csv`);
+    const exported = await exportResponse.text();
+    expect(exported).toContain('Cookie,browserDistribution');
+    expect(exported).toContain('"Chromix fixture"');
+    expect(exported).toContain('"chromix-152"');
+
+    const csvUrl = `${baseUrl}/api/v1/profiles/batch-import-csv`;
+    const importCsv = (csv: string) => fetch(csvUrl, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csv }),
+    });
+    const invalidCsv = await importCsv('环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie,browserDistribution\nsafe,,,,,,,,,\ninvalid,,firefox,,,,,,,chromix-152');
+    expect(invalidCsv.status).toBe(400);
+    const unknownCsv = await importCsv('环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie,browserDistribution\nunknown,,chromium,direct,,,,,,chromix-153');
+    expect(unknownCsv.status).toBe(400);
+    expect((await (await fetch(`${baseUrl}/api/v1/profiles`)).json()).data.total).toBe(2);
+    const imported = await importCsv('环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie,browserDistribution\nCSV Chromix,,chromium,direct,,,,,,chromix-152\nCSV legacy,,chromium,direct,,,,,');
+    expect(imported.status).toBe(200);
+    const rows = (await imported.json()).data.profiles;
+    expect(rows[0].browserDistribution).toBe('chromix-152');
+    expect(rows[1].browserDistribution).toBeUndefined();
+  });
+
+  it('rejects identity mutations on a previously used Chromix profile while preserving ordinary edits', async () => {
+    const created = await fetch(`${baseUrl}/api/v1/profiles`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Chromix identity', engine: 'chromium', browserDistribution: 'chromix-152',
+        fingerprint: { seed: 45, os: 'windows', screen: { width: 1920, height: 1080 } }, geo: { countryCode: 'US' } }),
+    });
+    expect(created.status).toBe(201);
+    const profile = (await created.json()).data;
+    expect(profile.chromixIdentityCommitted).toBeUndefined();
+    const path = `${baseUrl}/api/v1/profiles/${profile.profileId}`;
+    const put = (body: object) => fetch(path, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    expect((await put({ fingerprint: { seed: 46 } })).status).toBe(200);
+    // Simulate a profile written before admission markers existed.
+    const metadataPath = join(tempDir, 'profiles', profile.profileId, 'metadata.json');
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+    delete metadata.chromixIdentityCommitted;
+    await writeFile(metadataPath, JSON.stringify(metadata));
+    const browserData = join(tempDir, 'profiles', profile.profileId, 'chromix-152-browser');
+    await mkdir(browserData);
+    const first = (await (await fetch(path)).json()).data;
+    for (const body of [
+      { fingerprint: { seed: 47 } },
+      { fingerprint: { gpu: { unmaskedVendor: 'Google Inc. (NVIDIA)', unmaskedRenderer: 'RTX 4070' } } },
+      { fingerprint: { screen: { width: 1280, height: 720 } } },
+      { geo: { countryCode: 'JP' } },
+    ]) {
+      const response = await put(body);
+      expect(response.status).toBe(400);
+      expect((await response.json()).message).toContain('CHROMIX_IDENTITY_COMMITTED');
+    }
+    expect((await put({ fingerprint: first.fingerprint, geo: first.geo, name: 'Renamed', tags: ['trusted'] })).status).toBe(200);
+    const after = (await (await fetch(path)).json()).data;
+    expect(after).toMatchObject({ name: 'Renamed', tags: ['trusted'], fingerprint: first.fingerprint, geo: first.geo });
+    expect(after.chromixIdentityCommitted).toBeUndefined();
+    const cloneResponse = await fetch(`${path}/clone`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Fresh identity' }),
+    });
+    expect(cloneResponse.status).toBe(201);
+    const clone = (await cloneResponse.json()).data;
+    expect(clone.profileId).not.toBe(profile.profileId);
+    expect(clone.browserDistribution).toBe('chromix-152');
+    expect(clone.chromixIdentityCommitted).toBeUndefined();
+    expect((await put({ fingerprint: { seed: 48 } })).status).toBe(400);
+    const cloneUpdate = await fetch(`${baseUrl}/api/v1/profiles/${clone.profileId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fingerprint: { seed: 48 } }),
+    });
+    expect(cloneUpdate.status).toBe(200);
+  });
+
+  it('fails closed rather than launching stock when a Chromix executable is not configured', async () => {
+    vi.stubEnv('CHROMIX_EXECUTABLE_PATH', '');
+    try {
+      const created = await fetch(`${baseUrl}/api/v1/profiles`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Unavailable Chromix', engine: 'chromium', browserDistribution: 'chromix-152' }),
+      });
+      expect(created.status).toBe(201);
+      const profileId = (await created.json()).data.profileId;
+      const started = await fetch(`${baseUrl}/api/v1/profiles/${profileId}/start`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ headless: true }),
+      });
+      expect(started.ok).toBe(false);
+      const failure = await started.json();
+      expect(failure.success).toBe(false);
+      expect(`${failure.code} ${failure.message}`).toMatch(/chromix/i);
+      expect((await (await fetch(`${baseUrl}/api/v1/sessions`)).json()).data).toEqual([]);
+      const editable = await fetch(`${baseUrl}/api/v1/profiles/${profileId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fingerprint: { seed: 99 } }),
+      });
+      expect(editable.status).toBe(200);
+      expect((await editable.json()).data.fingerprint.seed).toBe(99);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

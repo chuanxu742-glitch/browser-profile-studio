@@ -23,6 +23,9 @@ let state = {
   extensions: [],
   editingWorkflowId: null,
   activeSessions: new Map(), // profileId -> sessionId
+  sessionStatuses: new Map(), // profileId -> actual session status
+  sessionDiagnostics: new Map(), // sessionId -> last observed diagnostics
+  sessionListError: false,
   currentCookieProfileId: null,
 };
 
@@ -65,6 +68,8 @@ document.addEventListener('DOMContentLoaded', () => {
   try {
     initTabs();
     initModals();
+    initCloneDialog();
+    initFormInteractions();
     initQuickCrawler();
     initClusterTaskWorkspace();
     initGeoInteractions();
@@ -80,6 +85,10 @@ document.addEventListener('DOMContentLoaded', () => {
     initTeamAdmin();
     initManagedExtensions();
     initLiveTakeoverModal();
+    document.querySelectorAll('.modal-overlay .form-group > label').forEach((label) => {
+      const control = label.parentElement.querySelector('input, select, textarea');
+      if (control?.id && !label.htmlFor) label.htmlFor = control.id;
+    });
     loadProfiles();
     loadBridgeBrowsers();
     loadProxyPool();
@@ -131,6 +140,10 @@ function initQuickUrlLauncher() {
           engine: 'firefox',
         }),
       });
+      if (!pRes.ok) {
+        const result = await pRes.json();
+        throw new Error(result.message || '创建 Profile 失败');
+      }
 
       // 2. 启动该环境并直达
       const sRes = await fetch(`${API_BASE}/profiles/${randId}/start`, {
@@ -161,8 +174,9 @@ function initTabs() {
   navItems.forEach((btn) => {
     btn.addEventListener('click', () => {
       const tabName = btn.getAttribute('data-tab');
-      navItems.forEach((n) => n.classList.remove('active'));
+      navItems.forEach((n) => { n.classList.remove('active'); n.removeAttribute('aria-current'); });
       btn.classList.add('active');
+      btn.setAttribute('aria-current', 'page');
 
       document.querySelectorAll('.tab-content').forEach((sec) => sec.classList.remove('active'));
       const targetSec = document.getElementById(`tab-${tabName}`);
@@ -170,7 +184,7 @@ function initTabs() {
 
       // 更新 Header 标题
       const titles = {
-        profiles: { title: '环境管理中心', sub: '管理独立 Profile、持久存储、代理绑定与一致性配置' },
+        profiles: { title: 'Profile 工作区', sub: '创建、启动和检查隔离浏览器环境。运行状态以实际会话为准。' },
         proxies: { title: '代理网络中心', sub: '检测与绑定 SOCKS5 / HTTP 代理，对齐真实出口 IP 与地理特征' },
         tasks: { title: '爬虫与自动化中心', sub: '管理已授权站点的采集任务与 RPA 工作流，遇到挑战自动暂停' },
         geo: { title: 'GEO (AI搜索优化) 矩阵中心', sub: '针对 DeepSeek、豆包、通义千问网页端进行多地域指纹多开与关键词占位监测' },
@@ -203,14 +217,36 @@ function initModals() {
   const btnClose = document.getElementById('btn-close-modal');
   const btnCancel = document.getElementById('btn-cancel-modal');
 
-  btnCreate.addEventListener('click', () => {
+  let previousFocus;
+  const showProfileModal = () => {
+    previousFocus = document.activeElement;
+    document.getElementById('profile-form').reset();
     randomizeFingerprintForm();
+    document.getElementById('p-distribution').value = 'playwright-stock';
+    updateDistributionSelector();
     profileModal.classList.add('active');
-  });
+    profileModal.setAttribute('aria-hidden', 'false');
+    document.getElementById('p-name').focus();
+  };
+  btnCreate.addEventListener('click', showProfileModal);
+  document.getElementById('btn-create-profile-hero').addEventListener('click', showProfileModal);
 
-  const hideProfileModal = () => profileModal.classList.remove('active');
+  const hideProfileModal = () => {
+    profileModal.classList.remove('active');
+    profileModal.setAttribute('aria-hidden', 'true');
+    previousFocus?.focus();
+  };
   btnClose.addEventListener('click', hideProfileModal);
   btnCancel.addEventListener('click', hideProfileModal);
+  profileModal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { hideProfileModal(); return; }
+    if (event.key !== 'Tab') return;
+    const focusable = [...profileModal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')]
+      .filter((element) => element.getClientRects().length);
+    const first = focusable[0], last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
 
   // Cookie 模态框
   const cookieModal = document.getElementById('cookie-modal');
@@ -218,10 +254,54 @@ function initModals() {
   btnCloseCookie.addEventListener('click', () => cookieModal.classList.remove('active'));
 }
 
-// 3. 表单与指纹随机生成
+function initCloneDialog() {
+  const dialog = document.getElementById('clone-modal');
+  const form = document.getElementById('clone-form');
+  const name = document.getElementById('clone-name');
+  const includeCookies = document.getElementById('clone-include-cookies');
+  const confirmButton = document.getElementById('btn-confirm-clone');
+  for (const id of ['btn-close-clone-modal', 'btn-cancel-clone-modal']) {
+    document.getElementById(id).addEventListener('click', () => dialog.close());
+  }
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const profileId = dialog.dataset.profileId;
+    if (!profileId || !name.value.trim()) return;
+    confirmButton.disabled = true;
+    try {
+      const response = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profileId)}/clone`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.value.trim(), includeCookies: includeCookies.checked }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || '克隆失败');
+      dialog.close();
+      showToast(includeCookies.checked ? '新 Profile 已创建，并复制了源 Cookie' : '新 Profile 已创建，未复制 Cookie', 'success');
+      await loadProfiles();
+    } catch (error) {
+      showToast(`克隆失败: ${error.message}`, 'error');
+    } finally {
+      confirmButton.disabled = false;
+    }
+  });
+}
+
+function updateDistributionSelector() {
+  const chromium = document.getElementById('p-engine').value === 'chromium';
+  const chromix = chromium && document.getElementById('p-distribution').value === 'chromix-152';
+  document.getElementById('p-distribution-group').hidden = !chromium;
+  const os = document.getElementById('p-os');
+  if (chromix) os.value = 'windows';
+  for (const option of os.options) option.disabled = chromix && option.value !== 'windows';
+}
+
 function initFormInteractions() {
+
   // 随机指纹按钮
   document.getElementById('btn-random-all-fingerprint').addEventListener('click', randomizeFingerprintForm);
+  document.getElementById('p-distribution').addEventListener('change', updateDistributionSelector);
+  document.getElementById('p-engine').addEventListener('change', updateDistributionSelector);
 
   // 国家切换自动对齐时区与语言
   document.getElementById('p-country').addEventListener('change', (e) => {
@@ -272,7 +352,8 @@ function initFormInteractions() {
       try {
         const results = await runProfileBatch('start', profileIds);
         const failed = results.filter((result) => !result.success);
-        showToast(`批量启动完成：成功 ${results.length - failed.length} 个，失败 ${failed.length} 个`, failed.length ? 'error' : 'success');
+        const alreadyRunning = results.filter((result) => result.code === 'ALREADY_RUNNING').length;
+        showToast(`批量启动完成：新启动 ${results.length - failed.length - alreadyRunning} 个，已运行 ${alreadyRunning} 个，失败 ${failed.length} 个${failed.length ? ` (${failed.map(result => `${result.profileId}: ${result.message || result.code || 'FAILED'}`).join(', ')})` : ''}`, failed.length ? 'error' : 'success');
         loadSessions();
       } catch (err) {
         showToast(`批量多开异常: ${err.message}`, 'error');
@@ -297,7 +378,7 @@ function initFormInteractions() {
       try {
         const results = await runProfileBatch('stop', profileIds);
         const failed = results.filter((result) => !result.success);
-        showToast(`批量停止完成：成功 ${results.length - failed.length} 个，失败 ${failed.length} 个`, failed.length ? 'error' : 'info');
+        showToast(`批量停止完成：成功 ${results.length - failed.length} 个，失败 ${failed.length} 个${failed.length ? ` (${failed.map(result => `${result.profileId}: ${result.message || result.code || 'FAILED'}`).join(', ')})` : ''}`, failed.length ? 'error' : 'info');
         loadSessions();
       } catch (err) {
         showToast(`停止异常: ${err.message}`, 'error');
@@ -395,6 +476,7 @@ async function saveProfileForm() {
   const payload = {
     name,
     engine,
+    ...(engine === 'chromium' ? { browserDistribution: document.getElementById('p-distribution').value } : {}),
     tags,
     ...(userAgent ? { userAgent } : {}),
     fingerprint: {
@@ -432,7 +514,7 @@ async function saveProfileForm() {
     const json = await res.json();
     if (json.success) {
       showToast(`环境【${name}】创建成功！`, 'success');
-      document.getElementById('profile-modal').classList.remove('active');
+      document.getElementById('btn-close-modal').click();
       document.getElementById('profile-form').reset();
       loadProfiles();
     } else {
@@ -511,20 +593,72 @@ function renderProfilePage() {
 async function loadSessions() {
   try {
     const res = await fetch(`${API_BASE}/sessions`);
-    if (res.ok) {
-      const json = await res.json();
-      const sessions = json.data || [];
-      state.activeSessions.clear();
-      sessions.forEach(s => {
-        if (s.profileId) state.activeSessions.set(s.profileId, s.sessionId);
-      });
-      document.getElementById('active-sessions-text').textContent = `${sessions.length} 个活动窗口`;
-      document.getElementById('stat-running-sessions').textContent = sessions.length;
-      updateTableStatusButtons();
-    }
+    if (!res.ok) throw new Error('Session list unavailable');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message || 'Session list unavailable');
+    const sessions = json.data || [];
+    state.sessionListError = false;
+    state.activeSessions.clear();
+    state.sessionStatuses.clear();
+    sessions.forEach(s => {
+      if (s.profileId) {
+        state.activeSessions.set(s.profileId, s.sessionId);
+        state.sessionStatuses.set(s.profileId, s);
+      }
+    });
+    document.getElementById('active-sessions-text').textContent = `${sessions.length} 个活动窗口`;
+    document.getElementById('stat-running-sessions').textContent = sessions.length;
+    updateTableStatusButtons();
+    await Promise.all(sessions.map(async (session) => {
+      if (!session.sessionId || !session.profileId) return;
+      const cached = state.sessionDiagnostics.get(session.sessionId);
+      if (cached && Date.now() - cached.fetchedAt < 30000) return;
+      try {
+        const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(session.sessionId)}/diagnostics`);
+        const result = await response.json();
+        state.sessionDiagnostics.set(session.sessionId, {
+          fetchedAt: Date.now(),
+          data: response.ok && result.success ? result.data : null,
+          error: response.ok && result.success ? null : result.message || '诊断暂不可用',
+        });
+      } catch (error) {
+        state.sessionDiagnostics.set(session.sessionId, { fetchedAt: Date.now(), data: null, error: error.message });
+      }
+    }));
+    updateTableStatusButtons();
   } catch {
-    // 静默忽略
+    state.sessionListError = true;
+    // 会话列表不可用时，不将旧状态冒充为新观测
+    state.activeSessions.clear();
+    state.sessionStatuses.clear();
+    updateTableStatusButtons();
   }
+}
+
+function distributionLabel(distribution, engine) {
+  if (engine !== 'chromium') return 'Firefox';
+  return {
+    'playwright-stock': 'Playwright stock Chromium',
+    'project-native-151': 'Project-native Chromium 151',
+    'chromix-152': 'Chromix 152 (experimental)',
+  }[distribution] || 'Chromium（旧环境，未指定发行版）';
+}
+
+function renderRuntimeDiagnostics(profileId) {
+  const status = state.sessionStatuses.get(profileId);
+  if (!status) return state.sessionListError
+    ? '<span class="distribution-detail">会话列表不可用 · 运行状态未确认</span>'
+    : '<span class="distribution-detail">未运行 · 无运行时诊断</span>';
+  const cached = state.sessionDiagnostics.get(status.sessionId);
+  const data = cached?.data;
+  const version = status.browserVersion ? `实际浏览器版本：${escapeHtml(status.browserVersion)}` : '实际浏览器版本未获得';
+  const distribution = status.browserVersion && status.browserDistribution
+    ? `<div>已启动发行版：${escapeHtml(distributionLabel(status.browserDistribution, status.engine))}</div>` : '';
+  const observation = data?.observed?.userAgent
+    ? `<div title="${escapeHtml(data.observed.userAgent)}">页面 UA：${escapeHtml(data.observed.userAgent)}</div>` : '';
+  const consistency = data?.consistency ? `<div>环境一致性诊断：${escapeHtml(data.consistency)}（不证明原生 GPU）</div>` : '';
+  const diagnosticError = cached?.error ? `<div>诊断不可用：${escapeHtml(cached.error)}</div>` : '';
+  return `<div class="runtime-diagnostics">${distribution}<div>${version}</div>${observation}${consistency}${diagnosticError || (!data ? '<div>页面指纹诊断尚未获得</div>' : '')}</div>`;
 }
 
 // 渲染表格
@@ -533,10 +667,10 @@ function renderProfilesTable(list, offset = 0) {
   tbody.innerHTML = '';
 
   if (list.length === 0) {
-    const emptyMessage = state.profiles.length
-      ? '没有匹配的浏览器环境，请修改搜索条件'
-      : '暂无浏览器环境，请点击右上角【新建浏览器环境】或【一键生成A股投研模板环境】';
-    tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-dim);">${emptyMessage}</td></tr>`;
+    const emptyMessage = state.profileFilter
+      ? '没有匹配的 Profile。请尝试其他名称、ID 或标签。'
+      : '还没有 Profile。点击「创建 Profile」选择浏览器发行版并配置环境。';
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">${emptyMessage}</td></tr>`;
     return;
   }
 
@@ -545,32 +679,30 @@ function renderProfilesTable(list, offset = 0) {
     const isRunning = state.activeSessions.has(p.profileId);
 
     tr.innerHTML = `
-      <td style="color: var(--text-dim); font-family: var(--font-mono);">${offset + idx + 1}</td>
-      <td>
+      <td data-label="序号" style="color: var(--text-dim); font-family: var(--font-mono);">${offset + idx + 1}</td>
+      <td data-label="Profile">
         <div style="font-weight: 600; color: var(--text-main);">${escapeHtml(p.name)}</div>
         <div class="profile-id-cell">${escapeHtml(p.profileId)}</div>
       </td>
-      <td>
+      <td data-label="浏览器发行版">
         <span class="tag-badge" style="text-transform: capitalize;">${escapeHtml(p.engine || 'firefox')}</span>
+        <div class="distribution-detail">${escapeHtml(distributionLabel(p.browserDistribution, p.engine))}</div>
       </td>
-      <td>
+      <td data-label="代理与地区">
         <div>${p.proxyServer ? `🌐 ${escapeHtml(p.proxyServer)}` : '⚪ 本地直连'}</div>
-        <div style="font-size: 11px; color: var(--text-dim);">${p.country ? `🌐 ${escapeHtml(p.country)}` : '未验证出口'}</div>
+        <div style="font-size: 11px; color: var(--text-dim);">${p.country ? `地理设置 ${escapeHtml(p.country)}（非出口验证）` : '代理出口未验证'}</div>
       </td>
-      <td>
-        <span class="tag-badge" style="color: #34d399;">Canvas微扰</span>
-        <span class="tag-badge" style="color: #38bdf8;">WebGL对齐</span>
-      </td>
-      <td>
+      <td data-label="运行时诊断">${renderRuntimeDiagnostics(p.profileId)}</td>
+      <td data-label="数据与验证">
         <div style="display: flex; gap: 4px;">
-          <button class="btn btn-xs btn-secondary btn-manage-cookie" data-id="${escapeHtml(p.profileId)}">🍪 Cookie</button>
-          <button class="btn btn-xs btn-outline btn-open-2fa" data-id="${escapeHtml(p.profileId)}" data-name="${escapeHtml(p.name)}">🔑 2FA</button>
+          <button class="btn btn-xs btn-secondary btn-manage-cookie" data-id="${escapeHtml(p.profileId)}" aria-label="管理 ${escapeHtml(p.name)} 的 Cookie" title="管理此 Profile 的 Cookie">🍪 Cookie</button>
+          <button class="btn btn-xs btn-outline btn-open-2fa" data-id="${escapeHtml(p.profileId)}" data-name="${escapeHtml(p.name)}" aria-label="查看 ${escapeHtml(p.name)} 的 2FA 动态口令" title="查看此 Profile 的 2FA 动态口令">🔑 2FA</button>
         </div>
       </td>
-      <td style="font-size: 12px; color: var(--text-dim);">
+      <td data-label="创建时间" style="font-size: 12px; color: var(--text-dim);">
         ${new Date(p.createdAt).toLocaleDateString()}
       </td>
-      <td style="text-align: right;">
+      <td data-label="操作" style="text-align: right;">
         <div class="row-actions">
           ${isRunning ? `
             <button class="btn btn-sm btn-warning btn-live-takeover" data-id="${escapeHtml(p.profileId)}" data-sid="${escapeHtml(state.activeSessions.get(p.profileId))}" title="实时画面回传与反向接管操作">🎮 实时接管</button>
@@ -579,10 +711,10 @@ function renderProfilesTable(list, offset = 0) {
           ` : `
             <button class="btn btn-sm btn-success btn-open-window" data-id="${escapeHtml(p.profileId)}">▶ 打开窗口</button>
           `}
-          <button class="btn btn-sm btn-outline btn-edit-profile" data-id="${escapeHtml(p.profileId)}" title="修改名称和标签">✏️</button>
-          <button class="btn btn-sm btn-outline btn-clone-profile" data-id="${escapeHtml(p.profileId)}" title="克隆环境">📋</button>
-          <button class="btn btn-sm btn-outline btn-rotate-proxy" data-id="${escapeHtml(p.profileId)}" title="从健康代理池轮换">🔄</button>
-          <button class="btn btn-sm btn-secondary btn-delete-profile" data-id="${escapeHtml(p.profileId)}" title="删除环境">🗑️</button>
+          <button class="btn btn-sm btn-outline btn-edit-profile" data-id="${escapeHtml(p.profileId)}" title="修改名称和标签" aria-label="编辑 ${escapeHtml(p.name)} 的名称与标签">编辑</button>
+          <button class="btn btn-sm btn-outline btn-clone-profile" data-id="${escapeHtml(p.profileId)}" title="克隆环境" aria-label="克隆 ${escapeHtml(p.name)}">克隆</button>
+          <button class="btn btn-sm btn-outline btn-rotate-proxy" data-id="${escapeHtml(p.profileId)}" title="从健康代理池轮换" aria-label="轮换 ${escapeHtml(p.name)} 的代理">换代理</button>
+          <button class="btn btn-sm btn-secondary btn-delete-profile" data-id="${escapeHtml(p.profileId)}" title="删除环境" aria-label="删除 ${escapeHtml(p.name)}">删除</button>
         </div>
       </td>
     `;
@@ -612,8 +744,8 @@ function attachTableEvents() {
         });
         const json = await res.json();
         if (json.success) {
-          showToast(`已在桌面拉起独立指纹浏览器窗口！`, 'success');
-          loadSessions();
+          showToast('窗口已启动；指纹、GPU 等能力请查看此会话的运行时诊断。', 'info');
+          await loadSessions();
         } else {
           showToast(`启动失败: ${json.message}`, 'error');
           btn.disabled = false;
@@ -684,12 +816,15 @@ function attachTableEvents() {
       try {
         const res = await fetch(`${API_BASE}/profiles/${profileId}/stop`, { method: 'POST' });
         const json = await res.json();
-        if (json.success) {
-          showToast(`窗口已安全关闭`, 'info');
-          loadSessions();
-        }
+        if (!res.ok || !json.success) throw new Error(json.message || '停止失败');
+        showToast('窗口已安全关闭', 'info');
+        loadSessions();
       } catch (err) {
-        showToast(`操作失败: ${err.message}`, 'error');
+        showToast(`停止失败，未确认配置已保存: ${err.message}`, 'error');
+        loadSessions();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '⏹ 停止窗口';
       }
     };
   });
@@ -727,27 +862,23 @@ function attachTableEvents() {
   });
 
   document.querySelectorAll('.btn-clone-profile').forEach(btn => {
-    btn.onclick = async () => {
+    btn.onclick = () => {
       const profileId = btn.getAttribute('data-id');
       const source = state.profiles.find(profile => profile.profileId === profileId);
-      const name = prompt('克隆环境名称：', `${source?.name || profileId} - 副本`);
-      if (!name?.trim()) return;
-      try {
-        const response = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profileId)}/clone`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
-        });
-        const json = await response.json();
-        if (!json.success) throw new Error(json.message || '克隆失败');
-        showToast('环境与 Cookie 已克隆（生成了新的指纹种子）', 'success');
-        await loadProfiles();
-      } catch (error) { showToast(`克隆失败: ${error.message}`, 'error'); }
+      const dialog = document.getElementById('clone-modal');
+      document.getElementById('clone-form').reset();
+      dialog.dataset.profileId = profileId;
+      document.getElementById('clone-source').textContent = `源 Profile：${source?.name || profileId} · ${distributionLabel(source?.browserDistribution, source?.engine)}`;
+      document.getElementById('clone-name').value = `${source?.name || profileId} - 副本`;
+      dialog.showModal();
+      document.getElementById('clone-name').focus();
     };
   });
 
   document.querySelectorAll('.btn-rotate-proxy').forEach(btn => {
     btn.onclick = async () => {
       const profileId = btn.getAttribute('data-id');
-      const tagsText = prompt('代理标签筛选（逗号分隔，留空表示任意已健康代理）：', '');
+      const tagsText = prompt('代理标签筛选（逗号分隔，留空表示任意已检查且 TCP 可达的代理）：', '');
       if (tagsText === null) return;
       const tags = tagsText.split(/[,，]/).map(value => value.trim()).filter(Boolean);
       try {
@@ -756,7 +887,7 @@ function attachTableEvents() {
         });
         const json = await response.json();
         if (!json.success) throw new Error(json.message || '没有可用代理');
-        showToast(`已绑定代理: ${json.data.proxy.name}`, 'success');
+        showToast(`已绑定代理: ${json.data.proxy.name}${json.data.proxy.health === 'verified' ? '（出口已验证）' : '（仅 TCP 可达，出口未验证）'}`, json.data.proxy.health === 'verified' ? 'success' : 'info');
         await loadProfiles();
       } catch (error) { showToast(`代理轮换失败: ${error.message}`, 'error'); }
     };
@@ -1771,7 +1902,7 @@ function initCsvModal() {
   // 下载标准模板
   if (btnDownloadTemplate) {
     btnDownloadTemplate.onclick = () => {
-      const template = `环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie\n亚马逊店铺-US-01,跨境电商/美区,firefox,socks5,127.0.0.1:10808,,,JBSWY3DPEHPK3PXP,\nTikTok矩阵-02,社媒矩阵/东南亚,chromium,http,user:pass@114.114.114.114:8080,,,,\nGoogle测试-03,授权测试,firefox,direct,,,,`;
+      const template = `环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie,browserDistribution\n亚马逊店铺-US-01,跨境电商/美区,firefox,socks5,127.0.0.1:10808,,,JBSWY3DPEHPK3PXP,,\nTikTok矩阵-02,社媒矩阵/东南亚,chromium,http,user:pass@114.114.114.114:8080,,,,,playwright-stock\nChromix实验-03,授权测试,chromium,direct,,,,,,chromix-152`;
       const blob = new Blob(['\uFEFF' + template], { type: 'text/csv;charset=utf-8;' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -1922,8 +2053,10 @@ async function loadProxyPool() {
       try {
         const response = await fetch(`${API_BASE}/proxies/${encodeURIComponent(button.dataset.proxyCheck)}/check`, { method: 'POST' });
         const result = await response.json();
-        showToast(result.success ? `检查完成: ${result.data.health}` : (result.message || '检查失败'), result.success ? 'success' : 'error');
-      } finally { button.disabled = false; await loadProxyPool(); }
+        const status = result.data?.health;
+        showToast(!result.success ? (result.message || '检查失败') : status === 'verified' ? `已验证代理出口: ${result.data.lastCheck.outboundIp}` : status === 'reachable' ? '仅 TCP 可达，代理出口未验证' : (result.data?.lastCheck?.error || '代理不可达'), result.success && status === 'verified' ? 'success' : 'error');
+      } catch (error) { showToast(`代理检查失败: ${error.message}`, 'error'); }
+      finally { button.disabled = false; await loadProxyPool(); }
     });
     container.querySelectorAll('[data-proxy-edit]').forEach(button => button.onclick = async () => {
       const proxy = state.proxies.find(item => item.proxyId === button.dataset.proxyEdit);
@@ -2014,13 +2147,18 @@ async function loadRpaStudio() {
       const intervalMinutes = Number(document.getElementById('rpa-interval-minutes').value);
       const scheduledAt = scheduledValue ? new Date(scheduledValue).getTime() : undefined;
       const intervalMs = Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? intervalMinutes * 60_000 : undefined;
-      const response = await fetch(`${API_BASE}/rpa/tasks`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workflowId: button.dataset.rpaRun, profileId, headless: false, ...(scheduledAt ? { scheduledAt } : {}), ...(intervalMs ? { intervalMs } : {}) }),
-      });
-      const result = await response.json();
-      showToast(result.success ? 'RPA 任务已进入队列' : (result.message || '任务创建失败'), result.success ? 'success' : 'error');
-      await loadRpaStudio();
+      button.disabled = true;
+      try {
+        const response = await fetch(`${API_BASE}/rpa/tasks`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workflowId: button.dataset.rpaRun, profileId, headless: false, ...(scheduledAt ? { scheduledAt } : {}), ...(intervalMs ? { intervalMs } : {}) }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || '任务创建失败');
+        showToast('RPA 任务已进入队列', 'success');
+        await loadRpaStudio();
+      } catch (error) { showToast(`任务创建失败: ${error.message}`, 'error'); }
+      finally { button.disabled = false; }
     });
     workflowsContainer.querySelectorAll('[data-rpa-delete]').forEach(button => button.onclick = async () => {
       if (!confirm('确定删除该工作流？')) return;
@@ -2116,10 +2254,14 @@ function initTeamAdmin() {
     const role = document.getElementById('team-member-role').value;
     const profileText = document.getElementById('team-member-profiles').value;
     const extensionText = document.getElementById('team-member-extensions').value;
+    const proxyText = document.getElementById('team-member-proxies').value;
+    const workflowText = document.getElementById('team-member-workflows').value;
     if (!workspaceId || !name) return showToast('请选择工作区并填写成员名称', 'error');
     const profile = profileText.split(/[,，]/).map(value => value.trim()).filter(Boolean);
     const extension = extensionText.split(/[,，]/).map(value => value.trim()).filter(Boolean);
-    const response = await fetch(`${API_BASE}/team/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, name, role, grants: { profile, extension } }) });
+    const proxy = proxyText.split(/[,，]/).map(value => value.trim()).filter(Boolean);
+    const workflow = workflowText.split(/[,，]/).map(value => value.trim()).filter(Boolean);
+    const response = await fetch(`${API_BASE}/team/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, name, role, grants: { profile, proxy, workflow, extension } }) });
     const result = await response.json(); if (!result.success) return showToast(result.message || '成员创建失败', 'error');
     await loadTeamAdmin(); showToast('成员已添加', 'success');
   };
@@ -2262,10 +2404,13 @@ function showToast(msg, type = 'info') {
   const icons = { success: '✅', error: '❌', info: 'ℹ️' };
   toast.innerHTML = `<span>${icons[type] || 'ℹ️'}</span><span>${escapeHtml(msg)}</span>`;
   container.appendChild(toast);
+  if (type === 'error' && window.matchMedia('(max-width: 720px)').matches) {
+    container.scrollIntoView({ block: 'start' });
+  }
   setTimeout(() => {
     toast.style.opacity = '0';
     setTimeout(() => toast.remove(), 200);
-  }, 3500);
+  }, type === 'error' ? 8000 : 3500);
 }
 
 function escapeHtml(str) {
