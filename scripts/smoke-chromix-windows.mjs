@@ -9,20 +9,20 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 
-// Usage: node scripts/smoke-chromix-windows.mjs <repository-root> <RUNNER_TEMP/evidence.json> <compatibility-only|app-acceptance>
-// Compatibility probes an installed binary directly; product acceptance always launches through Studio's saved-profile API.
+// Usage: node scripts/smoke-chromix-windows.mjs <repository-root> <RUNNER_TEMP/evidence.json> <compatibility-only|hosted-gpu-gate|app-acceptance>
+// Hosted GPU gate verifies Studio rejects virtual-GPU saved-profile startup; only physical-GPU app-acceptance can prove successful launch.
 const rootArgument = process.argv[2];
 const evidenceArgument = process.argv[3];
 const mode = process.argv[4];
 assert.ok(rootArgument && evidenceArgument && process.argv.length === 5, 'Expected repository root, evidence JSON path, and explicit mode');
-assert.ok(['compatibility-only', 'app-acceptance'].includes(mode), 'Mode must be compatibility-only or app-acceptance');
+assert.ok(['compatibility-only', 'hosted-gpu-gate', 'app-acceptance'].includes(mode), 'Mode must be compatibility-only, hosted-gpu-gate, or app-acceptance');
 const root = resolve(rootArgument);
 const evidencePath = resolve(evidenceArgument);
 const runnerTemp = resolve(process.env.RUNNER_TEMP ?? '');
 const report = {
   result: 'failed', mode, platform: process.platform, arch: process.arch,
   distribution: 'chromix-152', expectedVersion: '152.0.7977.82',
-  physicalGpu: mode === 'compatibility-only' ? 'UNVERIFIED virtual runner' : 'NOT VERIFIED: native startup and WebGL checks pending',
+  physicalGpu: mode === 'app-acceptance' ? 'NOT VERIFIED: native startup and WebGL checks pending' : 'UNVERIFIED virtual runner',
   phases: [],
 };
 let fixture;
@@ -340,19 +340,21 @@ async function run() {
   assert.equal(executable.toLowerCase(), join(runnerTemp, 'chromix-install', 'chromix', 'chrome.exe').toLowerCase(),
     'CHROMIX_EXECUTABLE_PATH must point to the hosted installed chrome.exe');
   await verifyInstalledChromix(executable);
-  const requiredFiles = mode === 'app-acceptance'
-    ? ['package.json', 'scripts/start-studio.ts', 'src/api/server.ts', 'public/index.html', 'node_modules/tsx/package.json']
-    : ['package.json', 'node_modules/playwright/package.json'];
+  const requiredFiles = mode === 'compatibility-only'
+    ? ['package.json', 'node_modules/playwright/package.json']
+    : ['package.json', 'scripts/start-studio.ts', 'src/api/server.ts', 'public/index.html', 'node_modules/tsx/package.json'];
   for (const name of requiredFiles) await access(join(root, name));
   const cwd = await mkdtemp(join(runnerTemp, 'chromix-smoke-'));
   report.disposableCwd = cwd;
-  if (mode === 'app-acceptance') {
+  if (mode !== 'compatibility-only') {
     for (const name of ['scripts', 'src', 'public', 'node_modules']) await symlink(join(root, name), join(cwd, name), 'junction');
   }
   fixture = createServer(fixtureResponse);
   await new Promise((done, fail) => fixture.once('error', fail).listen(0, '127.0.0.1', done));
   const fixtureOrigin = `http://127.0.0.1:${fixture.address().port}`;
-  await runEdgeReference(cwd, fixtureOrigin, createRequire(join(root, 'package.json'))('playwright').chromium);
+  if (mode !== 'hosted-gpu-gate') {
+    await runEdgeReference(cwd, fixtureOrigin, createRequire(join(root, 'package.json'))('playwright').chromium);
+  }
   if (mode === 'compatibility-only') {
     await runCompatibility(executable, cwd, fixtureOrigin);
     return;
@@ -398,6 +400,26 @@ async function run() {
   profileId = profile.profileId;
   assert.ok(profileId);
   assert.equal(profile.browserDistribution, 'chromix-152');
+  if (mode === 'hosted-gpu-gate') {
+    const response = await fetch(`${studioOrigin}/api/v1/profiles/${encodeURIComponent(profileId)}/start`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ headless: true }), signal: AbortSignal.timeout(120000),
+    });
+    const rejection = await response.json();
+    assert.equal(response.status, 500, `Virtual GPU startup returned unexpected status: ${JSON.stringify(rejection)}`);
+    assert.equal(rejection.success, false, 'Virtual GPU unexpectedly admitted a saved Chromix profile');
+    assert.match(rejection.message ?? '', /^GPU_BACKEND_UNVERIFIED:/,
+      `Expected native GPU rejection, observed ${JSON.stringify(rejection)}`);
+    assert.deepEqual(await api('/sessions'), [], 'Rejected profile created a browser session');
+    const saved = await api(`/profiles/${encodeURIComponent(profileId)}`);
+    assert.equal(saved.fingerprint?.gpu, undefined, 'Rejected virtual GPU was persisted to the saved profile');
+    report.gpuGate = { httpStatus: response.status, code: rejection.code, message: rejection.message,
+      savedProfileId: profileId, activeSessions: 0 };
+    report.productAcceptance = 'NOT RUN: hosted virtual GPU rejected saved-profile startup before BrowserSession launch';
+    report.result = 'gpu_gate_confirmed';
+    console.log(`Studio saved-profile GPU admission rejected virtual runner: ${rejection.message}`);
+    return;
+  }
   for (const phase of ['first', 'restart']) {
     const session = await api(`/profiles/${encodeURIComponent(profileId)}/start`, 'POST', { headless: true });
     assert.ok(session.sessionId);
@@ -530,6 +552,6 @@ try {
     await writeFile(evidencePath, JSON.stringify(report, null, 2));
   }
 }
-if (report.result === 'passed' || report.result === 'compatibility_only') {
+if (['passed', 'compatibility_only', 'gpu_gate_confirmed'].includes(report.result)) {
   console.log(`Chromix ${report.mode} ${report.result}: ${evidencePath}`);
 }

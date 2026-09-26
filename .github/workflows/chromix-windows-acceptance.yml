@@ -35,6 +35,8 @@ jobs:
         run: .\scripts\test-install-chromix.ps1
       - name: Install dependencies without downloading a stock browser
         run: npm ci --include=dev
+      - name: Compile isolated Chromix product-source snapshot
+        run: npm run build
       - name: Install independently verified official Chromix archive in runner scratch
         shell: powershell
         run: |
@@ -58,6 +60,15 @@ jobs:
           if ($result.result -cne 'compatibility_only') { throw 'Hosted runner cannot report product acceptance.' }
           Get-Content "$env:RUNNER_TEMP/chromix-compatibility.json" -Raw >> $env:GITHUB_STEP_SUMMARY
           'Product/Profile acceptance: NOT RUN on hosted virtual-GPU runner. Physical-GPU Canvas/WebGL/WebGPU: UNVERIFIED. No production release authorized.' >> $env:GITHUB_STEP_SUMMARY
+      - name: Diagnose Studio saved-profile GPU rejection on hosted virtual runner (not acceptance)
+        shell: pwsh
+        run: |
+          node scripts/smoke-chromix-windows.mjs "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP/chromix-hosted-gpu-gate.json" hosted-gpu-gate
+          if ($LASTEXITCODE -ne 0) { throw 'Studio virtual-GPU fail-closed diagnostic failed.' }
+          $result = Get-Content "$env:RUNNER_TEMP/chromix-hosted-gpu-gate.json" -Raw | ConvertFrom-Json
+          if ($result.result -cne 'gpu_gate_confirmed' -or $result.productAcceptance -notlike 'NOT RUN:*') { throw 'Hosted diagnostic cannot report product acceptance.' }
+          Get-Content "$env:RUNNER_TEMP/chromix-hosted-gpu-gate.json" -Raw >> $env:GITHUB_STEP_SUMMARY
+          'Only virtual-GPU admission rejection was exercised through Studio saved-profile API; no saved-profile browser launch succeeded. Physical-GPU acceptance remains required and skipped.' >> $env:GITHUB_STEP_SUMMARY
   isolated-physical-gpu-acceptance:
     if: inputs.run_physical_gpu == true
     needs: hosted-compatibility
