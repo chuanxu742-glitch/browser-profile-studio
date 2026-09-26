@@ -99,15 +99,13 @@ Chromix 浏览器数据与其他发行版隔离，选中但未安装或校验失
 的安装器 fixture 22 项通过，固定 Chromix 152.0.7977.82 ZIP 已安装并由直接
 Playwright 启动；该次兼容性 job 因 first 阶段 Worker 脚本请求缺少
 `sec-ch-ua`、`sec-ch-ua-platform`、`sec-ch-ua-mobile` 而失败。
-source-aligned interim hosted run
-[36217186692](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36217186692)
-（提交 `c0246ba`）实际构建 scoped app source，直接 Chromix 兼容性通过；Studio 保存
-Chromix Profile 后 POST `/start` 因 hosted 虚拟 GPU 的 `GPU_ACTIVE_DEVICE_AMBIGUOUS`
-返回 HTTP 500，未产生活动会话或持久 GPU 身份，结果为 `gpu_gate_confirmed`、
-`productAcceptance NOT RUN`。物理 GPU job 跳过。该 run 验证的是 interim source snapshot；
-含 identity-lock fix 的最终 source snapshot 尚待验证。当前 `npm test` 的 371 项 unit、
-35 项 MCP、36 项 integration 通过，13 项 opt-in integration 跳过；`npm run build` 通过。
-这些结果不代表产品或物理 GPU 验收通过。
+最终 source-aligned hosted run
+[36218295845](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36218295845)
+（提交 `0cf016b236a6fb322a586cd682e10b1104bf2b43`）通过 5 个文件、45 项 Windows
+scoped unit tests、`npm run build`、已验证 ZIP 及直接 Chromix 兼容性检查。Studio 保存的
+Profile 启动被 hosted 虚拟 GPU 以 HTTP 500 `GPU_ACTIVE_DEVICE_AMBIGUOUS` 拒绝；
+没有活动会话或已保存 GPU 身份，结果为 `productAcceptance NOT RUN`。物理 GPU job
+因硬件 runner 不可用而跳过；硬件验收仍受阻，不能据此宣称产品或物理 GPU 验收通过。
 
 ### Windows 未签名 source+build 测试包
 
