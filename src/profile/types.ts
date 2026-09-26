@@ -85,6 +85,8 @@ export interface ProfileMetadata {
   readonly userAgent?: string;
   readonly customHeaders?: Record<string, string>;
   readonly fingerprint?: ProfileFingerprintSettings;
+  /** Internal Chromix admission state; absent only on profiles predating this guard. */
+  readonly chromixIdentityCommitted?: boolean;
   readonly twoFactorSecret?: string;
   readonly proxyId?: string;
   /** Server-owned managed extension IDs assigned to this profile. */

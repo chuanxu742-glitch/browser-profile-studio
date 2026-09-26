@@ -810,7 +810,7 @@ export class RestApiServer {
         }
       }
 
-      const profileMatch = pathname.match(/^\/api\/v1\/profiles\/([^/]+)$/);
+      const profileMatch = pathname.match(/^\/api\/v1\/profiles\/(?!batch-(?:import|export)-csv$)([^/]+)$/);
       if (profileMatch && profileMatch[1]) {
         const profileId = decodeURIComponent(profileMatch[1]);
         if (method === 'GET') {
@@ -835,8 +835,12 @@ export class RestApiServer {
 
         if (method === 'PUT') {
           const body = await this.readJsonBody(req);
+          if (body.engine !== undefined || body.browserDistribution !== undefined || body.profileId !== undefined) {
+            this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'Saved profile engine, browserDistribution and profileId are immutable', timestamp: Date.now() });
+            return;
+          }
           const existing = await this.manager.getProfile(profileId);
-          if (body.extensionIds !== undefined || body.engine !== undefined) await this.validateExtensionIds(body.extensionIds ?? existing?.extensionIds ?? [], body.engine ?? existing?.engine ?? 'firefox', identity!);
+          if (body.extensionIds !== undefined) await this.validateExtensionIds(body.extensionIds, existing?.engine ?? 'firefox', identity!);
           const updated = await this.manager.updateProfile(profileId, body);
           this.sendJson(res, 200, { success: true, code: 'OK', data: publicProfile(updated), timestamp: Date.now() });
           return;
@@ -869,6 +873,10 @@ export class RestApiServer {
           return;
         }
         const body = await this.readJsonBody(req);
+        if (body.engine !== undefined || body.browserDistribution !== undefined || body.profileId !== undefined) {
+          this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: 'Clone retains its source engine and browserDistribution and creates a new profileId', timestamp: Date.now() });
+          return;
+        }
         await this.validateExtensionIds(source.extensionIds ?? [], source.engine ?? 'firefox', identity!);
         const cookies = body.includeCookies === true ? await this.manager.getStore().getCookies(sourceId) : [];
         const created = await this.manager.createProfile({
@@ -880,6 +888,7 @@ export class RestApiServer {
           ...(source.extensionIds !== undefined ? { extensionIds: source.extensionIds } : {}),
           ...(source.geo !== undefined ? { geo: source.geo } : {}),
           engine: source.engine ?? 'firefox',
+          ...(source.browserDistribution !== undefined ? { browserDistribution: source.browserDistribution } : {}),
           ...(source.userAgent !== undefined ? { userAgent: source.userAgent } : {}),
           ...(source.customHeaders !== undefined ? { customHeaders: source.customHeaders } : {}),
           ...(source.twoFactorSecret !== undefined ? { twoFactorSecret: source.twoFactorSecret } : {}),
@@ -1363,6 +1372,18 @@ export class RestApiServer {
         if (lines[0]?.toLowerCase().includes('name') || lines[0]?.includes('环境名称')) {
           startIndex = 1;
         }
+        const browserDistributions: Array<BrowserDistribution | undefined> = [];
+        for (let i = startIndex; i < lines.length; i++) {
+          const cols = parseCsvLine(lines[i]!);
+          if (!cols[0]) continue;
+          const engine = cols[2] === 'chromium' || cols[2] === 'chrome' ? 'chromium' : 'firefox';
+          const browserDistribution = cols[9] || undefined;
+          if (cols.length > 10 || !validBrowserDistribution(browserDistribution, engine)) {
+            this.sendJson(res, 400, { success: false, code: 'INVALID_INPUT', message: `Invalid browserDistribution in CSV row ${i + 1}`, timestamp: Date.now() });
+            return;
+          }
+          browserDistributions[i] = browserDistribution;
+        }
 
         for (let i = startIndex; i < lines.length; i++) {
           const cols = parseCsvLine(lines[i]!);
@@ -1377,11 +1398,13 @@ export class RestApiServer {
           const proxyPass = cols[6] || '';
           const twoFactorSecret = cols[7] || '';
           const initialCookies = cols[8] || '';
+          const browserDistribution = browserDistributions[i];
 
           const created = await this.manager.createProfile({
             name,
             tags,
             engine,
+            ...(browserDistribution === undefined ? {} : { browserDistribution }),
             ...(proxyType !== 'direct' && proxyServer ? {
               proxy: {
                 server: proxyServer.includes('://') ? proxyServer : `${proxyType}://${proxyServer}`,
@@ -1413,12 +1436,12 @@ export class RestApiServer {
         const summaries = await this.manager.listProfiles();
         const profiles = (await Promise.all(summaries.map((profile) => this.manager.getProfile(profile.profileId))))
           .filter((profile): profile is NonNullable<typeof profile> => profile !== null);
-        const header = '环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie\n';
+        const header = '环境名称,分组标签,内核类型,代理类型,代理服务器,代理账号,代理密码,2FA秘钥,Cookie,browserDistribution\n';
         const rows = profiles.map((p) => {
           const tags = (p.tags || []).join('/');
           const proxyServer = p.proxy?.server || '';
           const proxyType = proxyServer.match(/^([a-z0-9]+):\/\//i)?.[1] || (proxyServer ? 'http' : 'direct');
-          return [p.name, tags, p.engine || 'firefox', proxyType, proxyServer, '', '', '', ''].map(csvCell).join(',');
+          return [p.name, tags, p.engine || 'firefox', proxyType, proxyServer, '', '', '', '', p.browserDistribution ?? ''].map(csvCell).join(',');
         }).join('\n');
 
         res.statusCode = 200;
@@ -1840,6 +1863,7 @@ function publicProfile(profile: unknown): Record<string, unknown> {
     result.hasTwoFactorSecret = true;
   }
   delete result.twoFactorSecret;
+  delete result.chromixIdentityCommitted;
   delete result.cookies;
   delete result.loginState;
   return result;

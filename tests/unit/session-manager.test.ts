@@ -245,6 +245,68 @@ describe('browser-only SessionManager', () => {
     }
   });
 
+  it.skipIf(process.platform !== 'win32')('persists detected Windows GPU before creating a native persona and rejects a later conflicting override', async () => {
+    const workRoot = await mkdtemp(join(tmpdir(), 'native-gpu-profile-'));
+    const store = new ProfileStore(join(workRoot, 'profiles'));
+    const previousRelease = process.env.ABS_REQUIRE_NATIVE_CHROMIUM;
+    process.env.ABS_REQUIRE_NATIVE_CHROMIUM = '1';
+    const gpu = { unmaskedVendor: 'Google Inc. (NVIDIA)',
+      unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      vendorId: 0x10de, deviceString: 'NVIDIA Corporation GeForce RTX 4070' };
+    let manager: SessionManager | undefined;
+    try {
+      await store.createProfile({ profileId: 'native-account', name: 'Native Account',
+        engine: 'chromium', fingerprint: { seed: 777, os: 'windows' } });
+      expect((await store.getProfile('native-account'))?.fingerprint?.gpu).toBeUndefined();
+      const captures: BrowserSessionOptions[] = [];
+      const discovery = vi.fn(async () => gpu);
+      const startManager = (sessionId: string) => new SessionManager({
+        cluster: false, profileStore: store, profileRoot: join(workRoot, 'sessions'),
+        nativeGpuDiscovery: discovery,
+        sessionFactory: options => { captures.push(options); return fakeSession(sessionId).session; },
+      });
+      manager = startManager('ses_native_gpu_0001');
+      await manager.start({ profileId: 'native-account', fingerprint: true });
+      expect((await store.getProfile('native-account'))?.fingerprint?.gpu).toEqual({
+        unmaskedVendor: gpu.unmaskedVendor, unmaskedRenderer: gpu.unmaskedRenderer,
+      });
+      expect(captures[0]?.fingerprint).toMatchObject({
+        webgl: { unmaskedVendor: gpu.unmaskedVendor, unmaskedRenderer: gpu.unmaskedRenderer },
+        webgpu: { adapterInfo: { vendor: gpu.unmaskedVendor, device: gpu.unmaskedRenderer } },
+      });
+      await manager.shutdown();
+      await store.updateProfile('native-account', { fingerprint: { seed: 777, deviceMemory: 8 } });
+      expect((await store.getProfile('native-account'))?.fingerprint?.gpu).toEqual({
+        unmaskedVendor: gpu.unmaskedVendor, unmaskedRenderer: gpu.unmaskedRenderer,
+      });
+      manager = startManager('ses_native_gpu_0002');
+      await manager.start({ profileId: 'native-account', fingerprint: true });
+      expect(captures[1]?.fingerprint).toMatchObject({
+        webgl: { unmaskedVendor: gpu.unmaskedVendor, unmaskedRenderer: gpu.unmaskedRenderer },
+        webgpu: { adapterInfo: { vendor: gpu.unmaskedVendor, device: gpu.unmaskedRenderer } },
+        hardware: { deviceMemory: 8 },
+      });
+      await manager.shutdown();
+      manager = undefined;
+
+      await store.updateProfile('native-account', { fingerprint: {
+        seed: 777, os: 'windows', gpu: { unmaskedVendor: 'Google Inc. (AMD)',
+          unmaskedRenderer: 'ANGLE (AMD, AMD Radeon RX 7800 XT Direct3D11 vs_5_0 ps_5_0, D3D11)' },
+      } });
+      manager = startManager('ses_native_gpu_0003');
+      await expect(manager.start({ profileId: 'native-account', fingerprint: true }))
+        .rejects.toThrow('GPU_PROFILE_OVERRIDE_MISMATCH');
+      expect(captures).toHaveLength(2);
+      await store.updateProfile('native-account', { fingerprint: { seed: 777, os: 'macos' } });
+      expect((await store.getProfile('native-account'))?.fingerprint?.gpu).toBeUndefined();
+    } finally {
+      await manager?.shutdown();
+      if (previousRelease === undefined) delete process.env.ABS_REQUIRE_NATIVE_CHROMIUM;
+      else process.env.ABS_REQUIRE_NATIVE_CHROMIUM = previousRelease;
+      await rm(workRoot, { recursive: true, force: true });
+    }
+  });
+
   it('requires an explicit proxy-exit timezone for fingerprinted sessions', async () => {
     const fixture = fakeSession('ses_proxy_geo_0001');
     const manager = new SessionManager({

@@ -47,6 +47,68 @@ npm run studio
 
 首次启动会在 `data/` 创建本机主密钥和 owner token，并通过一次性启动链接写入 HttpOnly Cookie。Windows 上两个启动机密以当前用户 DPAPI 密文保存，旧明文启动文件会自动迁移；业务密文仍使用 AES-256-GCM。可用 `STUDIO_MASTER_KEY`、`STUDIO_ACCESS_TOKEN` 和 `STUDIO_USERS_JSON` 接入外部 KMS 或配置静态多角色凭据。`data/` 必须作为敏感目录备份与保护；主密钥丢失后已有密文无法恢复。
 
+### Windows x64 Chromix 152 实验性预编译浏览器
+
+此路径无需在开发机编译 Chromium；安装器从上游自行下载独立发行的
+[`v152.0.7977.82/chromix-win-x64.zip`](https://github.com/xiaozhou26/Chromix/releases/download/v152.0.7977.82/chromix-win-x64.zip)。
+项目仓库及 source+build 测试包**不内置**该浏览器。安装器固定校验 ZIP SHA-256
+`1cfbe638212ba4d463a8c3330fcfbd8c88f9844ff6dfc0722f2c40745e0bc7f8`，
+写出完整文件清单；运行时逐项校验安装内容。哈希校验不等于签名、来源可复现或浏览器运行验收；
+上游[发行说明](https://github.com/xiaozhou26/Chromix/releases/tag/v152.0.7977.82)明确 `full_acceptance=false`。
+来源与许可边界见 [Chromix 上游评估](docs/chromix-upstream-assessment.md)。
+
+在 **Windows x64 PowerShell** 中，从本仓根目录执行（须有 Node.js 20+、npm、
+网络和 `curl.exe`；`npm run studio` 使用开发依赖 `tsx`，无需下载 stock Chromium）：
+
+```powershell
+npm ci --include=dev
+$scratch = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChromixDownloadScratch'))
+$installRoot = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChromixExperimental'))
+New-Item -ItemType Directory -Path $scratch, $installRoot -Force | Out-Null
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-chromix.ps1 `
+  -ScratchDirectory $scratch -InstallRoot $installRoot
+if ($LASTEXITCODE -ne 0) { throw 'Chromix 安装失败' }
+$env:CHROMIX_EXECUTABLE_PATH = Join-Path $installRoot 'chromix\chrome.exe'
+if (!(Test-Path -LiteralPath $env:CHROMIX_EXECUTABLE_PATH -PathType Leaf)) { throw 'Chromix 可执行文件不存在' }
+npm run studio
+```
+
+`-ScratchDirectory` 和 `-InstallRoot` 都必须预先存在、互不包含且不能为根目录；
+安装结果严格为 `<InstallRoot>\chromix\chrome.exe`，`CHROMIX_EXECUTABLE_PATH`
+须是该文件的**绝对路径**，并在启动 Studio 的同一终端设置。已存在
+`<InstallRoot>\chromix` 时安装器会拒绝覆盖；请勿将其当作现有 Profile 的升级步骤。
+在 Studio 新建环境时选择 Chromium，再显式选择 **Chromix 152 (experimental)**，
+新建独立 Profile；已保存 Profile 的发行版和 ID 不可变，不能将 stock 或
+**Project-native Chromium 151** 的既有 Profile 改选为 Chromix。
+Chromix 已保存 Profile 在首次成功启动后固定种子、GPU、屏幕/硬件与地理身份；
+修改这些字段须创建新的独立 Profile（克隆会分配新 ID/种子），名称、标签、
+代理与扩展管理仍可正常更新。启动现有 Chromix Profile 时也不接受地理位置、
+语言、时区、视口、种子或其他指纹覆盖参数；须使用该 Profile 自身的身份配置。
+首次 GPU 探测由启动流程内部写入，启动失败
+不会提前提交身份；旧 Profile 只要已有浏览器数据或保存的状态即按已使用身份保护。
+同一 Profile 根目录只允许一个 Studio 进程写入；多个独立 Studio 进程共享此目录
+不受本地进程内序列化保护，不属于受支持部署方式。无法保证单写者时应停止
+启动第二个进程，而非继续操作；当前并无跨进程锁可替代这一人工门槛。
+Chromix 浏览器数据与其他发行版隔离，选中但未安装或校验失败时会报错，
+**不会回退到 Playwright stock 或项目原生 151**。Chromix 152 的 Canvas/音频原生扰动
+目前禁用，以优先保持物理一致性，**不**代表每个 Profile 具有独特扰动或抗检测能力。
+
+本仓 [Chromix Windows 验收工作流](.github/workflows/chromix-windows-acceptance.yml)
+默认托管 Windows runner 仅测试兼容性，不作物理 GPU 或产品验收。
+原始 hosted run [36160965923](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36160965923)
+的安装器 fixture 22 项通过，固定 Chromix 152.0.7977.82 ZIP 已安装并由直接
+Playwright 启动；该次兼容性 job 因 first 阶段 Worker 脚本请求缺少
+`sec-ch-ua`、`sec-ch-ua-platform`、`sec-ch-ua-mobile` 而失败。
+source-aligned interim hosted run
+[36217186692](https://github.com/chuanxu742-glitch/browser-profile-studio/actions/runs/36217186692)
+（提交 `c0246ba`）实际构建 scoped app source，直接 Chromix 兼容性通过；Studio 保存
+Chromix Profile 后 POST `/start` 因 hosted 虚拟 GPU 的 `GPU_ACTIVE_DEVICE_AMBIGUOUS`
+返回 HTTP 500，未产生活动会话或持久 GPU 身份，结果为 `gpu_gate_confirmed`、
+`productAcceptance NOT RUN`。物理 GPU job 跳过。该 run 验证的是 interim source snapshot；
+含 identity-lock fix 的最终 source snapshot 尚待验证。当前 `npm test` 的 371 项 unit、
+35 项 MCP、36 项 integration 通过，13 项 opt-in integration 跳过；`npm run build` 通过。
+这些结果不代表产品或物理 GPU 验收通过。
+
 ### Windows 未签名 source+build 测试包
 
 仓库的 **Unsigned Windows test package** GitHub Actions 工作流只能从 `main` 手动触发，

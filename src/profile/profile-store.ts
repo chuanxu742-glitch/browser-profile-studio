@@ -1,8 +1,9 @@
 import { mkdir, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   ProfileMetadata,
   ProfileCreateOptions,
@@ -23,11 +24,30 @@ import type { NativeGpuIdentity } from '../fingerprint/native-gpu.js';
 export interface ProfileStoreOptions { readonly vault?: SecretVault; }
 export interface DeletedProfile { readonly profileId: string; readonly name: string; readonly deletedAt: number; }
 
+// A local Studio owns its profile root. Share the queue across store instances in this process.
+// Independent processes must not write the same root concurrently.
+const profileMutations = new Map<string, Promise<void>>();
+
+async function serializeProfile<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = profileMutations.get(key);
+  let release!: () => void;
+  const current = new Promise<void>(done => { release = done; });
+  profileMutations.set(key, current);
+  if (previous) await previous;
+  try { return await operation(); }
+  finally {
+    if (profileMutations.get(key) === current) profileMutations.delete(key);
+    release();
+  }
+}
+
 export class ProfileStore {
+  private readonly mutationRoot: string;
   private readonly rootDir: string;
 
   public constructor(rootDir: string, private readonly options: ProfileStoreOptions = {}) {
     this.rootDir = rootDir;
+    this.mutationRoot = resolve(rootDir);
   }
 
   public async init(): Promise<void> {
@@ -107,6 +127,7 @@ export class ProfileStore {
       ...(options.browserDistribution ? { browserDistribution: options.browserDistribution } : {}),
       ...(options.userAgent !== undefined ? { userAgent: options.userAgent } : {}),
       ...(options.customHeaders !== undefined ? { customHeaders: options.customHeaders } : {}),
+      ...(options.browserDistribution === 'chromix-152' ? { chromixIdentityCommitted: false } : {}),
       fingerprint,
       ...(options.twoFactorSecret !== undefined ? { twoFactorSecret: options.twoFactorSecret } : {}),
       ...(options.proxyId !== undefined ? { proxyId: options.proxyId } : {}),
@@ -173,6 +194,31 @@ export class ProfileStore {
   }
 
   public async updateProfile(profileId: string, updates: Partial<ProfileMetadata>): Promise<ProfileMetadata> {
+    return serializeProfile(join(this.mutationRoot, profileId), () => this.updateProfileUnlocked(profileId, updates));
+  }
+
+  /** Keep the saved persona stable while the first native context is being admitted. */
+  public async withChromixIdentityAdmission<T>(profileId: string, operation: () => Promise<T>): Promise<T> {
+    return serializeProfile(join(this.mutationRoot, profileId), async () => {
+      const profile = await this.getProfile(profileId);
+      if (!profile || profile.browserDistribution !== 'chromix-152') {
+        throw new BrowserToolError('INVALID_STATE', 'Chromix profile missing during admission');
+      }
+      if (profile.chromixIdentityCommitted === undefined) {
+        await this.writeMetadata({ ...profile, chromixIdentityCommitted: this.hasLegacyIdentityState(profileId) });
+      }
+      return operation();
+    });
+  }
+
+  public async commitChromixIdentity(profileId: string): Promise<void> {
+    const profile = await this.getProfile(profileId);
+    if (!profile || profile.browserDistribution !== 'chromix-152') throw new BrowserToolError('INVALID_STATE', 'Chromix profile missing during admission');
+    if (profile.chromixIdentityCommitted === true) return;
+    await this.writeMetadata({ ...profile, chromixIdentityCommitted: true });
+  }
+
+  private async updateProfileUnlocked(profileId: string, updates: Partial<ProfileMetadata>): Promise<ProfileMetadata> {
     const existing = await this.getProfile(profileId);
     if (!existing) {
       throw new BrowserToolError('SESSION_NOT_FOUND', `Profile "${profileId}" not found.`);
@@ -207,6 +253,16 @@ export class ProfileStore {
     if (updated.browserDistribution === 'chromix-152' && updated.userAgent !== undefined) {
       throw new BrowserToolError('INVALID_ARGUMENT', 'Chromix native User-Agent cannot be overridden.');
     }
+    if (updated.browserDistribution === 'chromix-152') {
+      const committed = existing.chromixIdentityCommitted === true
+        || (existing.chromixIdentityCommitted === undefined && this.hasLegacyIdentityState(profileId));
+      if (committed && (!isDeepStrictEqual(existing.fingerprint, updated.fingerprint)
+        || !isDeepStrictEqual(existing.geo, updated.geo)
+        || !isDeepStrictEqual(existing.customHeaders, updated.customHeaders))) {
+        throw new BrowserToolError('INVALID_ARGUMENT', 'CHROMIX_IDENTITY_COMMITTED: create a new profile to change saved identity');
+      }
+      (updated as { chromixIdentityCommitted?: boolean }).chromixIdentityCommitted = committed;
+    }
     if (updates.extensionIds !== undefined) (updated as { extensionIds?: readonly string[] }).extensionIds = normalizeExtensionIds(updates.extensionIds);
 
     if (updates.proxy) {
@@ -237,12 +293,17 @@ export class ProfileStore {
       }
       return profile;
     }
-    return this.updateProfile(profileId, { fingerprint: {
+    return this.updateProfileUnlocked(profileId, { fingerprint: {
       ...profile.fingerprint,
       gpu: { unmaskedVendor: observed.unmaskedVendor, unmaskedRenderer: observed.unmaskedRenderer },
     } });
   }
 
+  private hasLegacyIdentityState(profileId: string): boolean {
+    return existsSync(join(this.getProfileDir(profileId), 'chromix-152-browser'))
+      || existsSync(this.getStorageStatePath(profileId))
+      || existsSync(this.getCookiesPath(profileId));
+  }
   public async deleteProfile(profileId: string): Promise<boolean> {
     this.assertSafeProfileId(profileId);
     const dir = this.getProfileDir(profileId);
