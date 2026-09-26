@@ -61,7 +61,7 @@ jobs:
           $result = Get-Content "$env:RUNNER_TEMP/chromix-compatibility.json" -Raw | ConvertFrom-Json
           if ($result.result -cne 'compatibility_only') { throw 'Hosted runner cannot report product acceptance.' }
           Get-Content "$env:RUNNER_TEMP/chromix-compatibility.json" -Raw >> $env:GITHUB_STEP_SUMMARY
-          'Product/Profile acceptance: NOT RUN on hosted virtual-GPU runner. Physical-GPU Canvas/WebGL/WebGPU: UNVERIFIED. No production release authorized.' >> $env:GITHUB_STEP_SUMMARY
+          'Direct browser only: page/iframe/Worker identity fields and same-profile Canvas/offline-audio stability are asserted across restart; Canvas/audio uniqueness NOT VERIFIED. Virtual WebGL/WebGPU availability is observed, not physical GPU or shader fidelity. External network/WebRTC NOT RUN. Studio product acceptance NOT RUN; no production release authorized.' >> $env:GITHUB_STEP_SUMMARY
       - name: Diagnose Studio saved-profile GPU rejection on hosted virtual runner (not acceptance)
         shell: pwsh
         run: |
