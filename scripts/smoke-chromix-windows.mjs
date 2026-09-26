@@ -41,9 +41,41 @@ const identityScript = `async function identity(nav) {
   const uaData = nav.userAgentData;
   if (!uaData || typeof uaData.getHighEntropyValues !== 'function') throw new Error('UA-CH unavailable');
   const high = await uaData.getHighEntropyValues(['fullVersionList', 'platform', 'platformVersion']);
+  const canvas = typeof document === 'undefined' ? new OffscreenCanvas(64, 32) : document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 32;
+  const pixels = canvas.getContext('2d');
+  if (!pixels) throw new Error('2D canvas unavailable');
+  pixels.fillStyle = '#193b57';
+  pixels.fillRect(0, 0, 64, 32);
+  pixels.fillStyle = '#eacb72';
+  pixels.font = '13px sans-serif';
+  pixels.fillText('Chromix 152', 2, 19);
+  const hash = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+    byte => byte.toString(16).padStart(2, '0')).join('');
+  const canvasHash = await hash(pixels.getImageData(0, 0, 64, 32).data);
+  let audioHash = null;
+  if (typeof OfflineAudioContext === 'function') {
+    const audio = new OfflineAudioContext(1, 2048, 44100);
+    const oscillator = audio.createOscillator();
+    oscillator.frequency.value = 440;
+    oscillator.connect(audio.destination);
+    oscillator.start(0);
+    audioHash = await hash((await audio.startRendering()).getChannelData(0));
+  }
+  const display = typeof screen === 'undefined' ? null : {
+    width: screen.width, height: screen.height, availWidth: screen.availWidth,
+    availHeight: screen.availHeight, colorDepth: screen.colorDepth, dpr: devicePixelRatio,
+  };
   return { userAgent: nav.userAgent, platform: nav.platform,
     brands: uaData.brands, mobile: uaData.mobile, chPlatform: uaData.platform,
-    fullVersionList: high.fullVersionList, highPlatform: high.platform };
+    fullVersionList: high.fullVersionList, highPlatform: high.platform,
+    hardwareConcurrency: nav.hardwareConcurrency, deviceMemory: nav.deviceMemory ?? null,
+    language: nav.language, languages: Array.from(nav.languages), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    display, canvasHash, audioHash,
+    webgl2Available: display ? Boolean(document.createElement('canvas').getContext('webgl2')) : null,
+    webgpuApiAvailable: typeof nav.gpu?.requestAdapter === 'function',
+  };
 }`;
 const pageScript = `${identityScript}
 (async () => {
@@ -94,6 +126,42 @@ function validateIdentity(value, label) {
     /Chromium|Google Chrome/i.test(brand.brand) && brand.version === '152.0.7977.82'), `${label}: Chromium 152 UA-CH full version`);
 }
 
+function validateSurfaces(value, label) {
+  assert.ok(Number.isInteger(value.hardwareConcurrency) && value.hardwareConcurrency > 0,
+    `${label}: navigator.hardwareConcurrency unavailable`);
+  assert.ok(value.deviceMemory === null || (Number.isFinite(value.deviceMemory) && value.deviceMemory > 0),
+    `${label}: navigator.deviceMemory invalid`);
+  assert.ok(typeof value.language === 'string' && value.language.length > 0
+    && Array.isArray(value.languages) && value.languages[0] === value.language,
+  `${label}: navigator languages disagree`);
+  assert.ok(typeof value.timezone === 'string' && value.timezone.length > 0, `${label}: timezone unavailable`);
+  assert.match(value.canvasHash, /^[a-f0-9]{64}$/, `${label}: Canvas pixels not measured`);
+  assert.equal(typeof value.webgpuApiAvailable, 'boolean', `${label}: WebGPU API availability not measured`);
+  if (!value.display) {
+    assert.equal(value.webgl2Available, null, `${label}: Worker display incorrectly inferred`);
+    return;
+  }
+  for (const name of ['width', 'height', 'availWidth', 'availHeight', 'colorDepth', 'dpr']) {
+    assert.ok(Number.isFinite(value.display[name]) && value.display[name] > 0, `${label}: invalid display ${name}`);
+  }
+  assert.match(value.audioHash, /^[a-f0-9]{64}$/, `${label}: offline audio not rendered`);
+  assert.equal(typeof value.webgl2Available, 'boolean', `${label}: WebGL2 API availability not measured`);
+}
+
+function publicHeaders(headers) {
+  // Request cookies are checked in memory only; never publish them in run evidence.
+  const { cookie, ...safe } = headers;
+  return safe;
+}
+
+function publicIdentity(identity) {
+  // Raw hardware/display/audio/Canvas measurements remain in-memory for comparisons.
+  const { canvasHash, audioHash, hardwareConcurrency, deviceMemory, language, languages,
+    timezone, display, ...safe } = identity;
+  return { ...safe, deviceMemoryAvailable: deviceMemory !== null,
+    screenAvailable: display !== null, offlineAudioAvailable: audioHash !== null };
+}
+
 function assertHeaders(headers, label, userAgent) {
   assert.equal(headers['user-agent'], userAgent, `${label}: HTTP and JS user agents differ`);
   assert.match(headers['sec-ch-ua'] ?? '', /(?:Chromium|Google Chrome)";v="152"/,
@@ -111,12 +179,24 @@ function validatePhase(phase, result) {
   assert.equal(result.phase, phase);
   assert.ok(!result.error, `${phase}: page script failed: ${result.error}`);
   for (const realm of ['page', 'frame', 'worker']) validateIdentity(result[realm], `${phase}/${realm}`);
+  for (const realm of ['page', 'frame', 'worker']) validateSurfaces(result[realm], `${phase}/${realm}`);
   assert.equal(result.frame.userAgent, result.page.userAgent, `${phase}: iframe UA diverges`);
   assert.equal(result.worker.userAgent, result.page.userAgent, `${phase}: Worker UA diverges`);
   for (const realm of ['frame', 'worker']) {
     assert.deepEqual(result[realm].brands, result.page.brands, `${phase}/${realm}: UA-CH brands diverge`);
     assert.deepEqual(result[realm].fullVersionList, result.page.fullVersionList, `${phase}/${realm}: UA-CH full version diverges`);
   }
+  for (const realm of ['frame', 'worker']) {
+    for (const field of ['platform', 'chPlatform', 'highPlatform', 'mobile', 'hardwareConcurrency',
+      'language', 'languages', 'timezone', 'canvasHash']) {
+      assert.deepEqual(result[realm][field], result.page[field], `${phase}/${realm}: ${field} diverges`);
+    }
+    if (result[realm].deviceMemory !== null && result.page.deviceMemory !== null) {
+      assert.equal(result[realm].deviceMemory, result.page.deviceMemory, `${phase}/${realm}: deviceMemory diverges`);
+    }
+  }
+  assert.deepEqual(result.frame.display, result.page.display, `${phase}: iframe screen/DPR diverges`);
+  assert.equal(result.frame.audioHash, result.page.audioHash, `${phase}: iframe offline audio diverges`);
   for (const route of ['page', 'frame', 'worker', 'headers']) {
     const headers = requestEvidence.get(`${phase}/${route}`);
     assert.ok(headers, `${phase}/${route}: no browser request reached fixture`);
@@ -152,11 +232,40 @@ function validatePhase(phase, result) {
       assert.match(requestEvidence.get('restart/page').cookie ?? '', /chromix_smoke_cookie=persisted/, 'Cookie not sent on restarted navigation');
     }
   }
-  return { phase, realms: { page: result.page, frame: result.frame, worker: result.worker },
-    requestHeaders: Object.fromEntries(['page', 'frame', 'worker', 'headers'].map(route => [route, requestEvidence.get(`${phase}/${route}`)])),
+  return { phase,
+    realms: { page: publicIdentity(result.page), frame: publicIdentity(result.frame), worker: publicIdentity(result.worker) },
+    surfaces: {
+      crossRealm: 'hardwareConcurrency, language/languages, timezone and Canvas pixel digest agree in page/iframe/Worker; screen/DPR and offline audio agree in page/iframe',
+      deviceMemory: [result.page, result.frame, result.worker].every(realm => realm.deviceMemory !== null)
+        ? 'cross-realm match' : 'unavailable in at least one realm; compared only where exposed',
+      canvas: 'same pixels in page/iframe/Worker; uniqueness across profiles NOT VERIFIED',
+      audio: 'same offline output in page/iframe; Worker audio NOT VERIFIED; uniqueness across profiles NOT VERIFIED',
+      webgl2: 'API availability observed only; virtual/physical GPU identity and shader fidelity NOT VERIFIED',
+      webgpu: 'API availability observed only; adapter/device identity and physical GPU fidelity NOT VERIFIED',
+      webrtc: 'NOT RUN: no external ICE/STUN or route inference on hosted runner',
+      network: 'same-origin fixture HTTP UA-CH checked; external/proxy routes NOT RUN',
+    },
+    requestHeaders: Object.fromEntries(['page', 'frame', 'worker', 'headers'].map(route =>
+      [route, publicHeaders(requestEvidence.get(`${phase}/${route}`))])),
     cookiePresent: phase !== 'isolated', localStoragePresent: phase !== 'isolated',
     ...(phase === 'restart' ? { persistedAcrossRestart: true } : {}),
     ...(phase === 'isolated' ? { isolatedFromFirstProfile: true } : {}) };
+}
+
+function validateRestart(first, restarted) {
+  for (const realm of ['page', 'frame', 'worker']) {
+    for (const field of ['platform', 'chPlatform', 'highPlatform', 'brands', 'fullVersionList',
+      'hardwareConcurrency', 'language', 'languages', 'timezone', 'canvasHash']) {
+      assert.deepEqual(restarted[realm][field], first[realm][field], `restart/${realm}: ${field} changed`);
+    }
+    if (first[realm].deviceMemory !== null && restarted[realm].deviceMemory !== null) {
+      assert.equal(restarted[realm].deviceMemory, first[realm].deviceMemory,
+        `restart/${realm}: deviceMemory changed`);
+    }
+  }
+  assert.deepEqual(restarted.page.display, first.page.display, 'restart: screen/DPR changed');
+  assert.equal(restarted.page.audioHash, first.page.audioHash, 'restart: offline audio changed');
+  return 'same-profile Canvas/audio and exposed navigator/display fields remained stable after browser restart; cross-profile uniqueness NOT VERIFIED';
 }
 
 function fixtureResponse(req, res) {
@@ -288,9 +397,9 @@ async function runEdgeReference(cwd, fixtureOrigin, chromium) {
     }
     report.reference = {
       browser: 'installed Microsoft Edge', cdpBrowserVersion: version.product,
-      pageUserAgent: observed.page.userAgent, workerHeaders: referenceWorkerHeaders,
-      pageHeaders: requestEvidence.get('baseline/page'),
-      workerIdentity: observed.worker,
+      pageUserAgent: observed.page.userAgent, workerHeaders: publicHeaders(referenceWorkerHeaders),
+      pageHeaders: publicHeaders(requestEvidence.get('baseline/page')),
+      workerIdentity: publicIdentity(observed.worker),
     };
     console.log(`Edge reference ${version.product}: ${JSON.stringify({
       workerUserAgent: referenceWorkerHeaders['user-agent'],
@@ -319,6 +428,7 @@ async function runCompatibility(executable, cwd, fixtureOrigin) {
       await page.goto(`${fixtureOrigin}/?phase=${phase}`, { waitUntil: 'domcontentloaded' });
       const observed = await waitForReport(phase);
       const phaseEvidence = validatePhase(phase, observed);
+      if (phase === 'restart') phaseEvidence.surfaces.restart = validateRestart(reports.get('first'), observed);
       phaseEvidence.cdpBrowserVersion = version.product;
       report.phases.push(phaseEvidence);
     } finally {
@@ -437,6 +547,7 @@ async function run() {
     assert.equal(running?.browserDistribution, 'chromix-152', `${phase}: wrong browser distribution`);
     const observed = await waitForReport(phase);
     const phaseEvidence = validatePhase(phase, observed);
+    if (phase === 'restart') phaseEvidence.surfaces.restart = validateRestart(reports.get('first'), observed);
     const view = await api(`/sessions/${encodeURIComponent(session.sessionId)}/live-view`);
     assert.equal(view.sessionId, session.sessionId);
     assert.equal(view.url, url);
@@ -529,7 +640,7 @@ async function run() {
 try {
   await run();
 } catch (error) {
-  report.error = String(error);
+  report.error = token ? String(error).replaceAll(token, '[REDACTED]') : String(error);
   console.error(report.error);
   process.exitCode = 1;
 } finally {
@@ -538,7 +649,7 @@ try {
       try { await api(`/profiles/${encodeURIComponent(id)}/stop`, 'POST'); }
       catch (error) {
         report.cleanupErrors ??= [];
-        report.cleanupErrors.push(`${id}: ${String(error)}`);
+        report.cleanupErrors.push(`${id}: ${token ? String(error).replaceAll(token, '[REDACTED]') : String(error)}`);
         process.exitCode = 1;
         report.result = 'failed';
       }
