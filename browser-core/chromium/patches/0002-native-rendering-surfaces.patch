@@ -15,36 +15,43 @@ index 854e972..28f0e38 100644
    renderer_cmd->CopySwitchesFrom(browser_cmd, kAbsProfileSwitches);
  
    // Propagate WebNN switches needed by backends that run in the renderer.
-diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
-index 05fa33e..d5f43f1 100644
---- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
-+++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
-@@ -4,6 +4,10 @@
+diff --git a/third_party/blink/common/device_memory/approximated_device_memory.cc b/third_party/blink/common/device_memory/approximated_device_memory.cc
+--- a/third_party/blink/common/device_memory/approximated_device_memory.cc
++++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
+@@ -4,8 +4,13 @@
  
- #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
  
 +#include <initializer_list>
++#include <string>
 +
-+#include "third_party/blink/renderer/platform/abs_profile.h"
-+
- #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
- #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
- #include "third_party/blink/renderer/core/dom/document.h"
-@@ -12,6 +16,14 @@
- namespace blink {
- 
- float NavigatorDeviceMemory::deviceMemory() const {
-+  double configured;
-+  if (base::StringToDouble(abs_profile::Get("abs-device-memory"), &configured)) {
-+    // Use the supported profile buckets exactly; never round malformed input.
-+    for (double bucket : {0.25, 0.5, 1.0, 2.0, 4.0, 8.0}) {
-+      if (configured == bucket)
-+        return static_cast<float>(bucket);
+ #include "base/byte_size.h"
+ #include "base/check_op.h"
++#include "base/command_line.h"
+ #include "base/feature_list.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/system/sys_info.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -19,5 +24,19 @@ void ApproximatedDeviceMemory::Initialize() {
+   if (approximated_device_memory_gb_ > 0.0)
+     return;
++  // Both browser-generated Device-Memory client hints and Window/Worker
++  // navigator.deviceMemory read this common value. Keep the browser process
++  // and every renderer on the same immutable, explicitly configured bucket.
++  const std::string requested = base::CommandLine::ForCurrentProcess()
++                                    ->GetSwitchValueASCII("abs-device-memory");
++  double configured = 0.0;
++  if (base::StringToDouble(requested, &configured)) {
++    for (float bucket : {0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f}) {
++      if (configured == bucket) {
++        approximated_device_memory_gb_ = bucket;
++        return;
++      }
 +    }
 +  }
-   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
- }
- 
+   DCHECK_EQ(0, physical_memory_mb_);
+   physical_memory_mb_ = ::base::SysInfo::AmountOfTotalPhysicalMemory().InMiB();
+   CalculateAndSetApproximatedDeviceMemory();
 diff --git a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc b/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
 index adb616d..2e767ff 100644
 --- a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc

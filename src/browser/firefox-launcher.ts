@@ -1,4 +1,4 @@
-import type { BrowserStorageState } from '../profile/types.js';
+import type { BrowserStorageState, BrowserDistribution } from '../profile/types.js';
 
 /**
  * Narrow Playwright Firefox adapter. Keeping launch behind this interface
@@ -51,6 +51,7 @@ export interface FirefoxPageLike {
 
 export interface FirefoxLaunchOptions {
   headless: boolean;
+  browserDistribution?: BrowserDistribution;
   /** False when the embedding service owns graceful signal shutdown. */
   handleProcessSignals?: boolean | undefined;
   viewport?: { width: number; height: number } | undefined;
@@ -85,7 +86,7 @@ export interface FirefoxLauncherLike {
 import { join } from 'node:path';
 import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { atomicWriteFile } from '../storage/atomic-file.js';
-import { managedBrowserIdentity } from '../fingerprint/runtime-identity.js';
+import { distributionBrowserIdentity } from '../fingerprint/runtime-identity.js';
 import type { UnifiedFingerprintProfile } from '../fingerprint/types.js';
 import { resolveVerifiedFirefoxCore } from './custom-firefox-runtime.js';
 
@@ -199,13 +200,19 @@ export async function launchPersistentFirefox(
 export async function assertManagedRuntimeVersion(
   context: FirefoxContextLike,
   engine: 'firefox' | 'chromium',
-): Promise<void> {
+  distribution?: BrowserDistribution,
+): Promise<string> {
   const actualVersion = context.browser?.()?.version();
-  const expectedVersion = managedBrowserIdentity(engine).fullVersion;
+  const expectedVersion = distributionBrowserIdentity(engine, distribution).fullVersion;
+  if (distribution === 'chromix-152' && !actualVersion) {
+    await context.close().catch(() => undefined);
+    throw new Error('BROWSER_RUNTIME_VERSION_UNAVAILABLE: Chromix requires observed browser version');
+  }
   if (actualVersion !== undefined && actualVersion !== expectedVersion) {
     await context.close().catch(() => undefined);
     throw new Error(`BROWSER_RUNTIME_VERSION_MISMATCH: expected ${engine} ${expectedVersion}, received ${actualVersion}`);
   }
+  return actualVersion ?? expectedVersion;
 }
 
 export const defaultFirefoxLauncher: FirefoxLauncherLike = {

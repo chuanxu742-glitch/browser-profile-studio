@@ -33,7 +33,7 @@ import type {
 import {
   defaultFirefoxLauncher,
 } from './firefox-launcher.js';
-import { defaultChromiumLauncher, usesNativeChromiumProfile } from './chromium-launcher.js';
+import { defaultChromiumLauncher, observedChromiumVersion, usesNativeChromiumProfile } from './chromium-launcher.js';
 import type {
   FirefoxContextLike,
   FirefoxLaunchOptions,
@@ -46,9 +46,9 @@ import {
   browserVersionFromUserAgent,
   buildStealthInjectionScript,
   generateFingerprint,
-  managedBrowserIdentity,
   type FingerprintConfig,
   type UnifiedFingerprintProfile,
+  discoverNativeChromiumGpu,
 } from '../fingerprint/index.js';
 import {
   buildEnvironmentDiagnostics,
@@ -58,6 +58,8 @@ import {
 } from './environment-diagnostics.js';
 import { ENVIRONMENT_PROBE } from './environment-probe.js';
 import type { CookieRecord, BrowserStorageState } from '../profile/types.js';
+import type { BrowserDistribution } from '../profile/types.js';
+import { distributionBrowserIdentity } from '../fingerprint/runtime-identity.js';
 
 export type BrowserSessionState =
   | 'STOPPED'
@@ -150,6 +152,7 @@ export interface BrowserSessionOptions {
   headless?: boolean;
   /** Browser engine used by the managed/control-plane session. */
   engine?: 'firefox' | 'chromium';
+  browserDistribution?: BrowserDistribution;
   /** Optional existing Chromium DevTools endpoint for controlled attachment. */
   cdpEndpoint?: string;
   runtimeMode?: 'headless' | 'headed_local';
@@ -223,6 +226,9 @@ export interface BrowserSessionStatus {
   sessionId: string;
   state: BrowserSessionState;
   engine?: 'firefox' | 'chromium';
+  browserDistribution?: BrowserDistribution;
+  /** Observed browser process version; absent until successful launch. */
+  browserVersion?: string;
   headless: boolean;
   pageGeneration: number;
   queueDepth: number;
@@ -465,6 +471,7 @@ export class BrowserSession {
   private readonly profileName: string;
   private readonly persistentProfile: boolean;
   private readonly engine: 'firefox' | 'chromium';
+  private readonly browserDistribution: BrowserDistribution | undefined;
   private readonly artifactsRoot: string;
   private readonly artifactsDirectory: string;
   private readonly maxQueue: number;
@@ -477,6 +484,8 @@ export class BrowserSession {
   private context: FirefoxContextLike | undefined;
   private page: BrowserPageLike | undefined;
   private _state: BrowserSessionState = 'STOPPED';
+  private launchedBrowserVersion?: string;
+  private resolvedFingerprintProfile: UnifiedFingerprintProfile | undefined;
   private pageGeneration = 0;
   private queueDepth = 0;
   private queueTail: Promise<void> = Promise.resolve();
@@ -515,11 +524,20 @@ export class BrowserSession {
     this.profileRoot = resolve(options.profileRoot ?? join(tmpdir(), 'compliant-firefox-profiles'));
     this.profileName = sanitizeProfileName(options.profileName);
     this.engine = options.engine ?? 'firefox';
+    this.browserDistribution = options.browserDistribution;
+    if (this.browserDistribution !== undefined
+      && (this.engine !== 'chromium' || !['playwright-stock', 'project-native-151', 'chromix-152'].includes(this.browserDistribution))) {
+      throw new BrowserSessionError('INVALID_ARGUMENT', 'Invalid Chromium browser distribution');
+    }
     const namedProfile = typeof options.profileName === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(options.profileName.trim());
     this.persistentProfile = options.persistentProfile === true && namedProfile;
     this.profileDirectory = this.persistentProfile
-      ? join(this.profileRoot, this.profileName)
-      : join(this.profileRoot, `${this.profileName}-${this.sessionId}`);
+      ? this.browserDistribution === 'chromix-152'
+        ? join(this.profileRoot, this.profileName, 'chromix-152-browser')
+        : join(this.profileRoot, this.profileName)
+      : this.browserDistribution === 'chromix-152'
+        ? join(this.profileRoot, '.distributions', 'chromix-152', `${this.profileName}-${this.sessionId}`)
+        : join(this.profileRoot, `${this.profileName}-${this.sessionId}`);
     this.artifactsRoot = resolve(options.artifactsRoot ?? join(tmpdir(), 'compliant-firefox-artifacts'));
     this.artifactsDirectory = resolve(this.artifactsRoot, this.sessionId);
     this.currentHeadless = options.runtimeMode === 'headed_local'
@@ -625,7 +643,7 @@ export class BrowserSession {
    */
   public async environmentDiagnostics(): Promise<EnvironmentDiagnostics> {
     return this.enqueue('browser_environment_diagnostics', async () => {
-      const expected = expectedEnvironment(this.resolveFingerprintProfile());
+      const expected = expectedEnvironment(await this.resolveFingerprintProfile());
       let observed: EnvironmentSurfaceSnapshot | undefined;
       if (this.page?.evaluate) {
         try {
@@ -660,6 +678,9 @@ export class BrowserSession {
       sessionId: this.sessionId,
       state: this._state,
       engine: this.engine,
+      ...(this.browserDistribution ? { browserDistribution: this.browserDistribution } : {}),
+      ...(this.launchedBrowserVersion && this.context && this._state !== 'STOPPED' && this._state !== 'ERROR'
+        ? { browserVersion: this.launchedBrowserVersion } : {}),
       headless: this.headless,
       pageGeneration: this.pageGeneration,
       queueDepth: this.queueDepth,
@@ -1350,14 +1371,25 @@ export class BrowserSession {
     return this.status().challenge;
   }
 
-  private resolveFingerprintProfile(): UnifiedFingerprintProfile | undefined {
+  private async resolveFingerprintProfile(): Promise<UnifiedFingerprintProfile | undefined> {
     if (!this.options.fingerprint) return undefined;
+    if (this.resolvedFingerprintProfile) return this.resolvedFingerprintProfile;
+    if (this.persistentProfile && this.options.fingerprint === true && this.engine === 'chromium'
+      && (process.env.ABS_REQUIRE_NATIVE_CHROMIUM === '1' || this.browserDistribution === 'chromix-152')) {
+      throw new BrowserSessionError('INVALID_STATE',
+        'NATIVE_GPU_PROFILE_PERSISTENCE_REQUIRED: start saved native profiles through SessionManager');
+    }
+    const nativeGpu = this.options.fingerprint === true && this.engine === 'chromium'
+      && (process.env.ABS_REQUIRE_NATIVE_CHROMIUM === '1' || this.browserDistribution === 'chromix-152')
+      ? await discoverNativeChromiumGpu(this.currentHeadless, undefined, this.browserDistribution) : undefined;
     const profile = (typeof this.options.fingerprint === 'object'
       ? this.options.fingerprint
       : generateFingerprint({
           seed: this.options.fingerprintSeed ?? this.options.seed,
           engine: this.engine,
+          browserDistribution: this.browserDistribution,
           countryCode: this.options.countryCode,
+          ...(nativeGpu ? { os: 'windows', gpu: nativeGpu } : {}),
         })) as UnifiedFingerprintProfile;
 
     if (typeof this.options.fingerprint === 'object' && profile.engine !== this.engine) {
@@ -1366,8 +1398,16 @@ export class BrowserSession {
         `Fingerprint engine ${profile.engine} does not match session engine ${this.engine}`,
       );
     }
+    if (this.browserDistribution === 'chromix-152' && (this.options.userAgent
+      || this.options.cdpEndpoint || profile.browserDistribution !== this.browserDistribution
+      || profile.os !== 'windows')) {
+      throw new BrowserSessionError('INVALID_ARGUMENT', 'Chromix requires a Windows native fingerprint and cannot attach CDP or override User-Agent');
+    }
+    if (profile.browserDistribution !== undefined && profile.browserDistribution !== this.browserDistribution) {
+      throw new BrowserSessionError('INVALID_ARGUMENT', 'Fingerprint distribution does not match session distribution');
+    }
 
-    const managedIdentity = managedBrowserIdentity(this.engine);
+    const managedIdentity = distributionBrowserIdentity(this.engine, this.browserDistribution);
     if (profile.browserVersion !== managedIdentity.fullVersion) {
       throw new BrowserSessionError(
         'INVALID_ARGUMENT',
@@ -1389,7 +1429,7 @@ export class BrowserSession {
       : this.options.locale ? [this.options.locale] : [...profile.geo.languages];
     const timezoneId = this.options.timezoneId ?? profile.geo.timezoneId;
     const geolocation = this.options.geolocation ?? profile.geo.geolocation;
-    return {
+    this.resolvedFingerprintProfile = {
       ...profile,
       userAgent,
       appVersion: userAgent.replace(/^Mozilla\//, ''),
@@ -1407,6 +1447,7 @@ export class BrowserSession {
         },
       },
     };
+    return this.resolvedFingerprintProfile;
   }
 
   private async launchContext(headless: boolean): Promise<void> {
@@ -1416,7 +1457,10 @@ export class BrowserSession {
     if (this.engine === 'chromium' && this.options.cdpEndpoint && this.options.managedExtensions?.length) {
       throw new BrowserSessionError('INVALID_STATE', 'Managed extensions cannot be injected into an already-running CDP browser');
     }
-    const fpConfig = this.resolveFingerprintProfile();
+    const fpConfig = await this.resolveFingerprintProfile();
+    if (this.browserDistribution === 'chromix-152' && !fpConfig) {
+      throw new BrowserSessionError('INVALID_ARGUMENT', 'Chromix requires a Windows Chromium 152 fingerprint');
+    }
     if (this.options.userAgent && !fpConfig) {
       throw new BrowserSessionError(
         'INVALID_STATE',
@@ -1435,6 +1479,7 @@ export class BrowserSession {
       : undefined);
     const launchOptions: FirefoxLaunchOptions = {
       headless,
+      ...(this.browserDistribution ? { browserDistribution: this.browserDistribution } : {}),
       viewport: this.options.viewport ?? (fpConfig ? fpConfig.viewport : undefined),
       ...(this.options.proxy ? { proxy: this.options.proxy } : {}),
       timezoneId: this.options.timezoneId ?? fpConfig?.geo.timezoneId,
@@ -1442,7 +1487,7 @@ export class BrowserSession {
       geolocation: this.options.geolocation ?? fpConfig?.geo.geolocation,
       permissions: this.options.permissions ?? ['geolocation'],
       ...(extraHTTPHeaders ? { extraHTTPHeaders } : {}),
-      userAgent: this.options.userAgent ?? fpConfig?.userAgent,
+      userAgent: this.browserDistribution === 'chromix-152' ? undefined : this.options.userAgent ?? fpConfig?.userAgent,
       ...(initScript ? { initScript } : {}),
       ...(this.options.managedExtensions !== undefined ? { managedExtensions: this.options.managedExtensions } : {}),
       ...(fpConfig !== undefined ? { fingerprintProfile: fpConfig, managedFingerprintInitScript: true } : {}),
@@ -1456,6 +1501,8 @@ export class BrowserSession {
       const launcher = this.engine === 'chromium' ? defaultChromiumLauncher : this.launcher;
       this.context = await launcher.launchPersistentContext(this.profileDirectory, launchOptions);
     }
+    const actualVersion = observedChromiumVersion(this.context) ?? this.context.browser?.()?.version();
+    if (actualVersion !== undefined) this.launchedBrowserVersion = actualVersion;
     if (fpConfig && usesNativeChromiumProfile(this.context)) {
       initScript = buildStealthInjectionScript(fpConfig, { nativeChromium: true });
     }
