@@ -1,3 +1,4 @@
+import type { BrowserDistribution } from '../profile/types.js';
 export type WebRTCMode = 'disable' | 'block_leak' | 'replace' | 'direct';
 export type BrowserEngineType = 'firefox' | 'chromium';
 export type OSPlatform = 'windows' | 'macos' | 'linux';
@@ -87,11 +88,15 @@ export interface GeoFingerprintConfig {
   };
 }
 
+
 export interface UnifiedFingerprintProfile {
   readonly engine: BrowserEngineType;
+  readonly browserDistribution?: BrowserDistribution;
   /** Version of the managed browser core this profile was generated for. */
   readonly browserVersion: string;
   readonly os: OSPlatform;
+  /** Chromium UA-CH platformVersion supplied by this persona (not inferred at launch). */
+  readonly platformVersion?: string;
   readonly userAgent: string;
   readonly appVersion: string;
   readonly platform: string;
@@ -107,6 +112,15 @@ export interface UnifiedFingerprintProfile {
   readonly canvas: CanvasNoiseConfig;
   readonly audio: AudioNoiseConfig;
   readonly webrtc: WebRTCMode;
+  /** Network identity is an expectation to verify externally, never a JS-level IP override. */
+  readonly network?: {
+    readonly expectedPublicIp?: string;
+    readonly expectedWebRtcIp?: string;
+  };
+  /** Absent means native font enumeration is unrestricted. */
+  readonly fontPolicy?: { readonly allowlist: readonly string[] };
+  /** Native synthetic device test mode is opt-in only. */
+  readonly syntheticDeviceTests?: boolean;
   readonly plugins: readonly PluginItemConfig[];
   readonly stealth: {
     readonly removeWebdriver: boolean;

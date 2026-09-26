@@ -47,6 +47,8 @@ export interface BrowserStorageState {
 }
 
 export type CookieFormat = 'json' | 'netscape';
+export type BrowserDistribution = 'playwright-stock' | 'project-native-151' | 'chromix-152';
+
 
 export interface ProfileFingerprintSettings {
   /** Stable per-profile seed used for all deterministic fingerprint surfaces. */
@@ -54,6 +56,11 @@ export interface ProfileFingerprintSettings {
   readonly os?: OSPlatform;
   readonly hardwareConcurrency?: number;
   readonly deviceMemory?: number;
+  /** Persisted physical GPU identity. Absent until first verified native launch. */
+  readonly gpu?: {
+    readonly unmaskedVendor: string;
+    readonly unmaskedRenderer: string;
+  };
   readonly screen?: {
     readonly width: number;
     readonly height: number;
@@ -74,6 +81,7 @@ export interface ProfileMetadata {
   readonly proxy?: ProxyConfig;
   readonly geo?: GeoAlignmentOptions;
   readonly engine?: 'firefox' | 'chromium';
+  readonly browserDistribution?: BrowserDistribution;
   readonly userAgent?: string;
   readonly customHeaders?: Record<string, string>;
   readonly fingerprint?: ProfileFingerprintSettings;
@@ -91,6 +99,7 @@ export interface ProfileCreateOptions {
   readonly proxy?: ProxyConfig;
   readonly geo?: GeoAlignmentOptions;
   readonly engine?: 'firefox' | 'chromium';
+  readonly browserDistribution?: BrowserDistribution;
   readonly userAgent?: string;
   readonly customHeaders?: Record<string, string>;
   readonly fingerprint?: Partial<ProfileFingerprintSettings>;
@@ -109,6 +118,7 @@ export interface ProfileSummary {
   readonly proxyServer?: string;
   readonly country?: string;
   readonly engine: 'firefox' | 'chromium';
+  readonly browserDistribution?: BrowserDistribution;
   readonly tags?: readonly string[];
   readonly hasTwoFactorSecret: boolean;
   readonly proxyId?: string;
