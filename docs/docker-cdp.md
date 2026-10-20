@@ -93,4 +93,4 @@ docker save -o antigravity-browser-cdp-0.1.0.tar antigravity-browser-cdp:0.1.0
 
 后续可靠性优化后：单元测试增至 234 项，MCP 35 项、默认集成 26 项及扩展后的 CDP 回归通过；类型检查、生产构建通过。`scripts/package-cdp.ps1` 可生成新版源码 ZIP 与 SHA-256 文件；已有同名输出会拒绝覆盖。具体比较见 [project-vs-chromix.md](./project-vs-chromix.md)。
 
-Docker 故障处理记录：为绕开旧的 `sailor-ingest.sock`，原 Docker 临时运行目录被保留为 `<LOCAL_PATH>
+Docker 故障处理记录：为绕开旧的 `sailor-ingest.sock`，原 Docker 临时运行目录被保留为 `<本机路径已脱敏>`。后续 Docker 又因 `docker-secrets-engine/engine.sock` 无法访问退出，该 socket 清理被自动审批拒绝，未继续修改。没有重置 Docker 或删除镜像/数据卷。
